@@ -13,6 +13,7 @@
 
 import { runExportJob, type ExportJobKind } from '../utils/exportJobs';
 import type { SceneGraph } from '../types/scene';
+import { collectTransferables } from './transferables';
 
 type Incoming = {
   type: 'RUN';
@@ -22,11 +23,11 @@ type Incoming = {
   options: Record<string, unknown>;
 };
 
+const scope = self as unknown as DedicatedWorkerGlobalScope;
 let scene: SceneGraph = { nodes: [] };
+let queue: Promise<void> = Promise.resolve();
 
-self.onmessage = async (evt: MessageEvent<Incoming>) => {
-  const msg = evt.data;
-  if (msg.type !== 'RUN') return;
+async function handleRun(msg: Incoming): Promise<void> {
   if (msg.scene) scene = msg.scene;
   try {
     let last = -1;
@@ -35,10 +36,16 @@ self.onmessage = async (evt: MessageEvent<Incoming>) => {
       const pct = Math.floor(fraction * 100);
       if (pct === last) return;
       last = pct;
-      self.postMessage({ type: 'PROGRESS', id: msg.id, fraction });
+      scope.postMessage({ type: 'PROGRESS', id: msg.id, fraction });
     });
-    self.postMessage({ type: 'DONE', id: msg.id, result });
+    scope.postMessage({ type: 'DONE', id: msg.id, result }, collectTransferables(result));
   } catch (e) {
-    self.postMessage({ type: 'FAILED', id: msg.id, message: (e as Error)?.message ?? String(e) });
+    scope.postMessage({ type: 'FAILED', id: msg.id, message: (e as Error)?.message ?? String(e) });
   }
+}
+
+self.onmessage = (evt: MessageEvent<Incoming>) => {
+  const msg = evt.data;
+  if (msg.type !== 'RUN') return;
+  queue = queue.then(() => handleRun(msg));
 };

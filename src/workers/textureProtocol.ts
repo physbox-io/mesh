@@ -15,6 +15,14 @@ export interface TextureRequest {
   splits?: FaceSplit[];
 }
 
+export interface PackedTexturedSurface {
+  vertices: Float64Array;
+  faces: Uint32Array;
+  paint?: { res: number[]; idx: Uint32Array; rgba: Uint8Array };
+  regions: TexturedSurface['regions'];
+  warnings: string[];
+}
+
 export type TextureResponse =
-  | { type: 'TEXTURE_DONE'; id: number; surface: TexturedSurface }
+  | { type: 'TEXTURE_DONE'; id: number; surface?: TexturedSurface; packed?: PackedTexturedSurface }
   | { type: 'TEXTURE_FAILED'; id: number; error: string };

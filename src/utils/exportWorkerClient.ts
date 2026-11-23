@@ -88,7 +88,7 @@ export class ExportWorkerClient {
       // is replaced, not kept: one that never loaded drops every later message
       // unanswered, and the dialog would sit busy for good. Most often it never
       // loaded because the tab outlived a deploy, and the error then says so.
-      worker.onerror = () => {
+      const handleBroken = (fallbackMessage: string) => {
         const settles = [...this.pending.values(), ...(this.waiting ? [this.waiting.settle] : [])];
         this.pending.clear();
         this.waiting = null;
@@ -99,10 +99,12 @@ export class ExportWorkerClient {
         // The next request starts a fresh one; starting it here would loop
         // load-fail-respawn for as long as the tab is out of date.
         this.respawn = true;
-        void workerStoppedError('The export worker stopped.').then((failed) => {
+        void workerStoppedError(fallbackMessage).then((failed) => {
           for (const settle of settles) settle.reject(failed);
         });
       };
+      worker.onerror = () => handleBroken('The export worker stopped.');
+      worker.onmessageerror = () => handleBroken('The export worker could not read the worker response.');
     } catch {
       this.worker = null;
     }
@@ -133,19 +135,33 @@ export class ExportWorkerClient {
     // Decided when it goes, not when it was asked for: a job that waited may
     // follow one that already sent its scene.
     const fresh = job.scene !== this.sceneSent;
+    const prevScene = this.sceneSent;
     this.sceneSent = job.scene;
     this.pending.set(job.id, job.settle);
     this.running = job.id;
-    this.worker!.postMessage({ type: 'RUN', id: job.id, kind: job.kind, options: job.options, ...(fresh ? { scene: job.scene } : {}) });
+    try {
+      this.worker!.postMessage({ type: 'RUN', id: job.id, kind: job.kind, options: job.options, ...(fresh ? { scene: job.scene } : {}) });
+    } catch (e) {
+      this.pending.delete(job.id);
+      this.running = null;
+      this.sceneSent = prevScene;
+      job.settle.reject(e instanceof Error ? e : new Error(String(e)));
+      const next = this.waiting;
+      this.waiting = null;
+      if (next) this.send(next);
+    }
   }
 
   dispose() {
+    const settles = [...this.pending.values(), ...(this.waiting ? [this.waiting.settle] : [])];
     this.worker?.terminate();
     this.worker = null;
     this.pending.clear();
     this.waiting = null;
     this.running = null;
     this.sceneSent = null;
+    const err = new SupersededError();
+    for (const settle of settles) settle.reject(err);
   }
 }
 

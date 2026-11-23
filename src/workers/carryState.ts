@@ -40,21 +40,25 @@ export function captureState(
 ): CarriedState | null {
   if (!mdl || !dat) return null;
   try {
+    const jntType = mdl.jnt_type;
+    const jntQposadr = mdl.jnt_qposadr;
+    const jntDofadr = mdl.jnt_dofadr;
+    const ctrlView = dat.ctrl;
     const joints: CarriedState['joints'] = {};
     for (const name in jointIdOf) {
       const id = jointIdOf[name];
-      joints[name] = { type: mdl.jnt_type[id], qposadr: mdl.jnt_qposadr[id], dofadr: mdl.jnt_dofadr[id] };
+      joints[name] = { type: jntType[id], qposadr: jntQposadr[id], dofadr: jntDofadr[id] };
     }
     const actuators: Record<string, number> = {};
     for (const name in actuatorIdOf) {
       const id = actuatorIdOf[name];
-      if (id >= 0 && id < mdl.nu) actuators[name] = dat.ctrl[id];
+      if (id >= 0 && id < mdl.nu) actuators[name] = ctrlView[id];
     }
     return {
       nq: mdl.nq, nv: mdl.nv, nu: mdl.nu, time: dat.time,
-      qpos: Float64Array.from(dat.qpos),
-      qvel: Float64Array.from(dat.qvel),
-      ctrl: Float64Array.from(dat.ctrl),
+      qpos: new Float64Array(dat.qpos),
+      qvel: new Float64Array(dat.qvel),
+      ctrl: new Float64Array(ctrlView),
       joints,
       actuators,
     };
@@ -78,19 +82,24 @@ export function copyJointsByName(
   jointIdOf: Record<string, number>,
 ): Set<string> {
   const placed = new Set<string>();
+  const jntType = newModel.jnt_type;
+  const jntQposadr = newModel.jnt_qposadr;
+  const jntDofadr = newModel.jnt_dofadr;
+  const newQpos = newData.qpos;
+  const newQvel = newData.qvel;
   for (const name in jointIdOf) {
     const from = carried.joints[name];
     if (!from) continue;
     const id = jointIdOf[name];
-    const type = newModel.jnt_type[id];
+    const type = jntType[id];
     if (type !== from.type) continue; // same name, different joint: not the same state
     const nq = JOINT_NQ[type] ?? 1;
     const nv = JOINT_NV[type] ?? 1;
-    const qTo = newModel.jnt_qposadr[id], vTo = newModel.jnt_dofadr[id];
+    const qTo = jntQposadr[id], vTo = jntDofadr[id];
     if (qTo + nq > newModel.nq || vTo + nv > newModel.nv) continue;
     if (from.qposadr + nq > carried.qpos.length || from.dofadr + nv > carried.qvel.length) continue;
-    for (let i = 0; i < nq; i++) newData.qpos[qTo + i] = carried.qpos[from.qposadr + i];
-    for (let i = 0; i < nv; i++) newData.qvel[vTo + i] = carried.qvel[from.dofadr + i];
+    for (let i = 0; i < nq; i++) newQpos[qTo + i] = carried.qpos[from.qposadr + i];
+    for (let i = 0; i < nv; i++) newQvel[vTo + i] = carried.qvel[from.dofadr + i];
     placed.add(name);
   }
   return placed;
@@ -110,6 +119,11 @@ export function seedNewBodies(
   placed: Set<string>,
 ): boolean {
   let seededNew = false;
+  const jntType = newModel.jnt_type;
+  const jntQposadr = newModel.jnt_qposadr;
+  const jntDofadr = newModel.jnt_dofadr;
+  const newQpos = newData.qpos;
+  const newQvel = newData.qvel;
   const seedNew = (list: SceneNode[]) => {
     if (!list) return;
     for (const node of list) {
@@ -124,7 +138,7 @@ export function seedNewBodies(
       const own = node.joints?.[0];
       if (from && parent && parent.type === 0 && own?.type === 'free' && !placed.has(own.name)) {
         const id = jointIdOf[own.name];
-        if (id !== undefined && newModel.jnt_type[id] === 0) {
+        if (id !== undefined && jntType[id] === 0) {
           const qa = parent.qposadr, va = parent.dofadr;
           const { qpos, qvel } = rebaseShard(
             { pos: node.pos, quat: node.quat ?? [1, 0, 0, 0], initialVelocity: own.initialVelocity },
@@ -136,21 +150,25 @@ export function seedNewBodies(
               angvelLocal: carried.qvel.subarray(va + 3, va + 6),
             },
           );
-          const qTo = newModel.jnt_qposadr[id], vTo = newModel.jnt_dofadr[id];
-          for (let i = 0; i < 7; i++) newData.qpos[qTo + i] = qpos[i];
-          for (let i = 0; i < 6; i++) newData.qvel[vTo + i] = qvel[i];
+          const qTo = jntQposadr[id], vTo = jntDofadr[id];
+          for (let i = 0; i < 7; i++) newQpos[qTo + i] = qpos[i];
+          for (let i = 0; i < 6; i++) newQvel[vTo + i] = qvel[i];
           placed.add(own.name);
           seededNew = true;
         }
       }
-      node.joints?.forEach((j) => {
-        if (!j.initialVelocity || placed.has(j.name)) return;
-        const id = jointIdOf[j.name];
-        if (id === undefined) return;
-        const dofAdr = newModel.jnt_dofadr[id];
-        for (let i = 0; i < j.initialVelocity!.length; i++) newData.qvel[dofAdr + i] = j.initialVelocity![i];
-        seededNew = true;
-      });
+      if (node.joints) {
+        for (let k = 0; k < node.joints.length; k++) {
+          const j = node.joints[k];
+          if (!j.initialVelocity || placed.has(j.name)) continue;
+          const id = jointIdOf[j.name];
+          if (id === undefined) continue;
+          const dofAdr = jntDofadr[id];
+          const initVel = j.initialVelocity;
+          for (let i = 0; i < initVel.length; i++) newQvel[dofAdr + i] = initVel[i];
+          seededNew = true;
+        }
+      }
       seedNew(node.children);
     }
   };
@@ -166,11 +184,12 @@ export function copyCarriedActuators(
   actuatorIdOf: Record<string, number>,
 ): Set<string> {
   const placed = new Set<string>();
+  const newCtrl = newData.ctrl;
   for (const name in actuatorIdOf) {
     if (!Object.prototype.hasOwnProperty.call(carried.actuators, name)) continue;
     const id = actuatorIdOf[name];
     if (id >= 0 && id < newModel.nu) {
-      newData.ctrl[id] = carried.actuators[name];
+      newCtrl[id] = carried.actuators[name];
       placed.add(name);
     }
   }
@@ -214,11 +233,12 @@ export function applyEditedCtrl(
   if (!before) return [];
   const now = documentCtrlValues(nodes);
   const written: string[] = [];
+  const newCtrl = newData.ctrl;
   for (const name in now) {
     if (before[name] === now[name]) continue;
     const id = actuatorIdOf[name];
     if (id === undefined || id < 0 || id >= newModel.nu) continue;
-    newData.ctrl[id] = now[name];
+    newCtrl[id] = now[name];
     written.push(name);
   }
   return written;

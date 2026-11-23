@@ -15,50 +15,116 @@ import { noteWorkerStopped } from './staleBuild';
  */
 const CUT_TIMEOUT_MS = 60_000;
 
-type Settle = { resolve: (result: CutResult) => void; timer: ReturnType<typeof setTimeout>; mesh: SculptMesh };
+type QueuedCut = {
+  id: number;
+  mesh: SculptMesh;
+  spec: PrismSpec;
+  options: CutOptions;
+  resolve: (result: CutResult) => void;
+};
 
 let worker: Worker | null = null;
 let seq = 0;
-const pending = new Map<number, Settle>();
+let active: (QueuedCut & { timer: ReturnType<typeof setTimeout> }) | null = null;
+const queued: QueuedCut[] = [];
 
-function failAll(error: string) {
-  for (const [, s] of pending) { clearTimeout(s.timer); s.resolve({ ok: false, error }); }
-  pending.clear();
+function dropWorker(w: Worker | null): void {
+  if (w) {
+    w.onmessage = null;
+    w.onerror = null;
+    w.onmessageerror = null;
+    w.terminate();
+  }
+  if (worker === w) worker = null;
+}
+
+function failAll(error: string): void {
+  if (active) {
+    clearTimeout(active.timer);
+    const done = active;
+    active = null;
+    done.resolve({ ok: false, error });
+  }
+  while (queued.length > 0) queued.shift()!.resolve({ ok: false, error });
 }
 
 function ensureWorker(): Worker | null {
   if (typeof Worker === 'undefined') return null;
   if (worker) return worker;
   try {
-    worker = new Worker(new URL('../workers/sculptCutWorker.ts', import.meta.url), { type: 'module' });
-    worker.onmessage = (evt: MessageEvent<SculptCutResponse>) => {
+    const w = new Worker(new URL('../workers/sculptCutWorker.ts', import.meta.url), { type: 'module' });
+    w.onmessage = (evt: MessageEvent<SculptCutResponse>) => {
+      if (worker !== w) return;
       const msg = evt.data;
-      const settle = pending.get(msg.id);
-      if (!settle) return;
-      pending.delete(msg.id);
-      clearTimeout(settle.timer);
+      if (!active || active.id !== msg.id) return;
+      const done = active;
+      active = null;
+      clearTimeout(done.timer);
       if (msg.type === 'CUT_REFUSED') {
-        settle.resolve({ ok: false, error: msg.error });
-        return;
+        done.resolve({ ok: false, error: msg.error });
+      } else {
+        const mesh = createSculptMesh(msg.positions, msg.faces);
+        mesh.topologyRevision = done.mesh.topologyRevision + 1;
+        mesh.revision = done.mesh.revision + 1;
+        done.resolve({
+          ok: true, mesh, pieces: msg.pieces,
+          facesBefore: done.mesh.faceCount, facesAfter: mesh.faceCount,
+        });
       }
-      const mesh = createSculptMesh(msg.positions, msg.faces);
-      mesh.topologyRevision = settle.mesh.topologyRevision + 1;
-      mesh.revision = settle.mesh.revision + 1;
-      settle.resolve({
-        ok: true, mesh, pieces: msg.pieces,
-        facesBefore: settle.mesh.faceCount, facesAfter: mesh.faceCount,
-      });
+      pump();
     };
-    worker.onerror = () => {
+    const handleBroken = (error: string) => {
+      if (worker !== w) return;
       noteWorkerStopped();
-      failAll('The scissors stopped working. Try the cut again.');
-      worker?.terminate();
-      worker = null;
+      dropWorker(w);
+      failAll(error);
     };
+    w.onerror = () => handleBroken('The scissors stopped working. Try the cut again.');
+    w.onmessageerror = () => handleBroken('The scissors could not read the worker response. Try the cut again.');
+    worker = w;
   } catch {
     worker = null;
   }
   return worker;
+}
+
+function pump(): void {
+  while (!active && queued.length > 0) {
+    const next = queued.shift()!;
+    const w = ensureWorker();
+    if (!w) {
+      import('./sculptCut')
+        .then(async ({ cutSculptWith, loadManifold }) => next.resolve(cutSculptWith(await loadManifold(), next.mesh, next.spec, next.options)))
+        .catch((err) => next.resolve({ ok: false, error: err instanceof Error ? err.message : String(err) }))
+        .finally(pump);
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (active?.id !== next.id) return;
+      const wedged = active;
+      active = null;
+      dropWorker(w);
+      wedged.resolve({ ok: false, error: 'The cut took too long and was abandoned.' });
+      pump();
+    }, CUT_TIMEOUT_MS);
+    active = { ...next, timer };
+    try {
+      const req: SculptCutRequest = {
+        type: 'CUT', id: next.id, spec: next.spec, options: next.options,
+        positions: next.mesh.positions.slice(0, next.mesh.vertexCount * 3),
+        faces: next.mesh.faces.slice(0, next.mesh.faceCount * 3),
+      };
+      const transfer: Transferable[] = [];
+      if (req.positions.byteLength > 0) transfer.push(req.positions.buffer);
+      if (req.faces.byteLength > 0) transfer.push(req.faces.buffer);
+      w.postMessage(req, transfer);
+      return;
+    } catch (err) {
+      clearTimeout(timer);
+      active = null;
+      next.resolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
 }
 
 /** Start the worker and its wasm loading before the first cut is asked for. */
@@ -76,23 +142,12 @@ export async function cutSculptOffThread(
   spec: PrismSpec,
   options: CutOptions = {},
 ): Promise<CutResult> {
-  const w = ensureWorker();
-  if (!w) {
+  if (typeof Worker === 'undefined') {
     const { cutSculptWith, loadManifold } = await import('./sculptCut');
     return cutSculptWith(await loadManifold(), mesh, spec, options);
   }
   return new Promise<CutResult>((resolve) => {
-    const id = ++seq;
-    const timer = setTimeout(() => {
-      pending.delete(id);
-      resolve({ ok: false, error: 'The cut took too long and was abandoned.' });
-    }, CUT_TIMEOUT_MS);
-    pending.set(id, { resolve, timer, mesh });
-    const req: SculptCutRequest = {
-      type: 'CUT', id, spec, options,
-      positions: mesh.positions.slice(0, mesh.vertexCount * 3),
-      faces: mesh.faces.slice(0, mesh.faceCount * 3),
-    };
-    w.postMessage(req, [req.positions.buffer, req.faces.buffer]);
+    queued.push({ id: ++seq, mesh, spec, options, resolve });
+    pump();
   });
 }

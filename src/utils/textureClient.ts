@@ -14,38 +14,140 @@ import {
   texturedSurfaceKey,
   texturedSurfaceOf,
 } from './geomSurface';
-import type { TextureRequest, TextureResponse } from '../workers/textureProtocol';
+import type { PackedTexturedSurface, TextureRequest, TextureResponse } from '../workers/textureProtocol';
 import { noteWorkerStopped } from './staleBuild';
+
+const TEXTURE_TIMEOUT_MS = 60_000;
+
+interface QueuedTexture {
+  id: number;
+  key: string;
+  geom: SceneGeom;
+  halfLen?: number;
+  positions: Float64Array;
+  faces: Uint32Array;
+  textures: NonNullable<SceneGeom['textures']>;
+  splits: SceneGeom['faceSplits'];
+  resolve: (surface: TexturedSurface | null) => void;
+}
 
 let worker: Worker | null = null;
 let seq = 0;
-const pending = new Map<number, (surface: TexturedSurface | null) => void>();
+let active: (QueuedTexture & { timer: ReturnType<typeof setTimeout> }) | null = null;
+const queued: QueuedTexture[] = [];
 /** One build per key at a time: the viewport asks on every render. */
 const inFlight = new Map<string, Promise<TexturedSurface | null>>();
+
+function unpackSurface(packed: PackedTexturedSurface): TexturedSurface {
+  return {
+    vertices: Array.from(packed.vertices),
+    faces: Array.from(packed.faces),
+    ...(packed.paint
+      ? {
+          paint: {
+            res: packed.paint.res,
+            idx: Array.from(packed.paint.idx),
+            rgba: Array.from(packed.paint.rgba),
+          },
+        }
+      : {}),
+    regions: packed.regions,
+    warnings: packed.warnings,
+  };
+}
+
+function dropWorker(w: Worker | null): void {
+  if (w) {
+    w.onmessage = null;
+    w.onerror = null;
+    w.onmessageerror = null;
+    w.terminate();
+  }
+  if (worker === w) worker = null;
+}
+
+function failAll(): void {
+  if (active) {
+    clearTimeout(active.timer);
+    const done = active;
+    active = null;
+    done.resolve(null);
+  }
+  while (queued.length > 0) queued.shift()!.resolve(null);
+}
 
 function ensureWorker(): Worker | null {
   if (typeof Worker === 'undefined') return null;
   if (worker) return worker;
   try {
-    worker = new Worker(new URL('../workers/textureWorker.ts', import.meta.url), { type: 'module' });
-    worker.onmessage = (evt: MessageEvent<TextureResponse>) => {
+    const w = new Worker(new URL('../workers/textureWorker.ts', import.meta.url), { type: 'module' });
+    w.onmessage = (evt: MessageEvent<TextureResponse>) => {
+      if (worker !== w) return;
       const msg = evt.data;
-      const settle = pending.get(msg.id);
-      if (!settle) return;
-      pending.delete(msg.id);
-      settle(msg.type === 'TEXTURE_DONE' ? msg.surface : null);
+      if (!active || active.id !== msg.id) return;
+      const done = active;
+      active = null;
+      clearTimeout(done.timer);
+      const surface =
+        msg.type === 'TEXTURE_DONE'
+          ? (msg.packed ? unpackSurface(msg.packed) : (msg.surface ?? null))
+          : null;
+      if (surface) storeTexturedSurface(done.key, surface);
+      done.resolve(surface);
+      pump();
     };
-    worker.onerror = () => {
+    const handleBroken = () => {
+      if (worker !== w) return;
       noteWorkerStopped();
-      for (const settle of pending.values()) settle(null);
-      pending.clear();
-      worker?.terminate();
-      worker = null;
+      dropWorker(w);
+      failAll();
     };
+    w.onerror = handleBroken;
+    w.onmessageerror = handleBroken;
+    worker = w;
   } catch {
     worker = null;
   }
   return worker;
+}
+
+function pump(): void {
+  while (!active && queued.length > 0) {
+    const next = queued.shift()!;
+    const w = ensureWorker();
+    if (!w) {
+      next.resolve(texturedSurfaceOf(next.geom, next.halfLen));
+      continue;
+    }
+    const timer = setTimeout(() => {
+      if (active?.id !== next.id) return;
+      const wedged = active;
+      active = null;
+      dropWorker(w);
+      wedged.resolve(null);
+      pump();
+    }, TEXTURE_TIMEOUT_MS);
+    active = { ...next, timer };
+    try {
+      const req: TextureRequest = {
+        type: 'TEXTURE',
+        id: next.id,
+        textures: next.textures,
+        splits: next.splits,
+        positions: next.positions,
+        faces: next.faces,
+      };
+      const transfer: Transferable[] = [];
+      if (req.positions.byteLength > 0) transfer.push(req.positions.buffer);
+      if (req.faces.byteLength > 0) transfer.push(req.faces.buffer);
+      w.postMessage(req, transfer);
+      return;
+    } catch {
+      clearTimeout(timer);
+      active = null;
+      next.resolve(null);
+    }
+  }
 }
 
 /**
@@ -61,25 +163,25 @@ export function requestTexturedSurface(geom: SceneGeom, halfLen?: number): Promi
   const running = inFlight.get(key);
   if (running) return running;
 
-  const w = ensureWorker();
   const base = geomLocalSurface(geom, halfLen);
   let job: Promise<TexturedSurface | null>;
-  if (!w || !base) {
+  if (typeof Worker === 'undefined' || !base) {
     job = Promise.resolve(texturedSurfaceOf(geom, halfLen));
   } else {
     const textures = geom.textures;
     job = new Promise<TexturedSurface | null>((resolve) => {
-      const id = ++seq;
-      pending.set(id, (surface) => {
-        if (surface) storeTexturedSurface(key, surface);
-        resolve(surface);
-      });
-      const req: TextureRequest = {
-        type: 'TEXTURE', id, textures, splits: geom.faceSplits,
+      queued.push({
+        id: ++seq,
+        key,
+        geom,
+        halfLen,
         positions: Float64Array.from(base.positions),
         faces: Uint32Array.from(base.faces),
-      };
-      w.postMessage(req, [req.positions.buffer, req.faces.buffer]);
+        textures,
+        splits: geom.faceSplits,
+        resolve,
+      });
+      pump();
     });
   }
   inFlight.set(key, job);

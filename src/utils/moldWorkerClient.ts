@@ -74,10 +74,29 @@ export interface MoldPreview {
 
 type Settle = { resolve: (v: never) => void; reject: (e: Error) => void };
 
+/** A queued GENERATE replaced by a newer GENERATE before the worker started it. */
+export class MoldSupersededError extends Error {
+  constructor() {
+    super('Replaced by a newer mold request before it ran.');
+    this.name = 'Superseded';
+  }
+}
+
+type MoldQueuedJob = {
+  id: number;
+  type: string;
+  scene?: SceneGraph;
+  message: Record<string, unknown>;
+  transfer: Transferable[];
+  settle: Settle;
+};
+
 export class MoldWorkerClient {
   private worker: Worker | null = null;
   private seq = 0;
   private pending = new Map<number, Settle>();
+  private running: number | null = null;
+  private queue: MoldQueuedJob[] = [];
   /** The scene the worker already holds, so a slider drag sends options alone. */
   private sceneSent: SceneGraph | null = null;
   private lastResult: ReturnType<typeof generateMoldMeshes> | null = null;
@@ -105,34 +124,82 @@ export class MoldWorkerClient {
           settle.resolve({ summary: msg.summary, bottom: msg.bottom, top: msg.top, liner: msg.liner ?? null } as never);
         } else if (msg.type === 'STL' || msg.type === 'THREEMF') settle.resolve(msg.bytes as never);
         else if (msg.type === 'CAST' || msg.type === 'CHAIN') settle.resolve(msg.result as never);
+        if (msg.id === this.running) {
+          this.running = null;
+          this.pump();
+        }
       };
       // A worker that dies leaves every caller awaiting forever otherwise. It
       // is replaced, not kept: one that never loaded drops every later message
       // unanswered. Most often it never loaded because the tab outlived a
       // deploy, and the error then says so.
-      worker.onerror = () => {
-        const settles = [...this.pending.values()];
+      const handleBroken = (fallbackMessage: string) => {
+        const settles = [...this.pending.values(), ...this.queue.map((j) => j.settle)];
         this.pending.clear();
+        this.queue = [];
+        this.running = null;
         this.sceneSent = null;
         worker.terminate();
         if (this.worker !== worker) return;
-        const stopped = workerStoppedError('The mold worker stopped.');
+        const stopped = workerStoppedError(fallbackMessage);
         this.stopped = stopped;
         void stopped.then((failed) => {
           for (const settle of settles) settle.reject(failed);
         });
       };
+      worker.onerror = () => handleBroken('The mold worker stopped.');
+      worker.onmessageerror = () => handleBroken('The mold worker could not read the worker response.');
     } catch {
       this.worker = null;
     }
   }
 
+  private pump(): void {
+    while (this.running === null && this.queue.length > 0 && this.worker && !this.stopped) {
+      const job = this.queue.shift()!;
+      this.pending.set(job.id, job.settle);
+      this.running = job.id;
+      const prevScene = this.sceneSent;
+      const payload: Record<string, unknown> = { ...job.message, id: job.id };
+      if (job.type === 'GENERATE' && job.scene !== undefined) {
+        if (job.scene !== this.sceneSent) {
+          payload.scene = job.scene;
+          this.sceneSent = job.scene;
+        }
+      }
+      try {
+        this.worker.postMessage(payload, job.transfer);
+        return;
+      } catch (e) {
+        this.pending.delete(job.id);
+        this.running = null;
+        this.sceneSent = prevScene;
+        job.settle.reject(e instanceof Error ? e : new Error(String(e)));
+      }
+    }
+  }
+
   /** Numbers a request and hands back the promise its answer will settle. */
-  private send<T>(message: Record<string, unknown>, transfer: Transferable[] = []): Promise<T> {
+  private send<T>(message: Record<string, unknown>, transfer: Transferable[] = [], sceneForGenerate?: SceneGraph): Promise<T> {
     const id = ++this.seq;
+    const type = String(message.type ?? '');
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (v: never) => void, reject });
-      this.worker!.postMessage({ ...message, id }, transfer);
+      // Latest-wins coalescing for queued GENERATE requests: if the tail of the
+      // queue is an unstarted GENERATE (no dependent STL/THREEMF/CAST behind it),
+      // supersede it so rapid slider drags never pile up stale mold builds.
+      if (type === 'GENERATE' && this.queue.length > 0 && this.queue[this.queue.length - 1].type === 'GENERATE') {
+        const stale = this.queue.pop()!;
+        stale.settle.reject(new MoldSupersededError());
+      }
+      this.queue.push({
+        id,
+        type,
+        scene: sceneForGenerate,
+        message,
+        transfer,
+        settle: { resolve: resolve as (v: never) => void, reject },
+      });
+      this.pump();
     });
   }
 
@@ -160,9 +227,7 @@ export class MoldWorkerClient {
       };
     }
 
-    const fresh = scene !== this.sceneSent;
-    this.sceneSent = scene;
-    return this.send<MoldPreview>({ type: 'GENERATE', options, ...(fresh ? { scene } : {}) });
+    return this.send<MoldPreview>({ type: 'GENERATE', options }, [], scene);
   }
 
   /** The plate as binary STL, encoded from whatever was generated last. */
@@ -236,11 +301,17 @@ export class MoldWorkerClient {
   }
 
   dispose() {
+    const settles = [...this.pending.values(), ...this.queue.map((j) => j.settle)];
     this.worker?.terminate();
     this.worker = null;
     this.pending.clear();
+    this.queue = [];
+    this.running = null;
     this.sceneSent = null;
+    this.lastResult = null;
     this.stopped = null;
+    const err = new MoldSupersededError();
+    for (const settle of settles) settle.reject(err);
   }
 }
 

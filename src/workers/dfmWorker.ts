@@ -12,6 +12,7 @@ import { analyseDfm } from '../utils/dfm';
 import { structuralWeakSpots } from '../utils/printAnalysis';
 import type { SceneGraph } from '../types/scene';
 import type { DfmRequest, DfmResponse } from './dfmProtocol';
+import { collectTransferables } from './transferables';
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 const post = (msg: DfmResponse, transfer: Transferable[] = []) => scope.postMessage(msg, transfer);
@@ -26,7 +27,7 @@ self.onmessage = (evt: MessageEvent<DfmRequest>) => {
   try {
     if (msg.type === 'DFM') {
       const report = analyseDfm(scene, msg.process, msg.bench);
-      post({ type: 'DFM_DONE', id: msg.id, report }, [report.tris.buffer as ArrayBuffer, report.heat.buffer as ArrayBuffer]);
+      post({ type: 'DFM_DONE', id: msg.id, report }, collectTransferables(report));
     } else {
       post({ type: 'WEAK_SPOTS_DONE', id: msg.id, weakSpots: structuralWeakSpots(scene) });
     }

@@ -14,6 +14,7 @@
 import { BufferAttribute, BufferGeometry } from 'three';
 import { MeshBVH, type MeshBVHOptions } from 'three-mesh-bvh';
 import type { MeshBvhRequest, MeshBvhResponse } from './meshBvhProtocol';
+import { collectTransferables } from './transferables';
 
 const post = (msg: MeshBvhResponse, transfer: Transferable[] = []) =>
   (self as unknown as DedicatedWorkerGlobalScope).postMessage(msg, transfer);
@@ -28,17 +29,12 @@ self.onmessage = (evt: MessageEvent<MeshBvhRequest>) => {
 
     const bvh = new MeshBVH(geometry, options as MeshBVHOptions);
     const serialized = MeshBVH.serialize(bvh, { cloneBuffers: false });
-    const transfer: Transferable[] = [position.buffer as ArrayBuffer, ...serialized.roots];
-    // The index is the one sent in, unless the tree had to make one.
-    if (serialized.index && serialized.index.buffer !== index?.buffer) transfer.push(serialized.index.buffer as ArrayBuffer);
-    else if (index) transfer.push(index.buffer as ArrayBuffer);
-    const indirect = (serialized as { indirectBuffer?: Uint32Array | null }).indirectBuffer;
-    if (indirect) transfer.push(indirect.buffer as ArrayBuffer);
-    post({ id, ok: true, serialized, position }, transfer);
+    const reply: MeshBvhResponse = { id, ok: true, serialized, position };
+    post(reply, collectTransferables({ serialized, position }));
   } catch (e) {
-    const transfer: Transferable[] = [];
-    if (position?.buffer) transfer.push(position.buffer as ArrayBuffer);
-    if (index?.buffer && index.buffer !== position?.buffer) transfer.push(index.buffer as ArrayBuffer);
-    post({ id, ok: false, error: e instanceof Error ? e.message : String(e), position, index }, transfer);
+    post(
+      { id, ok: false, error: e instanceof Error ? e.message : String(e), position, index },
+      collectTransferables({ position, index }),
+    );
   }
 };

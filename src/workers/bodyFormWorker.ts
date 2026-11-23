@@ -8,13 +8,16 @@
 
 import { bodyFormGeoms } from '../utils/cloth/bodyForm';
 import type { BodyFormRequest, BodyFormResponse } from './bodyFormProtocol';
+import { collectTransferables } from './transferables';
 
-const post = (msg: BodyFormResponse) => (self as unknown as DedicatedWorkerGlobalScope).postMessage(msg);
+const post = (msg: BodyFormResponse, transfer: Transferable[] = []) =>
+  (self as unknown as DedicatedWorkerGlobalScope).postMessage(msg, transfer);
 
 self.onmessage = (evt: MessageEvent<BodyFormRequest>) => {
   const msg = evt.data;
   try {
-    post({ type: 'BUILT', id: msg.id, geoms: bodyFormGeoms(msg.measurements, msg.prefix) });
+    const geoms = bodyFormGeoms(msg.measurements, msg.prefix);
+    post({ type: 'BUILT', id: msg.id, geoms }, collectTransferables(geoms));
   } catch (err) {
     post({ type: 'FAILED', id: msg.id, error: err instanceof Error ? err.message : String(err) });
   }

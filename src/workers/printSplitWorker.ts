@@ -19,6 +19,7 @@ import { loadManifold } from '../utils/sculptCut';
 import { checkSplit, cutAlongPlane, splitForPrint, type SplitSection } from '../utils/printSplit';
 import { runStage, type MujocoLike } from '../utils/printAssembly';
 import type { PrintSplitRequest, PrintSplitResponse } from './printSplitProtocol';
+import { collectTransferables } from './transferables';
 
 const post = (msg: PrintSplitResponse, transfer: Transferable[] = []) =>
   (self as unknown as DedicatedWorkerGlobalScope).postMessage(msg, transfer);
@@ -92,14 +93,7 @@ function loadMujoco(): Promise<MujocoLike> {
   return mujoco;
 }
 
-const buffersOf = (sections: SplitSection[]): ArrayBuffer[] => Array.from(
-  new Set(
-    sections.flatMap((s) => [
-      s.positions.buffer, s.faces.buffer, s.plainPositions.buffer, s.plainFaces.buffer,
-      ...s.convexPieces.flatMap((p) => [p.positions.buffer, p.faces.buffer]),
-    ] as ArrayBuffer[]),
-  ),
-);
+const buffersOf = (sections: SplitSection[]): ArrayBuffer[] => collectTransferables(sections);
 
 async function handleMessage(msg: PrintSplitRequest): Promise<void> {
   if (msg.type === 'WARM') {

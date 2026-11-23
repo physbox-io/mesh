@@ -17,10 +17,23 @@ import type { ContactHistory, HistoryEntry, HistoryFrame, HistoryQuery, JointHis
  * filter used to cut `bodies` alone, so asking for one payload still returned
  * every joint and every contact in the scene — most of the reply.
  */
-export const jointsOfBodies = (joints: Record<string, JointHistory>, ids: Set<string>): Record<string, JointHistory> =>
-  Object.fromEntries(Object.entries(joints).filter(([, j]) => j.body !== undefined && ids.has(j.body)));
-export const contactsOfBodies = (contacts: ContactHistory[], ids: Set<string>): ContactHistory[] =>
-  contacts.filter((c) => (c.body1 !== undefined && ids.has(c.body1)) || (c.body2 !== undefined && ids.has(c.body2)));
+export const jointsOfBodies = (joints: Record<string, JointHistory>, ids: Set<string>): Record<string, JointHistory> => {
+  const out: Record<string, JointHistory> = {};
+  for (const key in joints) {
+    if (!Object.prototype.hasOwnProperty.call(joints, key)) continue;
+    const j = joints[key];
+    if (j.body !== undefined && ids.has(j.body)) out[key] = j;
+  }
+  return out;
+};
+export const contactsOfBodies = (contacts: ContactHistory[], ids: Set<string>): ContactHistory[] => {
+  const out: ContactHistory[] = [];
+  for (let i = 0; i < contacts.length; i++) {
+    const c = contacts[i];
+    if ((c.body1 !== undefined && ids.has(c.body1)) || (c.body2 !== undefined && ids.has(c.body2))) out.push(c);
+  }
+  return out;
+};
 
 export class HistoryRing {
   private buf: (HistoryEntry | undefined)[];
@@ -50,7 +63,7 @@ export class HistoryRing {
   }
 
   clear(): void {
-    this.buf = new Array(this.capacity);
+    this.buf.fill(undefined);
     this.head = 0;
     this.count = 0;
   }
@@ -94,9 +107,15 @@ export class HistoryRing {
       if (!bodyFilter && !include) return e;
       const f: HistoryFrame = { time: e.time };
       if (!include || include.has('bodies')) {
-        f.bodies = bodyFilter
-          ? Object.fromEntries(Object.entries(e.bodies).filter(([k]) => bodyFilter.has(k)))
-          : e.bodies;
+        if (bodyFilter) {
+          const filtered: HistoryEntry['bodies'] = {};
+          for (const id of bodyFilter) {
+            if (Object.prototype.hasOwnProperty.call(e.bodies, id)) filtered[id] = e.bodies[id];
+          }
+          f.bodies = filtered;
+        } else {
+          f.bodies = e.bodies;
+        }
       }
       if (!include || include.has('joints')) f.joints = bodyFilter ? jointsOfBodies(e.joints, bodyFilter) : e.joints;
       if (!include || include.has('contacts')) f.contacts = bodyFilter ? contactsOfBodies(e.contacts, bodyFilter) : e.contacts;

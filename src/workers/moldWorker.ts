@@ -30,6 +30,7 @@ import { deviationMm, masterSoup, metalChain, siliconeChain } from '../utils/cas
 import type { CastOptions } from '../utils/castPatternExporter';
 import type { PourBoxOptions } from '../utils/siliconeMold';
 import type { CastMaterialId } from '../utils/castMaterials';
+import { collectTransferables } from './transferables';
 
 type Incoming =
   | { type: 'GENERATE'; id: number; scene?: SceneGraph; options: Partial<MoldOptions> }
@@ -40,13 +41,13 @@ type Incoming =
   | { type: 'CHAIN_METAL'; id: number; scene: SceneGraph; options: Partial<CastOptions> }
   | { type: 'CAST_NODE'; id: number; node: SceneNode; options?: MoldCastSimulationOptions };
 
+const scope = self as unknown as DedicatedWorkerGlobalScope;
 let scene: SceneGraph = { nodes: [] };
 /** The last mold generated, kept so an STL can be encoded without redoing it. */
 let last: ReturnType<typeof generateMoldMeshes> | null = null;
+let queue: Promise<void> = Promise.resolve();
 
-self.onmessage = async (evt: MessageEvent<Incoming>) => {
-  const msg = evt.data;
-
+async function handleMessage(msg: Incoming): Promise<void> {
   if (msg.type === 'GENERATE') {
     if (msg.scene) scene = msg.scene;
     try {
@@ -55,18 +56,15 @@ self.onmessage = async (evt: MessageEvent<Incoming>) => {
       last = result;
 
       const { bottom, top, liner } = moldPreviewBuffers(result);
-      const transfer = [bottom.positions.buffer, bottom.normals.buffer];
-      if (top) transfer.push(top.positions.buffer, top.normals.buffer);
-      if (liner) transfer.push(liner.bottom.positions.buffer, liner.bottom.normals.buffer);
-      if (liner?.top) transfer.push(liner.top.positions.buffer, liner.top.normals.buffer);
+      const transfer = collectTransferables({ bottom, top, liner });
 
-      self.postMessage(
+      scope.postMessage(
         { type: 'GENERATED', id: msg.id, summary: moldSummary(result), bottom, top, liner },
         transfer
       );
     } catch (e) {
       last = null;
-      self.postMessage({ type: 'FAILED', id: msg.id, message: (e as Error)?.message ?? String(e) });
+      scope.postMessage({ type: 'FAILED', id: msg.id, message: (e as Error)?.message ?? String(e) });
     }
     return;
   }
@@ -76,24 +74,24 @@ self.onmessage = async (evt: MessageEvent<Incoming>) => {
     // mold however many times the download button is pressed.
     const bytes = last ? last.binarySTL : new Uint8Array(84);
     const copy = new Uint8Array(bytes); // transferred away, so the cache keeps its own
-    self.postMessage({ type: 'STL', id: msg.id, bytes: copy }, [copy.buffer]);
+    scope.postMessage({ type: 'STL', id: msg.id, bytes: copy }, [copy.buffer]);
     return;
   }
 
   if (msg.type === 'THREEMF') {
     const bytes = last?.threeMf;
     if (!bytes) {
-      self.postMessage({ type: 'FAILED', id: msg.id, message: 'This mold has no liner, so there is no two-material 3MF.' });
+      scope.postMessage({ type: 'FAILED', id: msg.id, message: 'This mold has no liner, so there is no two-material 3MF.' });
       return;
     }
     const copy = new Uint8Array(bytes);
-    self.postMessage({ type: 'THREEMF', id: msg.id, bytes: copy }, [copy.buffer]);
+    scope.postMessage({ type: 'THREEMF', id: msg.id, bytes: copy }, [copy.buffer]);
     return;
   }
 
   if (msg.type === 'CAST') {
     if (!last) {
-      self.postMessage({ type: 'FAILED', id: msg.id, message: 'No mold generated yet.' });
+      scope.postMessage({ type: 'FAILED', id: msg.id, message: 'No mold generated yet.' });
       return;
     }
     try {
@@ -104,17 +102,22 @@ self.onmessage = async (evt: MessageEvent<Incoming>) => {
       if (msg.measure && castResult.success) {
         const measured = msg.options?.trimChannels ? castResult : await simulateCastFromMoldResult(last, { ...msg.options, trimChannels: true });
         if (measured.success) {
-          const soup = new Float64Array(measured.mesh.faces.length * 3);
-          measured.mesh.faces.forEach((v, i) => soup.set(measured.mesh.positions.subarray(v * 3, v * 3 + 3), i * 3));
+          const faces = measured.mesh.faces;
+          const pos = measured.mesh.positions;
+          const soup = new Float64Array(faces.length * 3);
+          for (let i = 0; i < faces.length; i++) {
+            const o = faces[i] * 3;
+            const d = i * 3;
+            soup[d] = pos[o];
+            soup[d + 1] = pos[o + 1];
+            soup[d + 2] = pos[o + 2];
+          }
           castResult.deviation = deviationMm(soup, masterSoup(await loadManifold(), scene)) ?? undefined;
         }
       }
-      const transfer: Transferable[] = [];
-      if (castResult.mesh.positions.byteLength > 0) transfer.push(castResult.mesh.positions.buffer);
-      if (castResult.mesh.faces.byteLength > 0) transfer.push(castResult.mesh.faces.buffer);
-      self.postMessage({ type: 'CAST', id: msg.id, result: castResult }, transfer);
+      scope.postMessage({ type: 'CAST', id: msg.id, result: castResult }, collectTransferables(castResult));
     } catch (e) {
-      self.postMessage({ type: 'FAILED', id: msg.id, message: (e as Error)?.message ?? String(e) });
+      scope.postMessage({ type: 'FAILED', id: msg.id, message: (e as Error)?.message ?? String(e) });
     }
     return;
   }
@@ -124,9 +127,9 @@ self.onmessage = async (evt: MessageEvent<Incoming>) => {
       const result = msg.type === 'CHAIN_SILICONE'
         ? await siliconeChain(msg.scene, msg.ids, msg.boxOptions, msg.material)
         : await metalChain(msg.scene, msg.options);
-      self.postMessage({ type: 'CHAIN', id: msg.id, result });
+      scope.postMessage({ type: 'CHAIN', id: msg.id, result }, collectTransferables(result));
     } catch (e) {
-      self.postMessage({ type: 'FAILED', id: msg.id, message: (e as Error)?.message ?? String(e) });
+      scope.postMessage({ type: 'FAILED', id: msg.id, message: (e as Error)?.message ?? String(e) });
     }
     return;
   }
@@ -134,12 +137,16 @@ self.onmessage = async (evt: MessageEvent<Incoming>) => {
   if (msg.type === 'CAST_NODE') {
     try {
       const castResult = await simulateCastFromMoldNode(msg.node, msg.options);
-      const transfer: Transferable[] = [];
-      if (castResult.mesh.positions.byteLength > 0) transfer.push(castResult.mesh.positions.buffer);
-      if (castResult.mesh.faces.byteLength > 0) transfer.push(castResult.mesh.faces.buffer);
-      self.postMessage({ type: 'CAST', id: msg.id, result: castResult }, transfer);
+      scope.postMessage({ type: 'CAST', id: msg.id, result: castResult }, collectTransferables(castResult));
     } catch (e) {
-      self.postMessage({ type: 'FAILED', id: msg.id, message: (e as Error)?.message ?? String(e) });
+      scope.postMessage({ type: 'FAILED', id: msg.id, message: (e as Error)?.message ?? String(e) });
     }
   }
+}
+
+// Serialize all incoming messages so concurrent arrivals during async WASM
+// loads or cast simulations never interleave and corrupt cached `scene`/`last`.
+self.onmessage = (evt: MessageEvent<Incoming>) => {
+  const msg = evt.data;
+  queue = queue.then(() => handleMessage(msg));
 };

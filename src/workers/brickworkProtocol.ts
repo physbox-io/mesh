@@ -9,7 +9,7 @@ export type BrickworkRequestOptions = Partial<BrickworkOptions> & { placement?: 
 export interface BrickworkOutcome { nodes: SceneNode[]; result: BrickworkResult }
 
 export type BrickworkRequest =
-  | { type: 'LAY'; id: number; scene: SceneGraph; bodyId: string | null; options: BrickworkRequestOptions }
+  | { type: 'LAY'; id: number; scene?: SceneGraph; bodyId: string | null; options: BrickworkRequestOptions }
   /** A brickwork body's bricks, from its source (SceneNode.brickwork). */
   | { type: 'LAY_SOURCE'; id: number; source: BrickworkSource; prefix: string };
 

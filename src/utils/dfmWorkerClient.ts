@@ -388,12 +388,14 @@ let cachedLivePose: { source: SceneGraph; sig: string; posed: SceneGraph } | nul
 
 function poseSignature(poses: Map<string, THREE.Matrix4>): string {
   const keys = [...poses.keys()].sort();
-  const parts: string[] = [];
-  for (const id of keys) {
+  let out = '';
+  for (let k = 0; k < keys.length; k++) {
+    const id = keys[k];
     const e = poses.get(id)!.elements;
-    parts.push(`${id}:${e.map((v) => Math.round(v * 1e5)).join(',')}`);
+    if (k > 0) out += '|';
+    out += `${id}:${Math.round(e[0] * 1e5)},${Math.round(e[1] * 1e5)},${Math.round(e[2] * 1e5)},${Math.round(e[3] * 1e5)},${Math.round(e[4] * 1e5)},${Math.round(e[5] * 1e5)},${Math.round(e[6] * 1e5)},${Math.round(e[7] * 1e5)},${Math.round(e[8] * 1e5)},${Math.round(e[9] * 1e5)},${Math.round(e[10] * 1e5)},${Math.round(e[11] * 1e5)},${Math.round(e[12] * 1e5)},${Math.round(e[13] * 1e5)},${Math.round(e[14] * 1e5)},${Math.round(e[15] * 1e5)}`;
   }
-  return parts.join('|');
+  return out;
 }
 
 export function applyLivePosesToScene(scene: SceneGraph, poses: Map<string, THREE.Matrix4>): SceneGraph {

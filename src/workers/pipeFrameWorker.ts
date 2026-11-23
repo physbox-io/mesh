@@ -11,24 +11,37 @@
 import { loadManifold } from '../utils/sculptCut';
 import { frameBodyInScene } from '../utils/pipeSkeleton';
 import { buildAllCustomHubNodes } from '../utils/tubeAndWireExporter';
+import type { SceneGraph } from '../types/scene';
 import type { PipeFrameRequest, PipeFrameResponse } from './pipeFrameProtocol';
+import { collectTransferables } from './transferables';
 
-const post = (msg: PipeFrameResponse) => (self as unknown as DedicatedWorkerGlobalScope).postMessage(msg);
+const post = (msg: PipeFrameResponse, transfer: Transferable[] = []) =>
+  (self as unknown as DedicatedWorkerGlobalScope).postMessage(msg, transfer);
 
-self.onmessage = async (evt: MessageEvent<PipeFrameRequest>) => {
-  const msg = evt.data;
+let cachedScene: SceneGraph = { nodes: [] };
+let queue: Promise<void> = Promise.resolve();
+
+async function handleMessage(msg: PipeFrameRequest): Promise<void> {
   if (msg.type === 'WARM') {
-    void loadManifold().catch(() => undefined);
+    await loadManifold().catch(() => undefined);
     return;
   }
   try {
     if (msg.type === 'FRAME') {
+      if (msg.scene) cachedScene = msg.scene;
       const wasm = await loadManifold();
-      post({ type: 'FRAME_DONE', id: msg.id, outcome: frameBodyInScene(msg.scene, msg.bodyId, { ...msg.options, wasm }) });
+      const outcome = frameBodyInScene(cachedScene, msg.bodyId, { ...msg.options, wasm });
+      post({ type: 'FRAME_DONE', id: msg.id, outcome }, collectTransferables(outcome));
       return;
     }
-    post({ type: 'HUBS_DONE', id: msg.id, nodes: buildAllCustomHubNodes(msg.breakdown) });
+    const nodes = buildAllCustomHubNodes(msg.breakdown);
+    post({ type: 'HUBS_DONE', id: msg.id, nodes }, collectTransferables(nodes));
   } catch (err) {
     post({ type: 'FAILED', id: msg.id, error: err instanceof Error ? err.message : String(err) });
   }
+}
+
+self.onmessage = (evt: MessageEvent<PipeFrameRequest>) => {
+  const msg = evt.data;
+  queue = queue.then(() => handleMessage(msg));
 };

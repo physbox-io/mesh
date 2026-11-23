@@ -12,16 +12,18 @@
 import { createSculptMesh } from '../utils/sculptMesh';
 import { cutSculptWith, loadManifold } from '../utils/sculptCut';
 import type { SculptCutRequest, SculptCutResponse } from './sculptCutProtocol';
+import { collectTransferables, isStandaloneView } from './transferables';
 
 const post = (msg: SculptCutResponse, transfer: Transferable[] = []) =>
   (self as unknown as DedicatedWorkerGlobalScope).postMessage(msg, transfer);
 
-self.onmessage = async (evt: MessageEvent<SculptCutRequest>) => {
-  const msg = evt.data;
+let queue: Promise<void> = Promise.resolve();
+
+async function handleMessage(msg: SculptCutRequest): Promise<void> {
   if (msg.type === 'WARM') {
     // The wasm is the slow part of a first cut; fetch it while the lasso is
     // still being drawn.
-    void loadManifold().catch(() => undefined);
+    await loadManifold().catch(() => undefined);
     return;
   }
   try {
@@ -31,10 +33,23 @@ self.onmessage = async (evt: MessageEvent<SculptCutRequest>) => {
       post({ type: 'CUT_REFUSED', id: msg.id, error: result.error });
       return;
     }
-    const positions = result.mesh.positions.slice(0, result.mesh.vertexCount * 3);
-    const faces = result.mesh.faces.slice(0, result.mesh.faceCount * 3);
-    post({ type: 'CUT_DONE', id: msg.id, positions, faces, pieces: result.pieces }, [positions.buffer, faces.buffer]);
+    const posLen = result.mesh.vertexCount * 3;
+    const faceLen = result.mesh.faceCount * 3;
+    const positions =
+      result.mesh.positions.length === posLen && isStandaloneView(result.mesh.positions)
+        ? result.mesh.positions
+        : result.mesh.positions.slice(0, posLen);
+    const faces =
+      result.mesh.faces.length === faceLen && isStandaloneView(result.mesh.faces)
+        ? result.mesh.faces
+        : result.mesh.faces.slice(0, faceLen);
+    post({ type: 'CUT_DONE', id: msg.id, positions, faces, pieces: result.pieces }, collectTransferables([positions, faces]));
   } catch (err) {
     post({ type: 'CUT_REFUSED', id: msg.id, error: err instanceof Error ? err.message : String(err) });
   }
+}
+
+self.onmessage = (evt: MessageEvent<SculptCutRequest>) => {
+  const msg = evt.data;
+  queue = queue.then(() => handleMessage(msg));
 };

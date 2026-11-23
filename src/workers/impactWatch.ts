@@ -235,34 +235,52 @@ function impactSiteOf(
   if (!best) return null;
 
   // World -> body local: R^T (p - xpos). xmat is row-major, so its transpose is
-  // a column read.
-  const px = best.point[0] - dat.xpos[bodyId * 3];
-  const py = best.point[1] - dat.xpos[bodyId * 3 + 1];
-  const pz = best.point[2] - dat.xpos[bodyId * 3 + 2];
+  // a column read. Hoist xpos/xmat once so Embind getters are crossed once.
+  const xpos = dat.xpos;
+  const xmat = dat.xmat;
+  const px = best.point[0] - xpos[bodyId * 3];
+  const py = best.point[1] - xpos[bodyId * 3 + 1];
+  const pz = best.point[2] - xpos[bodyId * 3 + 2];
   const m = bodyId * 9;
-  const local = (x: number, y: number, z: number): number[] => [
-    dat.xmat[m] * x + dat.xmat[m + 3] * y + dat.xmat[m + 6] * z,
-    dat.xmat[m + 1] * x + dat.xmat[m + 4] * y + dat.xmat[m + 7] * z,
-    dat.xmat[m + 2] * x + dat.xmat[m + 5] * y + dat.xmat[m + 8] * z,
-  ];
+  const m0 = xmat[m], m1 = xmat[m + 1], m2 = xmat[m + 2];
+  const m3 = xmat[m + 3], m4 = xmat[m + 4], m5 = xmat[m + 5];
+  const m6 = xmat[m + 6], m7 = xmat[m + 7], m8 = xmat[m + 8];
+  const nx = best.normal[0], ny = best.normal[1], nz = best.normal[2];
   return {
-    point: local(px, py, pz),
-    normal: local(best.normal[0], best.normal[1], best.normal[2]),
+    point: [
+      m0 * px + m3 * py + m6 * pz,
+      m1 * px + m4 * py + m7 * pz,
+      m2 * px + m5 * py + m8 * pz,
+    ],
+    normal: [
+      m0 * nx + m3 * ny + m6 * nz,
+      m1 * nx + m4 * ny + m7 * nz,
+      m2 * nx + m5 * ny + m8 * nz,
+    ],
     otherBodyId: best.otherBodyId,
   };
 }
 
+/** Shared empty return value so zero-impact steps allocate nothing at 1 kHz. */
+const EMPTY_EVENTS: ImpactEvent[] = [];
+
 /** Has anything been hit hard enough to care about this step? Call after mj_step. */
 export function checkImpacts(w: ImpactWatches, mdl: MjModel | null, dat: MjData | null, dt: number): ImpactEvent[] {
-  if (w.watches.length === 0 || !mdl || !dat) return [];
-  const events: ImpactEvent[] = [];
+  if (w.watches.length === 0 || !mdl || !dat) return EMPTY_EVENTS;
+  let events: ImpactEvent[] | null = null;
+  // Hoist Embind array getters lazily so we never allocate a TypedArray view
+  // per DOF per body on every physics substep.
+  let qfrc: ArrayLike<number> | null = null;
 
-  for (const watch of w.watches) {
+  for (let wi = 0; wi < w.watches.length; wi++) {
+    const watch = w.watches[wi];
     if (watch.cooldown > 0) { watch.cooldown--; continue; }
 
+    const curQfrc = qfrc ?? (qfrc = dat.qfrc_constraint);
     let sum = 0;
+    const dofAdr = watch.dofadr;
     for (let i = 0; i < watch.dofCount; i++) {
-      const c = dat.qfrc_constraint[watch.dofadr + i];
+      const c = curQfrc[dofAdr + i];
       sum += c * c;
     }
     const force = Math.sqrt(sum);
@@ -294,8 +312,12 @@ export function checkImpacts(w: ImpactWatches, mdl: MjModel | null, dat: MjData 
       const otherNodeId = otherBodyId >= 0 ? w.bodyIdToNodeId[otherBodyId] : undefined;
       const otherSite = otherBodyId >= 0 ? impactSiteOf(mdl, dat, otherBodyId, watch.bodyId) : null;
       const b = watch.bodyId;
-      const views = { cvel: dat.cvel, xpos: dat.xpos, subtreeCom: dat.subtree_com, rootId: mdl.body_rootid };
+      const xpos = dat.xpos;
+      const xmat = dat.xmat;
+      const views = { cvel: dat.cvel, xpos, subtreeCom: dat.subtree_com, rootId: mdl.body_rootid };
+      const xm = b * 9;
 
+      if (events === null) events = [];
       events.push({
         nodeId: watch.nodeId,
         otherNodeId,
@@ -305,8 +327,12 @@ export function checkImpacts(w: ImpactWatches, mdl: MjModel | null, dat: MjData 
         impulseNs: maxImpulseNs,
         localPoint: point,
         localNormal: normal,
-        pos: [dat.xpos[b * 3], dat.xpos[b * 3 + 1], dat.xpos[b * 3 + 2]],
-        xmat: Array.from({ length: 9 }, (_, i) => dat.xmat[b * 9 + i]),
+        pos: [xpos[b * 3], xpos[b * 3 + 1], xpos[b * 3 + 2]],
+        xmat: [
+          xmat[xm], xmat[xm + 1], xmat[xm + 2],
+          xmat[xm + 3], xmat[xm + 4], xmat[xm + 5],
+          xmat[xm + 6], xmat[xm + 7], xmat[xm + 8],
+        ],
         // The origin's velocity (runtimeShatter adds ω × r from `pos`), not cvel's tree-COM point.
         vel: bodyPointVelocity(views, b),
         angvel: bodyAngularVelocity(views, b),
@@ -325,5 +351,5 @@ export function checkImpacts(w: ImpactWatches, mdl: MjModel | null, dat: MjData 
       otherBodyId: site?.otherBodyId ?? -1,
     };
   }
-  return events;
+  return events ?? EMPTY_EVENTS;
 }

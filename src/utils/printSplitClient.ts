@@ -222,23 +222,25 @@ function drainQueue(): void {
     inFlight = active;
     try {
       if (active.kind === 'split') {
-        // Copies, not the caller's arrays: they are transferred.
+        // Already sliced exclusively when enqueued; transfer directly without a second copy.
         const req: PrintSplitRequest = {
           type: 'SPLIT',
           id: active.id,
-          soups: active.soups.map((s) => s.slice()),
+          soups: active.soups,
           options: active.options,
         };
-        w.postMessage(req, req.soups.map((s) => s.buffer));
+        const transfer = Array.from(new Set(req.soups.map((s) => s.buffer as ArrayBuffer).filter((b) => b.byteLength > 0)));
+        w.postMessage(req, transfer);
       } else if (active.kind === 'plane') {
         const req: PrintSplitRequest = {
           type: 'PLANE_CUT',
           id: active.id,
-          soups: active.soups.map((s) => s.slice()),
+          soups: active.soups,
           at: active.at,
           normal: active.normal,
         };
-        w.postMessage(req, req.soups.map((s) => s.buffer));
+        const transfer = Array.from(new Set(req.soups.map((s) => s.buffer as ArrayBuffer).filter((b) => b.byteLength > 0)));
+        w.postMessage(req, transfer);
       } else {
         const req: PrintSplitRequest = { type: 'ASSEMBLE', id: active.id, stages: active.stages };
         w.postMessage(req);

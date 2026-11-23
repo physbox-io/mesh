@@ -42,10 +42,14 @@ const MAX_POOL_SIZE = Math.max(
 // the browser HTTP cache and is amortised over the next RECYCLE_AFTER compiles.
 const RECYCLE_AFTER_COMPILES = 4;
 
+// Retiring idle extra workers beyond the single warm standby reclaims their
+// leaked Emscripten WASM linear memory after a multi-node compile burst.
+const IDLE_EXTRA_WORKER_MS = 30_000;
+
 interface Job {
   id: string;
   scad: string;
-  resolve: (r: CompiledScad) => void;
+  resolve: (r: CachedScad) => void;
   reject: (e: unknown) => void;
 }
 
@@ -57,6 +61,7 @@ interface PoolWorker {
   job: Job | null;
   ready: boolean;
   compilesDone: number;
+  idleTimer: ReturnType<typeof setTimeout> | null;
 }
 
 const pool: PoolWorker[] = [];
@@ -75,26 +80,95 @@ let loadSettle: { resolve: () => void; reject: (e: unknown) => void } | null = n
 // memory. That's expensive, and identical scad source reliably reappears across
 // a session (reloading/iterating on the same design, retries, etc.) - cache by
 // exact source text to avoid spinning up a fresh multi-MB WASM instance for work
-// we've already done. Small cap since the underlying WASM churn (not this cache)
-// is the actual memory risk.
+// we've already done. Bounded by both entry count AND total byte budget so 50
+// massive threaded parts can never pin gigabytes of RAM, and stored as compact
+// TypedArrays (matching the worker's zero-copy wire transfer).
 //
 // Deliberately kept on this side of the worker boundary: a hit resolves in-tick
 // with no message round-trip, exactly as it did when compiling was inline. It
 // also survives worker recycling, which a worker-side cache would not.
-const compileCache = new Map<string, CompiledScad>();
-const COMPILE_CACHE_MAX = 50;
+interface CachedScad {
+  vertices: Float64Array;
+  faces: Uint32Array;
+  renderVertices: Float64Array;
+  bytes: number;
+}
 
-function cloneCompiled(c: CompiledScad): CompiledScad {
+const compileCache = new Map<string, CachedScad>();
+const COMPILE_CACHE_MAX = 50;
+const COMPILE_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+let compileCacheBytes = 0;
+
+/** Deduplicates concurrent compiles of the exact same SCAD source. */
+const inFlightCompiles = new Map<string, Promise<CachedScad>>();
+
+function toCachedScad(
+  vertices: ArrayLike<number>,
+  faces: ArrayLike<number>,
+  renderVertices: ArrayLike<number>,
+): CachedScad {
+  const v = vertices instanceof Float64Array ? vertices : Float64Array.from(vertices);
+  const f = faces instanceof Uint32Array ? faces : Uint32Array.from(faces);
+  const rv = renderVertices instanceof Float64Array ? renderVertices : Float64Array.from(renderVertices);
   return {
-    vertices: c.vertices.slice(),
-    faces: c.faces.slice(),
-    renderVertices: c.renderVertices.slice(),
+    vertices: v,
+    faces: f,
+    renderVertices: rv,
+    bytes: v.byteLength + f.byteLength + rv.byteLength,
   };
 }
 
+function materializeCompiled(c: CachedScad): CompiledScad {
+  return {
+    vertices: Array.from(c.vertices),
+    faces: Array.from(c.faces),
+    renderVertices: Array.from(c.renderVertices),
+  };
+}
+
+function storeCachedScad(scadCode: string, entry: CachedScad): void {
+  const existing = compileCache.get(scadCode);
+  if (existing) {
+    compileCacheBytes -= existing.bytes;
+    compileCache.delete(scadCode);
+  }
+  while (
+    compileCache.size > 0 &&
+    (compileCache.size >= COMPILE_CACHE_MAX || compileCacheBytes + entry.bytes > COMPILE_CACHE_MAX_BYTES)
+  ) {
+    const oldest = compileCache.entries().next().value;
+    if (!oldest) break;
+    compileCache.delete(oldest[0]);
+    compileCacheBytes -= oldest[1].bytes;
+  }
+  compileCache.set(scadCode, entry);
+  compileCacheBytes += entry.bytes;
+}
+
+function clearIdleTimer(pw: PoolWorker): void {
+  if (pw.idleTimer !== null) {
+    clearTimeout(pw.idleTimer);
+    pw.idleTimer = null;
+  }
+}
+
+function scheduleIdleRetire(pw: PoolWorker): void {
+  clearIdleTimer(pw);
+  if (pool.length <= 1 || pw.job) return;
+  pw.idleTimer = setTimeout(() => {
+    pw.idleTimer = null;
+    if (!pw.job && pool.length > 1) retire(pw);
+  }, IDLE_EXTRA_WORKER_MS);
+  (pw.idleTimer as { unref?: () => void }).unref?.();
+}
+
 function retire(pw: PoolWorker) {
+  clearIdleTimer(pw);
   const idx = pool.indexOf(pw);
   if (idx !== -1) pool.splice(idx, 1);
+  pw.worker.onmessage = null;
+  pw.worker.onerror = null;
+  pw.worker.onmessageerror = null;
   pw.worker.terminate();
 }
 
@@ -104,6 +178,7 @@ function spawn(): PoolWorker {
     job: null,
     ready: false,
     compilesDone: 0,
+    idleTimer: null,
   };
 
   pw.worker.onmessage = (evt: MessageEvent) => {
@@ -114,6 +189,7 @@ function spawn(): PoolWorker {
         compilerReady = true;
         loadSettle?.resolve();
         loadSettle = null;
+        if (!pw.job) scheduleIdleRetire(pw);
         break;
 
       case 'LOAD_ERROR': {
@@ -145,7 +221,7 @@ function spawn(): PoolWorker {
         pw.compilesDone++;
 
         if (msg.type === 'COMPILED') {
-          job.resolve({ vertices: msg.vertices, faces: msg.faces, renderVertices: msg.renderVertices });
+          job.resolve(toCachedScad(msg.vertices, msg.faces, msg.renderVertices));
         } else {
           job.reject(new Error(msg.message));
         }
@@ -156,6 +232,8 @@ function spawn(): PoolWorker {
           // Keep one worker warm for the next interaction, mirroring the
           // background pre-load in App.tsx. dispatch() spawns any others it needs.
           if (pool.length === 0) spawn();
+        } else {
+          scheduleIdleRetire(pw);
         }
         dispatch();
         break;
@@ -167,22 +245,24 @@ function spawn(): PoolWorker {
   };
 
   // A worker that dies (OOM from accumulated WASM instances, an unhandled
-  // throw) would otherwise leave its caller awaiting forever. Fail its job and
-  // drop it; the next dispatch spawns a replacement, which is also what finally
-  // reclaims the leaked linear memory that a same-thread compiler never could.
-  pw.worker.onerror = () => {
+  // throw, or deserialization failure) would otherwise leave its caller awaiting
+  // forever. Fail its job and drop it; the next dispatch spawns a replacement,
+  // which is also what finally reclaims leaked linear memory.
+  const handleWorkerBroken = (reason: string) => {
     noteWorkerStopped();
     const job = pw.job;
     pw.job = null;
     retire(pw);
-    job?.reject(new Error('SCAD worker crashed.'));
+    job?.reject(new Error(reason));
     dispatch();
     if (loadSettle && pool.length === 0) {
-      loadSettle.reject(new Error('SCAD worker crashed.'));
+      loadSettle.reject(new Error(reason));
       loadSettle = null;
       loadingPromise = null;
     }
   };
+  pw.worker.onerror = () => handleWorkerBroken('SCAD worker crashed.');
+  pw.worker.onmessageerror = () => handleWorkerBroken('SCAD worker message could not be read.');
 
   pool.push(pw);
   // Start fetching the module immediately so the worker is warm by the time a
@@ -200,8 +280,15 @@ function dispatch() {
     if (!pw) return; // every worker busy - the next completion re-dispatches
 
     const job = queue.shift()!;
+    clearIdleTimer(pw);
     pw.job = job;
-    pw.worker.postMessage({ type: 'COMPILE', id: job.id, scad: job.scad });
+    try {
+      pw.worker.postMessage({ type: 'COMPILE', id: job.id, scad: job.scad });
+    } catch (err) {
+      pw.job = null;
+      job.reject(err instanceof Error ? err : new Error(String(err)));
+      scheduleIdleRetire(pw);
+    }
   }
 }
 
@@ -230,39 +317,44 @@ export function isCompilerReady(): boolean {
 
 /**
  * Compiles a raw OpenSCAD source code string into 3D mesh vertex/face arrays.
- * The work happens in the worker pool; concurrent calls run in parallel across
- * workers, while each individual worker compiles strictly one at a time.
+ * The work happens in the worker pool; concurrent calls for distinct sources
+ * run in parallel across workers, while identical concurrent sources share one
+ * compile and each caller receives its own isolated arrays.
  */
 export async function compileSCAD(scadCode: string): Promise<CompiledScad> {
   const cached = compileCache.get(scadCode);
   if (cached) {
     compileCache.delete(scadCode);
     compileCache.set(scadCode, cached);
-    return cloneCompiled(cached);
+    return materializeCompiled(cached);
+  }
+
+  const running = inFlightCompiles.get(scadCode);
+  if (running) {
+    return materializeCompiled(await running);
   }
 
   compileListener?.(1);
+  const promise = new Promise<CachedScad>((resolve, reject) => {
+    queue.push({ id: Math.random().toString(36).slice(2), scad: scadCode, resolve, reject });
+    dispatch();
+  });
+  inFlightCompiles.set(scadCode, promise);
+
   try {
-    const result = await new Promise<CompiledScad>((resolve, reject) => {
-      queue.push({ id: Math.random().toString(36).slice(2), scad: scadCode, resolve, reject });
-      dispatch();
-    });
+    const result = await promise;
 
     // Don't cache a degenerate empty-mesh result - openscad-wasm has been observed
     // to intermittently return a valid-but-empty STL for a legitimately non-empty
     // model. Caching that would make a caller's retry-on-empty logic pointless,
     // since the retry would just hit the same bad cached result forever.
     if (result.faces.length > 0) {
-      if (!compileCache.has(scadCode) && compileCache.size >= COMPILE_CACHE_MAX) {
-        const oldestKey = compileCache.keys().next().value;
-        if (oldestKey !== undefined) compileCache.delete(oldestKey);
-      }
-      compileCache.delete(scadCode);
-      compileCache.set(scadCode, cloneCompiled(result));
+      storeCachedScad(scadCode, result);
     }
 
-    return result;
+    return materializeCompiled(result);
   } finally {
+    if (inFlightCompiles.get(scadCode) === promise) inFlightCompiles.delete(scadCode);
     compileListener?.(-1);
   }
 }

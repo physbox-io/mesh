@@ -10,8 +10,8 @@ export type SlipMoldRequest =
   | {
     type: 'PLAN';
     id: number;
-    /** The scene the part is in, and the bodies that are the part. */
-    scene: SceneGraph;
+    /** The scene the part is in (omitted when unchanged from the last PLAN), and the bodies that are the part. */
+    scene?: SceneGraph;
     ids: string[];
     options: Partial<SlipMoldOptions>;
   }

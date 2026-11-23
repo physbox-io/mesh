@@ -8,21 +8,33 @@ import { buildSlipMold } from '../utils/slipCastMold';
 import { simulateSlipCast } from '../utils/slipCastSimulation';
 import { masterSoupMm } from '../utils/pourBoxScene';
 import { loadManifold } from '../utils/sculptCut';
+import type { SceneGraph } from '../types/scene';
 import type { SlipMoldRequest, SlipMoldResponse } from './slipMoldProtocol';
+import { collectTransferables } from './transferables';
 
-const post = (msg: SlipMoldResponse) => self.postMessage(msg);
+const post = (msg: SlipMoldResponse, transfer: Transferable[] = []) =>
+  (self as unknown as DedicatedWorkerGlobalScope).postMessage(msg, transfer);
 
-self.onmessage = async (evt: MessageEvent<SlipMoldRequest>) => {
-  const msg = evt.data;
+let cachedScene: SceneGraph = { nodes: [] };
+let queue: Promise<void> = Promise.resolve();
+
+async function handleMessage(msg: SlipMoldRequest): Promise<void> {
   try {
     const wasm = await loadManifold();
     if (msg.type === 'CAST') {
-      post({ type: 'CAST_DONE', id: msg.id, result: simulateSlipCast(wasm, msg.input, msg.wallMm) });
+      const result = simulateSlipCast(wasm, msg.input, msg.wallMm);
+      post({ type: 'CAST_DONE', id: msg.id, result }, collectTransferables(result));
       return;
     }
-    const mold = buildSlipMold(wasm, masterSoupMm(msg.scene, msg.ids), msg.options);
-    post({ type: 'PLANNED', id: msg.id, mold });
+    if (msg.scene) cachedScene = msg.scene;
+    const mold = buildSlipMold(wasm, masterSoupMm(cachedScene, msg.ids), msg.options);
+    post({ type: 'PLANNED', id: msg.id, mold }, collectTransferables(mold));
   } catch (e) {
     post({ type: 'FAILED', id: msg.id, error: (e as Error)?.message ?? String(e) });
   }
+}
+
+self.onmessage = (evt: MessageEvent<SlipMoldRequest>) => {
+  const msg = evt.data;
+  queue = queue.then(() => handleMessage(msg));
 };

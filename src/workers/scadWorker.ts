@@ -13,6 +13,7 @@
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { SCAD_LIBRARY } from '../utils/scadLibrary';
 import { indexScadTriangles, type CompiledScad } from '../utils/scadMesh';
+import { collectTransferables, isStandaloneView } from './transferables';
 // A static import on purpose: Vite follows it into the module graph, splits
 // the Emscripten glue into its own chunk and emits openscad.wasm as an asset
 // next to it, so nothing is fetched from a CDN and the cross-origin isolation
@@ -196,9 +197,12 @@ async function compileSCAD(scadCode: string): Promise<CompiledScad> {
     throw new Error('Compilation produced empty output.');
   }
 
-  // Parse STL data into a BufferGeometry using STLLoader
+  // Parse STL data into a BufferGeometry using STLLoader (zero-copy when standalone)
   const loader = new STLLoader();
-  const geometry = loader.parse(stl.buffer.slice(stl.byteOffset, stl.byteOffset + stl.byteLength) as ArrayBuffer);
+  const stlBuf = isStandaloneView(stl)
+    ? (stl.buffer as ArrayBuffer)
+    : (stl.buffer.slice(stl.byteOffset, stl.byteOffset + stl.byteLength) as ArrayBuffer);
+  const geometry = loader.parse(stlBuf);
 
   const positionAttr = geometry.attributes.position;
   if (!positionAttr || positionAttr.count === 0) {
@@ -245,7 +249,14 @@ self.onmessage = (evt: MessageEvent) => {
       enqueue(async () => {
         try {
           const result = await compileSCAD(msg.scad);
-          self.postMessage({ type: 'COMPILED', id: msg.id, ...result });
+          const vertices = Float64Array.from(result.vertices);
+          const faces = Uint32Array.from(result.faces);
+          const renderVertices = Float64Array.from(result.renderVertices);
+          const payload = { type: 'COMPILED', id: msg.id, vertices, faces, renderVertices };
+          (self as unknown as DedicatedWorkerGlobalScope).postMessage(
+            payload,
+            collectTransferables([vertices, faces, renderVertices]),
+          );
         } catch (err) {
           self.postMessage({
             type: 'COMPILE_ERROR',

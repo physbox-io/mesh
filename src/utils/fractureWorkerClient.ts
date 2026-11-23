@@ -15,41 +15,110 @@ import { noteWorkerStopped } from './staleBuild';
  */
 const FRACTURE_TIMEOUT_MS = 5_000;
 
-type Settle = { resolve: (cells: FractureCell[]) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> };
+type QueuedFracture = {
+  id: number;
+  verts: number[];
+  faces: number[];
+  opts: SeedOptions;
+  resolve: (cells: FractureCell[]) => void;
+  reject: (e: Error) => void;
+};
 
 let worker: Worker | null = null;
 let seq = 0;
-const pending = new Map<number, Settle>();
+let active: (QueuedFracture & { timer: ReturnType<typeof setTimeout> }) | null = null;
+const queued: QueuedFracture[] = [];
 
-function failAll(message: string) {
-  for (const [, s] of pending) { clearTimeout(s.timer); s.reject(new Error(message)); }
-  pending.clear();
+function dropWorker(w: Worker | null): void {
+  if (w) {
+    w.onmessage = null;
+    w.onerror = null;
+    w.onmessageerror = null;
+    w.terminate();
+  }
+  if (worker === w) worker = null;
+}
+
+function failAll(message: string): void {
+  if (active) {
+    clearTimeout(active.timer);
+    const done = active;
+    active = null;
+    done.reject(new Error(message));
+  }
+  while (queued.length > 0) queued.shift()!.reject(new Error(message));
 }
 
 function ensureWorker(): Worker | null {
   if (typeof Worker === 'undefined') return null;
   if (worker) return worker;
   try {
-    worker = new Worker(new URL('../workers/fractureWorker.ts', import.meta.url), { type: 'module' });
-    worker.onmessage = (evt: MessageEvent<FractureResponse>) => {
+    const w = new Worker(new URL('../workers/fractureWorker.ts', import.meta.url), { type: 'module' });
+    w.onmessage = (evt: MessageEvent<FractureResponse>) => {
+      if (worker !== w) return;
       const msg = evt.data;
-      const settle = pending.get(msg.id);
-      if (!settle) return;
-      pending.delete(msg.id);
-      clearTimeout(settle.timer);
-      if (msg.type === 'FRACTURE_ERROR') settle.reject(new Error(msg.message));
-      else settle.resolve(msg.cells.map(fromPayload));
+      if (!active || active.id !== msg.id) return;
+      const done = active;
+      active = null;
+      clearTimeout(done.timer);
+      if (msg.type === 'FRACTURE_ERROR') done.reject(new Error(msg.message));
+      else done.resolve(msg.cells.map(fromPayload));
+      pump();
     };
-    worker.onerror = () => {
+    const handleBroken = (message: string) => {
+      if (worker !== w) return;
       noteWorkerStopped();
-      failAll('The fracture worker stopped.');
-      worker?.terminate();
-      worker = null;
+      dropWorker(w);
+      failAll(message);
     };
+    w.onerror = () => handleBroken('The fracture worker stopped.');
+    w.onmessageerror = () => handleBroken('The fracture worker could not read the worker response.');
+    worker = w;
   } catch {
     worker = null;
   }
   return worker;
+}
+
+function pump(): void {
+  while (!active && queued.length > 0) {
+    const next = queued.shift()!;
+    const w = ensureWorker();
+    if (!w) {
+      Promise.all([import('./fractureClip'), import('./sculptCut')])
+        .then(async ([{ fractureSolid }, { loadManifold }]) =>
+          next.resolve(fractureSolid(await loadManifold(), next.verts, next.faces, next.opts)),
+        )
+        .catch((err) => next.reject(err instanceof Error ? err : new Error(String(err))))
+        .finally(pump);
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (active?.id !== next.id) return;
+      const wedged = active;
+      active = null;
+      dropWorker(w);
+      wedged.reject(new Error('Fracture timed out.'));
+      pump();
+    }, FRACTURE_TIMEOUT_MS);
+    active = { ...next, timer };
+    try {
+      const req: FractureRequest = {
+        type: 'FRACTURE', id: next.id, opts: next.opts,
+        verts: Float64Array.from(next.verts),
+        faces: Uint32Array.from(next.faces),
+      };
+      const transfer: Transferable[] = [];
+      if (req.verts.byteLength > 0) transfer.push(req.verts.buffer);
+      if (req.faces.byteLength > 0) transfer.push(req.faces.buffer);
+      w.postMessage(req, transfer);
+      return;
+    } catch (err) {
+      clearTimeout(timer);
+      active = null;
+      next.reject(err instanceof Error ? err : new Error(String(err)));
+    }
+  }
 }
 
 const fromPayload = (h: HullPayload): FractureCell => ({
@@ -76,23 +145,12 @@ export async function fractureMeshOffThread(
   faces: number[],
   opts: SeedOptions = {},
 ): Promise<FractureCell[]> {
-  const w = ensureWorker();
-  if (!w) {
+  if (typeof Worker === 'undefined') {
     const [{ fractureSolid }, { loadManifold }] = await Promise.all([import('./fractureClip'), import('./sculptCut')]);
     return fractureSolid(await loadManifold(), verts, faces, opts);
   }
   return new Promise<FractureCell[]>((resolve, reject) => {
-    const id = ++seq;
-    const timer = setTimeout(() => {
-      pending.delete(id);
-      reject(new Error('Fracture timed out.'));
-    }, FRACTURE_TIMEOUT_MS);
-    pending.set(id, { resolve, reject, timer });
-    const req: FractureRequest = {
-      type: 'FRACTURE', id, opts,
-      verts: Float64Array.from(verts),
-      faces: Uint32Array.from(faces),
-    };
-    w.postMessage(req, [req.verts.buffer, req.faces.buffer]);
+    queued.push({ id: ++seq, verts, faces, opts, resolve, reject });
+    pump();
   });
 }

@@ -42,8 +42,14 @@ export class MeshBvhWorkerClient {
 
       this.pending = { id, reject };
       worker.onerror = (e) => {
+        if (this.pending?.id !== id) return;
         this.pending = null;
         reject(new Error(`BVH worker: ${e.message || 'could not start'}`));
+      };
+      worker.onmessageerror = () => {
+        if (this.pending?.id !== id) return;
+        this.pending = null;
+        reject(new Error('BVH worker: response could not be deserialized'));
       };
       worker.onmessage = (evt: MessageEvent<MeshBvhResponse>) => {
         const msg = evt.data;
@@ -70,11 +76,18 @@ export class MeshBvhWorkerClient {
         resolve(bvh);
       };
 
-      const transfer: Transferable[] = [position.buffer as ArrayBuffer];
-      if (index) transfer.push(index.buffer as ArrayBuffer);
+      const transferSet = new Set<ArrayBuffer>();
+      if (position.byteLength > 0) transferSet.add(position.buffer as ArrayBuffer);
+      if (index && index.byteLength > 0) transferSet.add(index.buffer as ArrayBuffer);
+      const transfer: Transferable[] = Array.from(transferSet);
       const { onProgress: _onProgress, ...rest } = options;
       const request: MeshBvhRequest = { id, position, index, groups: [...geometry.groups], options: { ...rest } };
-      worker.postMessage(request, transfer);
+      try {
+        worker.postMessage(request, transfer);
+      } catch (err) {
+        this.pending = null;
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
     });
   }
 

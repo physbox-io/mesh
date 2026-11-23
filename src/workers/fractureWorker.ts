@@ -14,14 +14,19 @@
 import { fractureSolid } from '../utils/fractureClip';
 import { loadManifold } from '../utils/sculptCut';
 import type { FractureRequest, FractureResponse } from './fractureProtocol';
+import { collectTransferables } from './transferables';
 
 const post = (msg: FractureResponse, transfer: Transferable[] = []) =>
   (self as unknown as DedicatedWorkerGlobalScope).postMessage(msg, transfer);
 
-self.onmessage = async (evt: MessageEvent<FractureRequest>) => {
-  const msg = evt.data;
+let queue: Promise<void> = Promise.resolve();
+
+async function handleMessage(msg: FractureRequest): Promise<void> {
   // WARM loads this module, and the boolean that cuts concave bodies.
-  if (msg.type !== 'FRACTURE') { void loadManifold().catch(() => {}); return; }
+  if (msg.type !== 'FRACTURE') {
+    await loadManifold().catch(() => {});
+    return;
+  }
   try {
     // Cells of the real solid, not of its hull: see utils/fractureClip.ts.
     const wasm = await loadManifold();
@@ -34,9 +39,14 @@ self.onmessage = async (evt: MessageEvent<FractureRequest>) => {
     }));
     post(
       { type: 'FRACTURED', id: msg.id, cells: payload },
-      payload.flatMap(c => [c.verts.buffer, c.faces.buffer]),
+      collectTransferables(payload),
     );
   } catch (err) {
     post({ type: 'FRACTURE_ERROR', id: msg.id, message: err instanceof Error ? err.message : String(err) });
   }
+}
+
+self.onmessage = (evt: MessageEvent<FractureRequest>) => {
+  const msg = evt.data;
+  queue = queue.then(() => handleMessage(msg));
 };
