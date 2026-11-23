@@ -5,12 +5,13 @@ import { useDialogs } from '../store/dialogStore';
 import { PRESETS } from '../presets/presetScenes';
 import { makePresetNoteCard, type NoteCard } from '../utils/noteCards';
 import type { CopilotMessage } from '../physicsGlobals';
-import { readUserPreset, ensureUserPreset, catchUpPreset, listUserPresetNames, USER_PRESETS_CHANGED_EVENT } from '../utils/userPresets';
+import { readUserPreset, ensureUserPreset, catchUpPreset, listUserPresetNames, normalizePresetName, USER_PRESETS_CHANGED_EVENT } from '../utils/userPresets';
 import { webSerialManager } from '../utils/webSerialManager';
 import { savePreset } from '../utils/presetStorage';
 import { announcePresetSave } from '../utils/presetNotices';
 import { cloudAutosave } from '../utils/cloudDocuments';
 import { getSyncedSceneGraph } from '../utils/mujocoSync';
+import { modelBuiltFrom } from '../store/modelProvenance';
 import { readEnvironment, withEnvironment } from '../store/sceneEnvironment';
 import { packMeshArrays } from '../utils/meshPacking';
 import type { SceneDocument } from './useSceneDocument';
@@ -59,8 +60,12 @@ export function usePresetActions(doc: SceneDocument) {
     return `${preset.emoji ? `${preset.emoji} ` : ''}${preset.name}`;
   }, [activePreset, sceneName]);
 
+  // Monotonic sequence guard so a slow cloud preset download never clobbers a newer open.
+  const loadSeqRef = useRef(0);
+
   // Load a preset and replace the note card with the preset's built-in card (if any)
   const loadPresetWithCard = useCallback((name: string) => {
+    loadSeqRef.current += 1;
     const preset = PRESETS[name as keyof typeof PRESETS] as PresetEntry | undefined;
     void openingScene(preset?.name ?? name, () => {
       loadPreset(name);
@@ -74,11 +79,14 @@ export function usePresetActions(doc: SceneDocument) {
 
   // Also load note cards from user presets (stored alongside the scene)
   const loadUserPresetWithCard = useCallback(async (name: string) => {
+    const seq = ++loadSeqRef.current;
     const label = name.replace(/^user:/, '');
     // The pill stays up until the scene is drawn; the notes and chat swap in as the load starts.
     await openingScene(label, async () => {
       // A preset listed from the account has its data fetched on first open.
-      if (!(await ensureUserPreset(name))) {
+      const ensured = await ensureUserPreset(name);
+      if (seq !== loadSeqRef.current) return false;
+      if (!ensured) {
         showNotice('Could not open scene', `"${label}" could not be fetched from your account. Check the connection and try again.`, 'red');
         return false;
       }
@@ -124,12 +132,22 @@ export function usePresetActions(doc: SceneDocument) {
     return () => window.removeEventListener(USER_PRESETS_CHANGED_EVENT, reloadOpenScene);
   }, [loadUserPresetWithCard, markUnsaved]);
 
+  const noteCardsRef = useRef(noteCards);
+  const copilotMessagesRef = useRef(copilotMessages);
+  useEffect(() => {
+    noteCardsRef.current = noteCards;
+    copilotMessagesRef.current = copilotMessages;
+  });
+
   const saveUserPresetByName = useCallback((name: string) => {
-    const trimmed = name.trim();
+    const trimmed = normalizePresetName(name);
     if (!trimmed) return;
     try {
-      const { model, data } = useStore.getState();
-      const syncedScene = withEnvironment(getSyncedSceneGraph(sceneGraph, model, data, mujoco), useStore.getState());
+      const live = useStore.getState();
+      const synced = modelBuiltFrom().graph === live.sceneGraph
+        ? getSyncedSceneGraph(live.sceneGraph, live.model, live.data, live.mujoco)
+        : live.sceneGraph;
+      const syncedScene = withEnvironment(synced, live);
       // The picture for the scene browser, of the scene being saved.
       const thumbnail = captureViewportThumb();
       const preset = { ...syncedScene, noteCards, copilotMessages, ...(thumbnail ? { thumbnail } : {}) };
@@ -148,16 +166,17 @@ export function usePresetActions(doc: SceneDocument) {
           recordRecent(`user:${trimmed}`);
           useStore.getState().setActivePreset(`user:${trimmed}`);
           markClean(noteCards, copilotMessages);
+          // A deliberate save is also a named revision of the cloud document, which
+          // the pruner never discards — unlike the automatic checkpoints. Only record
+          // it when the preset save actually succeeded.
+          void cloudAutosave.saveExplicit(trimmed, packMeshArrays(preset), `Saved as “${trimmed}”`);
         }
       });
-      // A deliberate save is also a named revision of the cloud document, which
-      // the pruner never discards — unlike the automatic checkpoints.
-      void cloudAutosave.saveExplicit(trimmed, packMeshArrays(preset), `Saved as “${trimmed}”`);
     } catch (e) {
       console.error('Failed to save user preset', e);
       showNotice('Could not save scene', `Could not save "${trimmed}": ${e instanceof Error ? e.message : String(e)}`, 'red');
     }
-  }, [sceneGraph, mujoco, noteCards, copilotMessages, markClean, showNotice]);
+  }, [noteCards, copilotMessages, markClean, showNotice]);
 
   /*
    * Cloud auto-save.
@@ -185,12 +204,19 @@ export function usePresetActions(doc: SceneDocument) {
       const name = activePreset?.startsWith('user:') ? activePreset.slice('user:'.length) : 'Untitled scene';
       // Built only when the save actually serialises it: with auto-save off, or
       // inside the coalescing window, cloning the scene here was wasted work.
+      // Always read the live store graph and verify model provenance before applying
+      // simulated poses so a 750 ms coalesced build never pairs a stale graph with
+      // a newer model/data (or vice versa).
       cloudAutosave.schedule(name, () => {
-        const { model, data } = useStore.getState();
+        const live = useStore.getState();
+        const liveGraph = live.sceneGraph;
+        const synced = modelBuiltFrom().graph === liveGraph
+          ? getSyncedSceneGraph(liveGraph, live.model, live.data, live.mujoco)
+          : liveGraph;
         return packMeshArrays({
-          ...withEnvironment(getSyncedSceneGraph(sceneGraph, model, data, mujoco), useStore.getState()),
-          noteCards,
-          copilotMessages,
+          ...withEnvironment(synced, live),
+          noteCards: noteCardsRef.current,
+          copilotMessages: copilotMessagesRef.current,
         });
       });
     } catch {
@@ -237,6 +263,7 @@ export function usePresetActions(doc: SceneDocument) {
   return {
     activePresetLabel,
     loadPresetWithCard, loadUserPresetWithCard, saveUserPresetByName,
+    markUnsaved,
     handleSavePresetClick,
     saveModal: {
       isOpen: isSaveModalOpen,

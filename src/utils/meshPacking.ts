@@ -98,34 +98,60 @@ function packIndices(values: number[]): PackedArray | null {
   return { $packed: 'idx', n: values.length, b64: toBase64(bytes.subarray(0, at)) };
 }
 
+/** Maximum element count accepted when unpacking a mesh array, to block OOM DoS payloads. */
+export const MAX_PACKED_ELEMENTS = 50_000_000;
+
 function unpackArray(p: PackedArray): number[] {
   // Its bytes are in the account's blob store (meshBlobs.ts) and were not fetched.
   if (typeof p.b64 !== 'string') throw new Error('A mesh in this scene is kept in your account and could not be fetched. Check the connection and open it again.');
-  const bytes = fromBase64(p.b64);
-  const out = new Array<number>(p.n);
-  if (p.$packed === 'f32') {
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    for (let i = 0; i < p.n; i++) out[i] = view.getFloat32(i * 4, true);
-    return out;
+  if (p.$packed !== 'f32' && p.$packed !== 'idx') {
+    throw new Error(`This scene was saved by a newer version of Mesh (mesh data "${String(p.$packed)}"). Reload the page.`);
   }
-  if (p.$packed === 'idx') {
-    let at = 0;
-    let prev = 0;
+  if (typeof p.n !== 'number' || !Number.isInteger(p.n) || p.n < 0 || p.n > MAX_PACKED_ELEMENTS) {
+    throw new Error(`Invalid packed mesh length (${String(p.n)}).`);
+  }
+  const bytes = fromBase64(p.b64);
+  if (p.$packed === 'f32') {
+    if (bytes.byteLength !== p.n * 4) {
+      throw new Error(`Corrupt packed float array: expected ${p.n * 4} bytes, got ${bytes.byteLength}.`);
+    }
+    const out = new Array<number>(p.n);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     for (let i = 0; i < p.n; i++) {
-      let z = 0;
-      let scale = 1;
-      let b: number;
-      do {
-        b = bytes[at++];
-        z += (b & 0x7f) * scale;
-        scale *= 0x80;
-      } while (b & 0x80);
-      prev += z % 2 === 0 ? z / 2 : -(z + 1) / 2;
-      out[i] = prev;
+      const v = view.getFloat32(i * 4, true);
+      if (!Number.isFinite(v)) {
+        throw new Error(`Corrupt packed float array: non-finite value at index ${i}.`);
+      }
+      out[i] = v;
     }
     return out;
   }
-  throw new Error(`This scene was saved by a newer version of Mesh (mesh data "${String(p.$packed)}"). Reload the page.`);
+  const out = new Array<number>(p.n);
+  let at = 0;
+  let prev = 0;
+  for (let i = 0; i < p.n; i++) {
+    let z = 0;
+    let scale = 1;
+    let b: number;
+    let varintBytes = 0;
+    do {
+      if (at >= bytes.length) {
+        throw new Error('Corrupt packed index array: unexpected end of data.');
+      }
+      if (++varintBytes > 6) {
+        throw new Error('Corrupt packed index array: varint exceeds maximum length.');
+      }
+      b = bytes[at++];
+      z += (b & 0x7f) * scale;
+      scale *= 0x80;
+    } while (b & 0x80);
+    prev += z % 2 === 0 ? z / 2 : -(z + 1) / 2;
+    if (!Number.isSafeInteger(prev) || prev < 0 || prev > 0xffffffff) {
+      throw new Error(`Corrupt packed index array: out-of-range index at ${i}.`);
+    }
+    out[i] = prev;
+  }
+  return out;
 }
 
 /**

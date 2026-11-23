@@ -29,6 +29,8 @@ export interface PresetStore {
   /** Puts the account's copy in place of what is held. False when there was no room. */
   write(name: string, data: unknown): boolean;
   remove(name: string): void;
+  /** Whether a preset name is already taken anywhere (including cloud-only entries). */
+  has?(name: string): boolean;
   /**
    * For an app that fetches a preset when it is opened rather than now: notes
    * that this row exists, and says whether that changed anything. Null fetches now.
@@ -75,6 +77,10 @@ export class PresetSync {
   private queues = new Map<string, Promise<unknown>>();
   /** Refused for good this session, such as for being too big. Not offered again until a reload. */
   private refused = new Set<string>();
+  /** Presets whose last upload failed specifically because the server reported missing blobs. */
+  private blobsMissing = new Set<string>();
+  /** Per-preset local save/delete sequence, so concurrent fetches never clobber local mutations. */
+  private mutationSeq = new Map<string, number>();
   private pulling: Promise<PresetSyncResult> | null = null;
 
   private readonly appId: string;
@@ -128,8 +134,20 @@ export class PresetSync {
     return Boolean(this.bases()[name]?.unsynced);
   }
 
+  private bumpMutation(name: string): void {
+    this.mutationSeq.set(name, (this.mutationSeq.get(name) ?? 0) + 1);
+  }
+
+  /** Whether the last upload of `name` failed because the server reported missing blobs. */
+  consumeBlobsMissing(name: string): boolean {
+    const had = this.blobsMissing.has(name);
+    this.blobsMissing.delete(name);
+    return had;
+  }
+
   /** A save has landed here, and is now owed to the account. */
   noteSaved(name: string): void {
+    this.bumpMutation(name);
     const base = this.bases()[name];
     this.refused.delete(name);
     this.patch(name, { ...this.ownBase(base), unsynced: true, deleted: undefined });
@@ -150,6 +168,7 @@ export class PresetSync {
   }
 
   private async send(name: string, data: unknown, onto?: PresetRow): Promise<boolean> {
+    this.blobsMissing.delete(name);
     const user = getStoredUser()?.id;
     if (!user) return false;
     const base = this.ownBase(this.bases()[name]);
@@ -157,6 +176,10 @@ export class PresetSync {
     const baseRevision = onto?.revision ?? base.revision ?? 0;
     const result = await syncCloudPreset(this.appId, name, data, id, baseRevision);
     if (result === null) return false;
+    if ('blobsMissing' in result) {
+      this.blobsMissing.add(name);
+      return false;
+    }
     if ('refused' in result) {
       this.refused.add(name);
       return false;
@@ -184,7 +207,7 @@ export class PresetSync {
     if (!store) return false;
     const theirs = await this.fetchRow(row.id);
     if (!theirs) return false;
-    const copy = conflictCopyName(name, (candidate) => Object.hasOwn(store.held(), candidate));
+    const copy = conflictCopyName(name, (candidate) => Object.hasOwn(store.held(), candidate) || Boolean(store.has?.(candidate)));
     const named = (doc: unknown) => (store.renamed ? store.renamed(doc, copy) : doc);
     if (!store.write(copy, named(theirs.data))) return false;
     this.patch(copy, { unsynced: true });
@@ -205,6 +228,7 @@ export class PresetSync {
 
   /** A delete here, owed to the account until it has it. */
   remove(name: string): Promise<void> {
+    this.bumpMutation(name);
     this.refused.delete(name);
     this.patch(name, { ...this.ownBase(this.bases()[name]), unsynced: undefined, deleted: true });
     return this.inTurn(name, () => this.sendDelete(name)).then(() => undefined);
@@ -222,10 +246,16 @@ export class PresetSync {
   async fetchLatest(name: string): Promise<unknown> {
     return this.inTurn(name, async () => {
       const base = this.bases()[name];
-      if (!base?.id) return null;
+      if (!base?.id || base.unsynced) return null;
+      const seq = this.mutationSeq.get(name) ?? 0;
       const got = await this.fetchRow(base.id);
       if (!got) return null;
-      this.patch(name, { ...base, revision: got.revision, user: getStoredUser()?.id });
+      // Re-read after await: a concurrent local save (`unsynced`) or delete (`deleted`) wins.
+      const latest = this.bases()[name];
+      if ((this.mutationSeq.get(name) ?? 0) !== seq || latest?.unsynced || (!base.deleted && latest?.deleted)) {
+        return null;
+      }
+      this.patch(name, { ...(latest ?? base), id: base.id, revision: got.revision, user: getStoredUser()?.id, deleted: undefined });
       return got.data;
     });
   }
@@ -279,15 +309,22 @@ export class PresetSync {
           }
           case 'fetch': {
             const base = this.bases()[name];
+            if (base?.unsynced) break;
+            const seq = this.mutationSeq.get(name) ?? 0;
             const deferred = store.deferFetch?.(name, action.row, base);
             if (deferred) {
-              this.patch(name, { ...base, id: action.row.id, user });
+              this.patch(name, { ...base, id: action.row.id, user, deleted: undefined });
               if (deferred.changed) result.received += 1;
               break;
             }
             const held = Object.hasOwn(store.held(), name);
             const got = await this.fetchRow(action.row.id);
-            if (!got || !store.write(name, got.data)) break;
+            if (!got) break;
+            const latest = this.bases()[name];
+            if ((this.mutationSeq.get(name) ?? 0) !== seq || latest?.unsynced || (!base?.deleted && latest?.deleted)) {
+              break;
+            }
+            if (!store.write(name, got.data)) break;
             this.patch(name, { id: action.row.id, revision: got.revision, user });
             if (held) refreshed.push(name);
             result.received += 1;

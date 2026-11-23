@@ -145,9 +145,14 @@ export async function resolveMeshBlobs<T>(doc: T, urls: Record<string, string> |
       if (!bytes) {
         const url = urls?.[sha];
         if (!url) return;
-        const res = await fetch(url);
-        if (!res.ok) return;
-        const got = new Uint8Array(await res.arrayBuffer());
+        let got: Uint8Array;
+        try {
+          const res = await fetch(url);
+          if (!res.ok) return;
+          got = new Uint8Array(await res.arrayBuffer());
+        } catch {
+          return;
+        }
         if ((await sha256Hex(got)) !== sha) return;
         bytes = got;
         void cachePut(sha, bytes);

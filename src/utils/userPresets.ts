@@ -22,6 +22,11 @@ import { hasBlobRefs } from './meshBlobs';
 
 export const USER_PRESETS_KEY = 'physics_user_presets';
 
+/** Strips any leading `user:` prefix(es) and surrounding whitespace from a preset name. */
+export function normalizePresetName(name: string): string {
+  return name.trim().replace(/^(?:user:\s*)+/, '').trim();
+}
+
 /** A saved scene: the graph, plus the annotations shown alongside it. */
 /** The fields of a copilot chat message a preset carries; the panel's own type has more. */
 export interface SavedCopilotMessage {
@@ -116,7 +121,12 @@ export async function ensureUserPreset(name: string): Promise<boolean> {
   // Kept here with a mesh missing, by a fetch that was cut short: fetched again.
   if (held) {
     const data = await fetchCloudPresetData(key);
-    return !!data && writeLocalPreset(key, data);
+    if (!data) return false;
+    if (presetSync.isUnsynced(key)) return true;
+    if (!readCachedPresets()[key] && !Object.hasOwn(cloudOnly, key)) return false;
+    holdFromAccount(key, data);
+    announceChange();
+    return true;
   }
   if (!Object.hasOwn(cloudOnly, key)) return false;
   if (cloudOnly[key]) return true;
@@ -156,7 +166,8 @@ export async function catchUpPreset(name: string): Promise<boolean> {
   const data = await fetchCloudPresetData(key);
   if (!data) return false;
   behindAccount.delete(key);
-  // Deleted here while this was in flight.
+  // Saved or deleted here while this was in flight: the newer local state stands.
+  if (presetSync.isUnsynced(key)) return false;
   if (!readCachedPresets()[key] && !cloudOnly[key]) return false;
   holdFromAccount(key, data);
   announceChange();
@@ -356,6 +367,7 @@ export function deleteUserPreset(name: string): boolean {
 
 presetSync.connect({
   held: readCachedPresets,
+  has: (name) => Object.hasOwn(readCachedPresets(), name) || Object.hasOwn(cloudOnly, name),
   read: async (name) => {
     const preset = readCachedPresets()[name];
     return preset ? presetForAccount(preset) : null;

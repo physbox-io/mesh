@@ -21,7 +21,7 @@ export function downloadSceneRescue(sceneGraph: SceneGraph, activePreset: string
   a.href = url;
   a.download = `${exportBaseName(noteCards, activePreset)}.json`;
   a.click();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 let unloadAllowed = false;

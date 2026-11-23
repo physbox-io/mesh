@@ -84,6 +84,8 @@ export function clearStoredAuth(): void {
     localStorage.removeItem('physbox_user_avatar');
     localStorage.removeItem('physbox_auth_is_admin');
     localStorage.removeItem('physbox_auth_handoff');
+    localStorage.removeItem('physics_cloud_document_id');
+    localStorage.removeItem('physics_cloud_draft');
   } catch (e) {
     console.error('Failed to clear auth session', e);
   }
@@ -203,6 +205,7 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 
   const response = await fetch(`${baseUrl}${endpoint}`, {
     ...options,
+    keepalive: options.keepalive && typeof body === 'string' && body.length <= 60 * 1024 ? true : undefined,
     body,
     headers,
   });
@@ -291,11 +294,12 @@ export async function fetchCloudParameters(appId: string): Promise<Record<string
   }
 }
 
-/** What became of a save: taken, stale, refused for good, or null for could not ask. */
+/** What became of a save: taken, stale, refused for good, missing blobs, or null for could not ask. */
 export type PresetSaveOutcome =
   | { id: string; revision: number }
   | { conflict: { id: string; revision: number } }
   | { refused: true }
+  | { blobsMissing: true }
   | null;
 
 /**
@@ -319,6 +323,9 @@ export async function syncCloudPreset(
   } catch (err) {
     if (err instanceof PhysBoxApiError && err.code === 'preset_conflict') {
       return { conflict: { id: String(err.body.id), revision: Number(err.body.revision) } };
+    }
+    if (err instanceof PhysBoxApiError && err.code === 'blobs_missing') {
+      return { blobsMissing: true };
     }
     console.warn('[PhysBox Cloud] Preset sync failed:', err);
     if (err instanceof PhysBoxApiError && err.status === 413) return { refused: true };
@@ -677,9 +684,11 @@ export async function putCloudDocument(input: {
   data: unknown;
   baseRevision?: number;
   label?: string;
+  keepalive?: boolean;
 }): Promise<{ id: string; revision: number; created?: boolean; checkpointed?: boolean }> {
   return request(`/api/documents/${encodeURIComponent(input.id)}`, {
     method: 'PUT',
+    keepalive: input.keepalive,
     body: JSON.stringify({
       app_id: input.appId,
       name: input.name,

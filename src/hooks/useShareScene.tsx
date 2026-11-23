@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '../store/useStore';
 import { useDialogs } from '../store/dialogStore';
@@ -15,11 +15,30 @@ import {
   type ShareLink,
   type SharedScene,
 } from '../utils/shareLink';
-import { revokeShare, isProRequired } from '../utils/apiClient';
-import { listUserPresetNames, saveUserPreset } from '../utils/userPresets';
+import { PhysBoxApiError, revokeShare, isProRequired } from '../utils/apiClient';
+import {
+  listUserPresetNames,
+  normalizePresetName,
+  rememberCloudOnlyPreset,
+  saveUserPreset,
+  takeLastWriteError,
+} from '../utils/userPresets';
 import { SIGNED_IN_EVENT } from '../components/UserProfileButton';
 import { getSyncedSceneGraph } from '../utils/mujocoSync';
 import { readEnvironment } from '../store/sceneEnvironment';
+
+/**
+ * Only permanently dead/invalid share links (404, 410, 400, wrong app, or unreadable payload)
+ * should be stripped from the address bar; transient offline/5xx failures keep `?share=` intact
+ * so the user can reload once connectivity returns.
+ */
+export function shouldClearShareTokenOnError(err: unknown): boolean {
+  if (err instanceof PhysBoxApiError) {
+    return err.status === 404 || err.status === 410 || err.status === 400;
+  }
+  if (err instanceof TypeError) return false;
+  return err instanceof Error && !/network|offline|failed to fetch|load failed|timeout|abort/i.test(err.message);
+}
 
 /*
  * Sharing the scene as a link.
@@ -42,6 +61,36 @@ export function useShareScene(noteCards: NoteCard[], loadUserPresetWithCard: (na
   const [shareCopied, setShareCopied] = useState(false);
   const [shareTooBig, setShareTooBig] = useState<ShareTooLargeError | null>(null);
   const [shareBusy, setShareBusy] = useState(false);
+  const shareSeqRef = useRef(0);
+  const openingSharedPresetRef = useRef<string | null>(null);
+  const prevPresetRef = useRef<string | undefined>(activePreset);
+
+  // Clear stale share portal state whenever a different scene is loaded, while
+  // preserving an intentional quota warning for a shared scene currently being opened.
+  useEffect(() => {
+    const clearPortalForSwap = (nextPreset: string | undefined) => {
+      shareSeqRef.current += 1;
+      setShare(null);
+      setShareTooBig(null);
+      setShareCopied(false);
+      setShareBusy(false);
+      if (openingSharedPresetRef.current && openingSharedPresetRef.current === nextPreset) {
+        openingSharedPresetRef.current = null;
+      } else {
+        setShareError(null);
+      }
+    };
+    if (prevPresetRef.current !== activePreset) {
+      prevPresetRef.current = activePreset;
+      clearPortalForSwap(activePreset);
+    }
+    const onPresetLoaded = (e: Event) => {
+      const name = (e as CustomEvent<{ name?: string }>).detail?.name;
+      clearPortalForSwap(name);
+    };
+    window.addEventListener('physics:preset-loaded', onPresetLoaded);
+    return () => window.removeEventListener('physics:preset-loaded', onPresetLoaded);
+  }, [activePreset]);
 
   const copyShareLink = useCallback(async (url: string) => {
     try {
@@ -85,14 +134,17 @@ export function useShareScene(noteCards: NoteCard[], loadUserPresetWithCard: (na
   }, [sceneGraph, model, data, mujoco, noteCards, activePreset]);
 
   const handleShare = useCallback(async () => {
+    const seq = ++shareSeqRef.current;
     setShareError(null);
     setShareTooBig(null);
     setShareCopied(false);
     try {
       const link = await buildShareLink(sceneToShare());
+      if (seq !== shareSeqRef.current) return;
       setShare(link);
       await copyShareLink(link.url);
     } catch (e) {
+      if (seq !== shareSeqRef.current) return;
       setShare(null);
       /*
        * A scene that will not fit in a link is the ordinary case for anything
@@ -114,14 +166,17 @@ export function useShareScene(noteCards: NoteCard[], loadUserPresetWithCard: (na
    * that mostly is not.
    */
   const handleAccountShare = useCallback(async () => {
+    const seq = ++shareSeqRef.current;
     setShareError(null);
     setShareBusy(true);
     try {
       const link = await buildAccountShareLink(sceneToShare());
+      if (seq !== shareSeqRef.current) return;
       setShareTooBig(null);
       setShare(link);
       await copyShareLink(link.url);
     } catch (e) {
+      if (seq !== shareSeqRef.current) return;
       // A free account is expected to work here; sharing is deliberately not a
       // Pro route. If that ever changes server-side, say so plainly rather than
       // showing a bare 403.
@@ -133,7 +188,7 @@ export function useShareScene(noteCards: NoteCard[], loadUserPresetWithCard: (na
             : 'That scene could not be shared from your account.'
       );
     } finally {
-      setShareBusy(false);
+      if (seq === shareSeqRef.current) setShareBusy(false);
     }
   }, [sceneToShare, copyShareLink]);
 
@@ -202,46 +257,46 @@ export function useShareScene(noteCards: NoteCard[], loadUserPresetWithCard: (na
         // someone whose "bracket" is not your "bracket" would otherwise overwrite
         // yours on open, with nothing said.
         const taken = new Set(listUserPresetNames());
-        let name = shared.name;
-        for (let n = 2; taken.has(name); n++) name = `${shared.name} (${n})`;
+        const baseName = normalizePresetName(typeof shared.name === 'string' ? shared.name : '') || 'Shared scene';
+        let name = baseName;
+        for (let n = 2; taken.has(name); n++) name = `${baseName} (${n})`;
 
-        clearShareFragment();
-        clearShareToken();
         const { name: _name, noteCards: notes, ...scene } = shared;
-        if (!saveUserPreset(name, { ...scene, noteCards: notes ?? [] })) {
+        const preset = { ...scene, noteCards: notes ?? [] };
+        if (!saveUserPreset(name, preset)) {
+          takeLastWriteError();
+          // Hold in session memory (cloudOnly) so loadUserPresetWithCard opens large
+          // shared scenes cleanly even when localStorage is full.
+          rememberCloudOnlyPreset(name, preset);
+          openingSharedPresetRef.current = `user:${name}`;
           setShareError(
             `"${name}" opened but could not be saved — browser storage is full. ` +
               'Export the JSON now if you want to keep it.'
           );
         }
         loadUserPresetWithCard(`user:${name}`);
+        clearShareFragment();
+        clearShareToken();
       },
     });
   }, [loadUserPresetWithCard, openDialog, closeDialog]);
 
   /**
    * A scene arriving as a token — the account route, for scenes too big to put
-   * in a link.
-   *
-   * It lands the same way a fragment-shared scene does, through a save and a
-   * preset load, so there is one way into a shared scene rather than two.
-   * The token is taken out of the address bar only once it is open, so
-   * declining leaves the link where it was.
+   * in a link — or in the URL fragment (`#scene=`). Token takes precedence when
+   * both are present so they never race on mount.
    */
   useEffect(() => {
     const token = shareTokenInUrl();
-    if (!token) return;
-    readAccountShareLink(token)
-      .then((shared) => openSharedScene(shared))
-      .catch((err) => {
-        clearShareToken();
-        setShareError(err?.message || 'That shared link could not be opened.');
-      });
-    // Once, on mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
+    if (token) {
+      readAccountShareLink(token)
+        .then((shared) => openSharedScene(shared))
+        .catch((err) => {
+          if (shouldClearShareTokenOnError(err)) clearShareToken();
+          setShareError(err?.message || 'That shared link could not be opened.');
+        });
+      return;
+    }
     readShareLink()
       .then((shared) => {
         if (!shared) return;
@@ -251,14 +306,16 @@ export function useShareScene(noteCards: NoteCard[], loadUserPresetWithCard: (na
         clearShareFragment();
         setShareError(err?.message || 'That link could not be read.');
       });
-    // Once, on mount: opening the scene takes the fragment out of the URL.
+    // Once, on mount: opening the scene takes the token/fragment out of the URL.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const dismiss = useCallback(() => {
+    shareSeqRef.current += 1;
     setShare(null);
     setShareError(null);
     setShareTooBig(null);
+    setShareBusy(false);
   }, []);
 
   return {

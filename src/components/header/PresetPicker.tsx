@@ -84,7 +84,10 @@ export function PresetPicker({ presets }: { presets: PresetActions }) {
                   // empty scene here wiped the work, notes and chat as well,
                   // which the question above never mentioned.
                   if (deleteUserPreset(presetName)) {
-                    useStore.getState().setActivePreset(undefined);
+                    if (useStore.getState().activePreset === `user:${presetName}`) {
+                      useStore.getState().setActivePreset(undefined);
+                      presets.markUnsaved();
+                    }
                   } else {
                     showNotice(
                       'Could not delete scene',

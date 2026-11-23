@@ -66,6 +66,9 @@ export function useSceneDocument() {
   const markClean = useCallback((notes: unknown, chat: unknown) => {
     stopWatchingClean.current?.();
     stopWatchingClean.current = null;
+    // Commit any in-flight drag/slider undo snapshot before marking clean so
+    // post-save drag ticks are not swallowed via PENDING_CLEAN.
+    useStore.getState().flushPendingUndo();
     // A load's own undo step lands a tick or a build later, so the top of the
     // stack is only read once nothing is still being gathered; until then the
     // scene counts as the one just loaded.
@@ -83,6 +86,10 @@ export function useSceneDocument() {
       stopWatchingClean.current = null;
     });
     stopWatchingClean.current = unsubscribe;
+  }, []);
+  useEffect(() => () => {
+    stopWatchingClean.current?.();
+    stopWatchingClean.current = null;
   }, []);
   /** The document on screen was restored unsaved, so it stays unsaved until someone saves it. */
   const markUnsaved = useCallback(() => {

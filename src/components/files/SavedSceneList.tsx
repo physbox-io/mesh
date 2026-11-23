@@ -32,10 +32,16 @@ export function SavedSceneList({
 }) {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
+  const [renameBusy, setRenameBusy] = useState(false);
 
   const commitRename = async () => {
-    if (!renaming) return;
-    if (await onRename(renaming, draft)) setRenaming(null);
+    if (!renaming || renameBusy) return;
+    setRenameBusy(true);
+    try {
+      if (await onRename(renaming, draft)) setRenaming(null);
+    } finally {
+      setRenameBusy(false);
+    }
   };
 
   return (
@@ -61,24 +67,24 @@ export function SavedSceneList({
               >
                 <input
                   autoFocus
+                  disabled={renameBusy}
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
                   onFocus={(e) => e.target.select()}
-                  onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); setRenaming(null); } }}
-                  className="flex-1 min-w-0 text-sm px-2 py-1 rounded border border-blue-400 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 outline-none"
+                  onKeyDown={(e) => { if (e.key === 'Escape' && !renameBusy) { e.preventDefault(); setRenaming(null); } }}
+                  className="flex-1 min-w-0 text-sm px-2 py-1 rounded border border-blue-400 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 outline-none disabled:opacity-50"
                   aria-label="New name"
                 />
-                <button type="submit" className="p-1 rounded text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 cursor-pointer" title="Rename">
+                <button type="submit" disabled={renameBusy} className="p-1 rounded text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 cursor-pointer disabled:opacity-40" title="Rename">
                   <Check className="w-4 h-4" />
                 </button>
-                <button type="button" onClick={() => setRenaming(null)} className="p-1 rounded text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer" title="Cancel">
+                <button type="button" disabled={renameBusy} onClick={() => setRenaming(null)} className="p-1 rounded text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer disabled:opacity-40" title="Cancel">
                   <X className="w-4 h-4" />
                 </button>
               </form>
             ) : (
               <button
                 onClick={() => onOpen(s.name)}
-                onDoubleClick={() => onOpen(s.name)}
                 className="flex-1 min-w-0 text-left cursor-pointer"
                 title={active ? 'Open now. Click to reload the saved copy.' : `Open “${s.name}”`}
               >

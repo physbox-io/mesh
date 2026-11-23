@@ -202,6 +202,21 @@ export async function gzip(text: string): Promise<Uint8Array | null> {
   return out;
 }
 
+/** Maximum decompressed byte length accepted from a share link (32 MiB) to block gzip bombs. */
+export const MAX_DECOMPRESSED_SHARE_BYTES = 32 * 1024 * 1024;
+
+function isValidSharedNode(node: unknown): boolean {
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return false;
+  const n = node as Record<string, unknown>;
+  if (n.geoms !== undefined) {
+    if (!Array.isArray(n.geoms) || n.geoms.some((g) => !g || typeof g !== 'object' || Array.isArray(g))) return false;
+  }
+  if (n.children !== undefined) {
+    if (!Array.isArray(n.children) || !n.children.every(isValidSharedNode)) return false;
+  }
+  return true;
+}
+
 async function gunzip(bytes: Uint8Array): Promise<string> {
   if (typeof DecompressionStream === 'undefined') {
     throw new Error('This browser cannot read a compressed link.');
@@ -214,10 +229,21 @@ async function gunzip(bytes: Uint8Array): Promise<string> {
   const reader = ds.readable.getReader();
   const decoder = new TextDecoder();
   let out = '';
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    out += decoder.decode(value, { stream: true });
+  let totalBytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_DECOMPRESSED_SHARE_BYTES) {
+        void reader.cancel().catch(ignore);
+        void writer.abort().catch(ignore);
+        throw new Error('That link is too large to open safely.');
+      }
+      out += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    reader.releaseLock();
   }
   return out + decoder.decode();
 }
@@ -251,6 +277,9 @@ export async function decodeShareFragment(raw: string): Promise<SharedScene | nu
   let scene: SharedScene;
   try {
     const bytes = fromBase64Url(data);
+    if (params.get('gz') !== '1' && bytes.byteLength > MAX_DECOMPRESSED_SHARE_BYTES) {
+      throw new Error('That link is too large to open safely.');
+    }
     const json = params.get('gz') === '1' ? await gunzip(bytes) : new TextDecoder().decode(bytes);
     scene = unpackMeshArrays(JSON.parse(json)) as SharedScene;
   } catch {
@@ -259,10 +288,19 @@ export async function decodeShareFragment(raw: string): Promise<SharedScene | nu
   // A scene with no nodes is a half-written or truncated payload rather than an
   // empty scene: recompiling one throws inside the MJCF builder, which is the
   // same reason the preset loader refuses one.
-  if (!scene || !Array.isArray(scene.nodes) || scene.nodes.length === 0) {
+  if (
+    !scene ||
+    typeof scene !== 'object' ||
+    Array.isArray(scene) ||
+    !Array.isArray(scene.nodes) ||
+    scene.nodes.length === 0 ||
+    !scene.nodes.every(isValidSharedNode) ||
+    (scene.name !== undefined && typeof scene.name !== 'string')
+  ) {
     throw new Error('That link is damaged — it may have been shortened or cut off in transit.');
   }
-  return scene;
+  const name = typeof scene.name === 'string' && scene.name.trim() ? scene.name : 'Shared scene';
+  return { ...scene, name };
 }
 
 /**
@@ -411,10 +449,22 @@ export async function readAccountShareLink(token: string): Promise<SharedScene> 
     );
   }
   const scene = unpackMeshArrays(await resolveMeshBlobs(share.data, share.blobUrls)) as SharedScene | null;
-  if (!scene || !Array.isArray(scene.nodes) || scene.nodes.length === 0) {
+  if (
+    !scene ||
+    typeof scene !== 'object' ||
+    Array.isArray(scene) ||
+    !Array.isArray(scene.nodes) ||
+    scene.nodes.length === 0 ||
+    !scene.nodes.every(isValidSharedNode)
+  ) {
     throw new Error('That shared scene could not be read — it may have been made by a newer version of Mesh.');
   }
-  return { ...scene, name: scene.name || share.name || 'Shared scene' };
+  const sceneName = typeof scene.name === 'string' && scene.name.trim()
+    ? scene.name
+    : typeof share.name === 'string' && share.name.trim()
+      ? share.name
+      : 'Shared scene';
+  return { ...scene, name: sceneName };
 }
 
 /** Takes an opened token back out of the address bar. See `clearShareFragment`. */

@@ -1,4 +1,7 @@
+import { useRef } from 'react';
 import { Save } from 'lucide-react';
+import { useDialogA11y } from '../hooks/useDialogA11y';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 /** Names the scene and saves it as a user preset. */
 export function SavePresetModal({ isOpen, name, setName, close, confirm }: {
@@ -8,6 +11,10 @@ export function SavePresetModal({ isOpen, name, setName, close, confirm }: {
   close: () => void;
   confirm: () => void;
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogA11y(dialogRef, isOpen);
+  useEscapeToClose(isOpen, close);
+
   if (!isOpen) return null;
   return (
     <div
@@ -15,6 +22,10 @@ export function SavePresetModal({ isOpen, name, setName, close, confirm }: {
       onClick={close}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="save-preset-modal-title"
         className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-2xl max-w-md w-full p-6 flex flex-col gap-4 animate-in fade-in zoom-in-95 duration-200"
         onClick={(e) => e.stopPropagation()}
       >
@@ -23,7 +34,7 @@ export function SavePresetModal({ isOpen, name, setName, close, confirm }: {
             <Save className="w-5 h-5" />
           </div>
           <div>
-            <h2 className="font-bold text-slate-800 dark:text-slate-100 text-base">Save Scene</h2>
+            <h2 id="save-preset-modal-title" className="font-bold text-slate-800 dark:text-slate-100 text-base">Save Scene</h2>
             <p className="text-xs text-slate-500 dark:text-slate-400">Saved in this browser, and to your account when signed in</p>
           </div>
         </div>
@@ -35,7 +46,7 @@ export function SavePresetModal({ isOpen, name, setName, close, confirm }: {
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter') confirm();
-            if (e.key === 'Escape') close();
+            if (e.key === 'Escape') { e.preventDefault(); close(); }
           }}
           className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500"
         />

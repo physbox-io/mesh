@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Search, X, FilePlus2, FolderOpen, Shapes, BookOpen, Grid3x3, FileJson, Clock } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { useDialogs } from '../../store/dialogStore';
 import { usePanels, type SceneBrowserTab } from '../../store/panelsStore';
 import { useEscapeToClose } from '../../hooks/useEscapeToClose';
+import { useDialogA11y } from '../../hooks/useDialogA11y';
 import type { PresetActions } from '../../hooks/usePresetActions';
 import { EXAMPLE_SHELVES, exampleEntries, matchesQuery } from '../../utils/sceneCatalog';
 import { PATTERN_GROUPS, SURFACE_PATTERNS } from '../../utils/surfacePatterns';
@@ -83,6 +84,8 @@ interface SceneBrowserProps {
 function OpenSceneBrowser({ presets, hasUnsavedWork, onImportJson, tab }: SceneBrowserProps & { tab: SceneBrowserTab }) {
   const setTab = usePanels((s) => s.openSceneBrowser);
   const close = usePanels((s) => s.closeSceneBrowser);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogA11y(dialogRef, true);
   useEscapeToClose(true, close);
 
   const activePreset = useStore((s) => s.activePreset);
@@ -144,7 +147,9 @@ function OpenSceneBrowser({ presets, hasUnsavedWork, onImportJson, tab }: SceneB
     const result = await renameScene(from, to);
     setVersion((v) => v + 1);
     if (!result.ok) { showNotice('Could not rename', result.message, 'red'); return false; }
-    if (activeUser === from) useStore.getState().setActivePreset(`user:${result.name}`);
+    if (useStore.getState().activePreset === `user:${from}`) {
+      useStore.getState().setActivePreset(`user:${result.name}`);
+    }
     return true;
   };
 
@@ -164,7 +169,10 @@ function OpenSceneBrowser({ presets, hasUnsavedWork, onImportJson, tab }: SceneB
       onConfirm: () => {
         closeDialog();
         if (deleteUserPreset(name)) {
-          if (activeUser === name) useStore.getState().setActivePreset(undefined);
+          if (useStore.getState().activePreset === `user:${name}`) {
+            useStore.getState().setActivePreset(undefined);
+            presets.markUnsaved();
+          }
         } else {
           showNotice('Could not delete', `Could not delete “${name}”: this browser would not write the scene list.`, 'red');
         }
@@ -173,8 +181,9 @@ function OpenSceneBrowser({ presets, hasUnsavedWork, onImportJson, tab }: SceneB
     });
   };
 
-  /** Enter in the search box opens the first thing it found. */
+  /** Enter in the search box opens the first thing it found (only when a search query is active). */
   const openFirst = () => {
+    if (!q) return;
     if (foundSaved[0]) load(`user:${foundSaved[0].name}`);
     else if (foundExamples[0]) load(foundExamples[0].id);
     else if (foundPatterns[0]) pickPattern(foundPatterns[0].id);
@@ -259,7 +268,13 @@ function OpenSceneBrowser({ presets, hasUnsavedWork, onImportJson, tab }: SceneB
       className="fixed inset-0 z-50 flex items-center justify-center sm:p-4 bg-slate-900/60 backdrop-blur-xs"
       onMouseDown={(e) => { if (e.target === e.currentTarget) close(); }}
     >
-      <div className="w-full max-w-5xl h-full sm:h-[85dvh] bg-white dark:bg-slate-900 sm:rounded-xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Scene browser"
+        className="w-full max-w-5xl h-full sm:h-[85dvh] bg-white dark:bg-slate-900 sm:rounded-xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col"
+      >
         {/* Search and the two things that are not opening a file */}
         <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-200 dark:border-slate-800">
           <div className="flex-1 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 focus-within:ring-2 ring-blue-400">

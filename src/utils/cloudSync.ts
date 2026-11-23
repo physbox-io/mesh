@@ -60,7 +60,9 @@ export async function presetForAccount(data: unknown): Promise<unknown> {
 export async function saveCloudPreset(name: string, data: unknown): Promise<boolean> {
   presetSync.noteSaved(name);
   if (await presetSync.upload(name, await presetForAccount(data))) return true;
-  // Refused, perhaps for a blob this session thought it had uploaded: once more, asking afresh.
+  // Only forget uploaded blobs and retry when the server specifically reported missing blobs,
+  // not on offline, signed-out, or 413 failures.
+  if (!presetSync.consumeBlobsMissing(name)) return false;
   forgetUploadedBlobs();
   return presetSync.upload(name, await presetForAccount(data));
 }
