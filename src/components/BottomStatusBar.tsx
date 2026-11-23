@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Box, ChevronUp, Cpu, Cuboid, Flame, Layers, Layers2, MousePointer2, Mountain, Package, Pause, Printer, Puzzle, Scissors, Send, Wrench,
 } from 'lucide-react';
@@ -376,19 +377,40 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
   // user here. Time-limited so a bar that is glanced at later is not still
   // glowing at them.
   const [exportsHighlighted, setExportsHighlighted] = useState(false);
+  const [exportsCalloutPos, setExportsCalloutPos] = useState<{ left: number; top: number; arrowLeft: number } | null>(null);
+  const exportsGroupRef = useRef<HTMLDivElement>(null);
   const [printerOpen, setPrinterOpen] = useState(false);
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let settleTimer: ReturnType<typeof setTimeout> | undefined;
+    const measure = () => {
+      const el = exportsGroupRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const width = Math.min(256, window.innerWidth - 24);
+      const center = r.left + r.width / 2;
+      const left = Math.min(Math.max(12, center - width / 2), window.innerWidth - width - 12);
+      const arrowLeft = Math.min(Math.max(16, center - left), width - 16);
+      setExportsCalloutPos({ left, top: r.top - 8, arrowLeft });
+    };
     const onShow = () => {
       setExportsHighlighted(true);
+      exportsGroupRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+      measure();
+      clearTimeout(settleTimer);
+      settleTimer = setTimeout(measure, 280);
       clearTimeout(timer);
       // Long enough to read a sentence, not just to notice a flash.
-      timer = setTimeout(() => setExportsHighlighted(false), 6000);
+      timer = setTimeout(() => {
+        setExportsHighlighted(false);
+        setExportsCalloutPos(null);
+      }, 6000);
     };
     window.addEventListener(SHOW_EXPORTS_EVENT, onShow);
     return () => {
       window.removeEventListener(SHOW_EXPORTS_EVENT, onShow);
       clearTimeout(timer);
+      clearTimeout(settleTimer);
     };
   }, []);
 
@@ -692,6 +714,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
               a row of small coloured glyphs is what the navbar had, and it
               needed hovering to read. */}
           <div
+            ref={exportsGroupRef}
             className={`relative flex items-center gap-0.5 rounded-md transition-shadow ${
               exportsHighlighted ? 'ring-2 ring-emerald-500 ring-offset-1 ring-offset-white dark:ring-offset-slate-950' : ''
             }`}
@@ -704,14 +727,23 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
               they are down here: they change with the machine and the material,
               and both of those are chosen on this bar rather than in a dialog.
             */}
-            {exportsHighlighted && (
+            {exportsHighlighted && exportsCalloutPos && createPortal(
               <div
                 role="status"
-                className="absolute bottom-full right-0 mb-2 w-64 rounded-lg bg-slate-900 dark:bg-slate-800 text-white text-[11px] leading-relaxed px-3 py-2 shadow-xl border border-slate-700 z-50"
+                style={{
+                  left: exportsCalloutPos.left,
+                  top: exportsCalloutPos.top,
+                  transform: 'translateY(-100%)',
+                }}
+                className="fixed w-64 max-w-[calc(100vw-24px)] rounded-lg bg-slate-900 dark:bg-slate-800 text-white text-[11px] leading-relaxed px-3 py-2 shadow-xl border border-slate-700 z-[100] pointer-events-none"
               >
-                <span className="font-bold">Export tools for the selected machine and material.</span>
-                <span className="absolute top-full right-4 -mt-px border-[6px] border-transparent border-t-slate-900 dark:border-t-slate-800" />
-              </div>
+                <span className="font-bold">Use these export tools below</span> for the selected machine and material.
+                <span
+                  style={{ left: exportsCalloutPos.arrowLeft }}
+                  className="absolute top-full -translate-x-1/2 -mt-px border-[6px] border-transparent border-t-slate-900 dark:border-t-slate-800"
+                />
+              </div>,
+              document.body,
             )}
             {exportButtons.map((b) => (
               <button
