@@ -24,12 +24,26 @@ const LIFT_M = 1e-5;
 /** Document frame (Z-up) to three's (Y-up). */
 const toThree = (x: number, y: number, z: number): [number, number, number] => [x, z, -y];
 
+/**
+ * True when an object represents a scene part that Section View should clip:
+ * either a mesh inside a named body group (`bodyOf`) or an instanced batch of
+ * static boxes (`StaticBoxInstances`) carrying `userData.nodeIds`.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function isSectionPart(object: THREE.Object3D): boolean {
+  if (object.userData?.isOverlay || object.userData?.isBackground) return false;
+  if (bodyOf(object)) return true;
+  const inst = object as THREE.InstancedMesh;
+  return Boolean(inst.isInstancedMesh && Array.isArray(object.userData?.nodeIds));
+}
+
 /** Every material on a part's own meshes: what the cut clips. */
-function partMaterials(scene: THREE.Object3D): THREE.Material[] {
+// eslint-disable-next-line react-refresh/only-export-components
+export function partMaterials(scene: THREE.Object3D): THREE.Material[] {
   const out: THREE.Material[] = [];
   scene.traverse((object) => {
     const drawn = object as THREE.Mesh;
-    if (!drawn.material || !bodyOf(drawn)) return;
+    if (!drawn.material || !isSectionPart(drawn)) return;
     for (const m of Array.isArray(drawn.material) ? drawn.material : [drawn.material]) out.push(m);
   });
   return out;
@@ -41,14 +55,19 @@ export function SectionCut() {
   // A ref, not state: the plane is moved in place every frame, and the
   // materials hold this one object.
   const planeRef = useRef(new THREE.Plane());
+  const clippedRef = useRef(false);
   const scene = useThree((s) => s.scene);
+  const gl = useThree((s) => s.gl);
   // Unmounted mid-cut: nothing stays clipped.
   useEffect(() => () => {
+    if (!clippedRef.current) return;
     const plane = planeRef.current;
     for (const m of partMaterials(scene)) {
       if (m.clippingPlanes?.includes(plane)) { m.clippingPlanes = null; m.needsUpdate = true; }
     }
-  }, [scene]);
+    gl.localClippingEnabled = false;
+    clippedRef.current = false;
+  }, [gl, scene]);
   const view = isDrawingView(cameraView) ? cameraView : null;
 
   const geometry = useMemo(() => {
@@ -83,21 +102,30 @@ export function SectionCut() {
   useEffect(() => () => { geometry?.fill.dispose(); geometry?.lines.dispose(); }, [geometry]);
 
   // Clip the parts: keep what lies at or past the plane along the line of
-  // sight. Checked every frame, as a part rebuilt mid-cut gets new materials.
-  useFrame(({ gl, scene }) => {
+  // sight. Checked every frame while cutting, as a part rebuilt mid-cut gets
+  // new materials; skipped completely when no cut is active and unclipped.
+  useFrame(({ gl: frameGl, scene: frameScene }) => {
     const plane = planeRef.current;
-    if (cut) {
-      gl.localClippingEnabled = true;
-      plane.normal.set(...toThree(...cut.normal));
-      plane.constant = -cut.offset;
+    if (!cut) {
+      if (!clippedRef.current) return;
+      for (const m of partMaterials(frameScene)) {
+        if (m.clippingPlanes?.includes(plane)) {
+          m.clippingPlanes = null;
+          m.needsUpdate = true;
+        }
+      }
+      frameGl.localClippingEnabled = false;
+      clippedRef.current = false;
+      return;
     }
-    for (const m of partMaterials(scene)) {
+    frameGl.localClippingEnabled = true;
+    clippedRef.current = true;
+    plane.normal.set(...toThree(...cut.normal));
+    plane.constant = -cut.offset;
+    for (const m of partMaterials(frameScene)) {
       const clipped = m.clippingPlanes?.includes(plane) ?? false;
-      if (cut && !clipped) {
+      if (!clipped) {
         m.clippingPlanes = [plane];
-        m.needsUpdate = true;
-      } else if (!cut && clipped) {
-        m.clippingPlanes = null;
         m.needsUpdate = true;
       }
     }

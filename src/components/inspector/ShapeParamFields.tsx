@@ -204,35 +204,40 @@ export function ShapeParamFields({ node, geom }: { node: SceneNode; geom: SceneG
         </div>
       )}
 
-      {node.isTube && (
+      {node.isTube && (() => {
+        const innerR = node.innerRadius || 0.2;
+        const outerR = node.outerRadius || 0.3;
+        const maxInner = Math.max(0.01, outerR - 0.005);
+        const minOuter = innerR + 0.005;
+        return (
         <div className="flex flex-col gap-3">
           <div className="flex flex-col gap-1">
-            <label className="text-xs font-medium text-slate-500 flex justify-between">Inner Radius <SliderValue value={node.innerRadius || 0.2} onChange={(v) => {
-                const val = v;
+            <label className="text-xs font-medium text-slate-500 flex justify-between">Inner Radius <SliderValue value={innerR} onChange={(v) => {
+                const val = Math.min(v, maxInner);
                 updateTubeParams(node.id, { innerRadius: val });
-              }} decimals={1} unit="mm" scale={1000} min={0.01} /></label>
+              }} decimals={1} unit="mm" scale={1000} min={0.01} max={maxInner} /></label>
             <RangeInput 
-              {...lengthSpan(node.innerRadius || 0.2)}
-              max={node.outerRadius ? node.outerRadius - 0.01 : 0.29}
-              value={node.innerRadius || 0.2} 
+              {...lengthSpan(innerR)}
+              max={maxInner}
+              value={innerR} 
               onChange={(v) => {
-                const val = v;
+                const val = Math.min(v, maxInner);
                 updateTubeParams(node.id, { innerRadius: val });
               }}
               className="w-full accent-blue-500 cursor-pointer" 
             />
           </div>
           <div className="flex flex-col gap-1">
-            <label className="text-xs font-medium text-slate-500 flex justify-between">Outer Radius <SliderValue value={node.outerRadius || 0.3} onChange={(v) => {
-                const val = v;
+            <label className="text-xs font-medium text-slate-500 flex justify-between">Outer Radius <SliderValue value={outerR} onChange={(v) => {
+                const val = Math.max(v, minOuter);
                 updateTubeParams(node.id, { outerRadius: val });
-              }} decimals={1} unit="mm" scale={1000} /></label>
+              }} decimals={1} unit="mm" scale={1000} min={minOuter} /></label>
             <RangeInput 
-              {...lengthSpan(node.outerRadius || 0.3)}
-              min={node.innerRadius ? node.innerRadius + 0.01 : 0.21}
-              value={node.outerRadius || 0.3} 
+              {...lengthSpan(outerR)}
+              min={minOuter}
+              value={outerR} 
               onChange={(v) => {
-                const val = v;
+                const val = Math.max(v, minOuter);
                 updateTubeParams(node.id, { outerRadius: val });
               }}
               className="w-full accent-blue-500 cursor-pointer" 
@@ -254,7 +259,8 @@ export function ShapeParamFields({ node, geom }: { node: SceneNode; geom: SceneG
             />
           </div>
         </div>
-      )}
+        );
+      })()}
     </>
   );
 }

@@ -17,10 +17,8 @@ export function MaterialCard({ node, geom, activeIndex }: { node: SceneNode; geo
       return;
     }
     const r = physicalMaterialUpdates(node, m, activeIndex);
-    for (const [i, u] of Object.entries(r.geoms)) {
-      updateNodeGeom(node.id, u, Number(i));
-    }
-    updateNode(node.id, r.node);
+    const nextGeoms = (node.geoms || []).map((g, i) => (r.geoms[i] ? { ...g, ...r.geoms[i] } : g));
+    updateNode(node.id, { ...r.node, geoms: nextGeoms });
   };
 
   return (
@@ -91,8 +89,8 @@ export function MaterialCard({ node, geom, activeIndex }: { node: SceneNode; geo
                 const sr = geom.solref ? [...geom.solref] : [0.02, 1.0];
                 sr[1] = dr;
                 updateNodeGeom(node.id, {
-                  solref: sr as [number,number],
-                  solimp: [0.99, 0.9999, 0.0001, 0.5, 2]
+                  solref: sr as [number, number],
+                  ...(geom.solimp ? {} : { solimp: [0.99, 0.9999, 0.0001, 0.5, 2] }),
                 }, activeIndex);
               }}
             />
@@ -125,7 +123,12 @@ export function MaterialCard({ node, geom, activeIndex }: { node: SceneNode; geo
 
       {/* Friction Sliders */}
       {(() => {
-        const fr = geom.friction ?? [0.7, 0.005, 0.0001];
+        const rawFr = geom.friction;
+        const fr: [number, number, number] = [
+          rawFr?.[0] ?? 0.7,
+          rawFr?.[1] ?? 0.005,
+          rawFr?.[2] ?? 0.0001,
+        ];
         return (
           <div className="flex flex-col gap-2 mt-1 border-t border-slate-100 pt-2">
             {[

@@ -15,7 +15,8 @@ export function PositionCard({ node }: { node: SceneNode }) {
 
   // Utility to handle moving free bodies
   const handleMove = (axis: 0 | 1 | 2, val: number) => {
-    const cleanVal = isNaN(val) ? 0 : val;
+    if (!Number.isFinite(val)) return;
+    const cleanVal = val;
 
     // Always update the scene-graph initial position (persists on reset/restart)
     const currentPos = [...node.pos] as [number, number, number];
@@ -86,8 +87,10 @@ export function PositionCard({ node }: { node: SceneNode }) {
             // thousands of coordinates, past what a call's arguments can hold.
             let lowestZ = Infinity;
             const v = (dynMesh?.renderVertices ?? []) as number[];
-            for (let i = 2; i < v.length; i += 3) if (v[i] < lowestZ) lowestZ = v[i];
-            const centroidZ = dynMesh ? -lowestZ : 0;
+            for (let i = 2; i < v.length; i += 3) {
+              if (Number.isFinite(v[i]) && v[i] < lowestZ) lowestZ = v[i];
+            }
+            const centroidZ = dynMesh && Number.isFinite(lowestZ) ? -lowestZ : 0;
             const displayZ = node.pos[2] - centroidZ;
             return (<>
               <div className="flex items-center justify-between">

@@ -78,14 +78,28 @@ export function CsgCard({ node: selectedNode }: { node: SceneNode }) {
                   </select>
                 );
               })()}
-              <button
-                onClick={() => { deleteNodeGeom(selectedNode.id, idx); setActiveGeomIndex(0, false); }}
-                disabled={solids.length <= 1}
-                className="p-1 rounded border border-slate-200 text-slate-400 hover:text-rose-600 hover:border-rose-200 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer transition-colors"
-                title={solids.length <= 1 ? 'A body needs at least one shape' : 'Delete this shape'}
-              >
-                <Trash2 className="w-3 h-3" />
-              </button>
+              {(() => {
+                const hwGroup = g.hardware?.group;
+                const remainingPositives = (selectedNode.geoms || []).filter(
+                  (o, oIdx) =>
+                    oIdx !== idx &&
+                    !(hwGroup && o.hardware?.group === hwGroup) &&
+                    !o.csgDerived &&
+                    o.role !== 'collision' &&
+                    o.csg !== 'difference',
+                ).length;
+                const canDelete = remainingPositives >= 1;
+                return (
+                  <button
+                    onClick={() => { deleteNodeGeom(selectedNode.id, idx); setActiveGeomIndex(0, false); }}
+                    disabled={!canDelete}
+                    className="p-1 rounded border border-slate-200 text-slate-400 hover:text-rose-600 hover:border-rose-200 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                    title={!canDelete ? 'A body needs at least one positive shape' : 'Delete this shape'}
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                );
+              })()}
             </div>
           );
         })}

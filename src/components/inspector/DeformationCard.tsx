@@ -2,10 +2,12 @@ import { useShallow } from 'zustand/react/shallow';
 import { Hammer, Sparkles } from 'lucide-react';
 import { useDentStore } from '../../store/dentStore';
 import { useStore } from '../../store/useStore';
-import { isDentable, needsConversionForDenting } from '../../utils/dentMesh';
+import { fromtoCenter, isDentable, meshForDenting, needsConversionForDenting } from '../../utils/dentMesh';
+import { toRenderVertices } from '../../utils/simplifyMesh';
 import type { SceneGeom, SceneNode } from '../../types/scene';
 import { CUSTOM_DENT, CUSTOM_SHATTER, deformMaterial, dentFields, estimateBodyMass, shatterFields } from '../../utils/deformMaterials';
 import { SettledNumberInput } from '../SettledInputs';
+import { RangeInput } from '../RangeInput';
 import { LoadBreakSection, LoadOnlyCard } from './LoadBreakSection';
 import { memberShape } from '../../utils/memberStrength';
 import { DocsInfoButton } from '../docs/DocsInfoButton';
@@ -19,7 +21,6 @@ import { DocsInfoButton } from '../docs/DocsInfoButton';
  */
 export function DeformationCard({ node: selectedNode }: { node: SceneNode }) {
   const lastShatter = useStore((s) => s.lastShatter);
-  const makeDentable = useStore((s) => s.makeDentable);
   const shatteredBodies = useStore((s) => s.visibleShatteredBodies);
   const updateNode = useStore((s) => s.updateNode);
   const updateNodeGeom = useStore((s) => s.updateNodeGeom);
@@ -63,14 +64,46 @@ export function DeformationCard({ node: selectedNode }: { node: SceneNode }) {
     updateNodeGeom(nodeId, u, gi);
   };
 
+  const convertedGeomPatch = (cfg: Partial<SceneGeom>): { geoms: SceneGeom[]; collision?: SceneNode['collision'] } | null => {
+    const updates: Partial<SceneGeom> = { ...cfg };
+    let needsHull = false;
+    if (!isDentable(geom)) {
+      const mesh = meshForDenting(geom);
+      if (!mesh) return null;
+      updates.type = 'mesh';
+      updates.vertices = mesh.vertices;
+      updates.renderVertices = toRenderVertices(mesh.vertices);
+      updates.faces = mesh.faces;
+      if (geom.fromto) {
+        updates.pos = fromtoCenter(geom.fromto);
+        updates.fromto = undefined;
+      }
+      if ((selectedNode.joints || []).length > 0) updates.dynamic = true;
+      if (!selectedNode.collision) needsHull = true;
+    }
+    const nextGeoms = (selectedNode.geoms || []).map((g, i) => (i === gi ? { ...g, ...updates } : g));
+    return { geoms: nextGeoms, ...(needsHull ? { collision: 'hull' } : {}) };
+  };
+
   const setShatter = (on: boolean) => {
     if (!on) { updateNode(nodeId, { shatterImpulseNs: undefined }); return; }
-    if (willConvert) makeDentable(nodeId, gi, {});
-    updateNode(nodeId, shatterFields(material?.shatter ?? CUSTOM_SHATTER, massKg));
+    const shatterPatch = shatterFields(material?.shatter ?? CUSTOM_SHATTER, massKg);
+    if (willConvert) {
+      const converted = convertedGeomPatch({});
+      if (converted) {
+        updateNode(nodeId, { ...shatterPatch, ...converted });
+        return;
+      }
+    }
+    updateNode(nodeId, shatterPatch);
   };
   const setDent = (on: boolean) => {
-    if (on) makeDentable(nodeId, gi, dentFields(material?.dent ?? CUSTOM_DENT));
-    else updateNodeGeom(nodeId, { dentYieldNs: undefined }, gi);
+    if (on) {
+      const converted = convertedGeomPatch(dentFields(material?.dent ?? CUSTOM_DENT));
+      if (converted) updateNode(nodeId, converted);
+    } else {
+      updateNodeGeom(nodeId, { dentYieldNs: undefined }, gi);
+    }
   };
 
   // The material's strength, or hardwood's when no material is set.
@@ -151,10 +184,10 @@ export function DeformationCard({ node: selectedNode }: { node: SceneNode }) {
           </div>
           <div className="flex items-center gap-2">
             <label className="text-[10px] text-slate-500 w-20 shrink-0">Pieces</label>
-            <input
-              type="range" min={2} max={24} step={1}
+            <RangeInput
+              min={2} max={24} step={1}
               value={selectedNode.shatterPieces ?? 8}
-              onChange={(e) => tuneNode({ shatterPieces: parseInt(e.target.value, 10) })}
+              onChange={(v) => tuneNode({ shatterPieces: Math.round(v) })}
               className="flex-1 accent-rose-500 cursor-pointer"
             />
             <span className="text-[10px] text-slate-500 w-8 shrink-0 text-right">{selectedNode.shatterPieces ?? 8}</span>

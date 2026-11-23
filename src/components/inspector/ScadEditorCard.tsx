@@ -19,25 +19,26 @@ function digitsOf(n: number): number {
 /**
  * The OpenSCAD editor, for a body whose shape is OpenSCAD source.
  *
- * Also gives an OpenSCAD body that has no source yet (one from a preset that
- * predates the `scad` field) the source its shape implies, and stores it, so
- * the editor has something to open on.
+ * For a legacy OpenSCAD body that has no stored `scad` field yet, derives the
+ * display code locally (`generateScadForNode`) without mutating the store on
+ * selection; the code is only persisted when the user actually edits/compiles.
  */
 export function ScadEditorCard({ node }: { node: SceneNode }) {
-  useEffect(() => {
-    if (node.scad === undefined && (node.id.includes('openscad') || node.id.includes('scad'))) {
-      useStore.getState().updateNode(node.id, { scad: generateScadForNode(node) });
-    }
-  }, [node]);
-
-  if (node.scad === undefined) return null;
+  const isLegacyScad = node.scad === undefined && (node.id.includes('openscad') || node.id.includes('scad'));
+  if (node.scad === undefined && !isLegacyScad) return null;
   // One editor per body, so a slider timer, a compile in flight or a slider
   // held mid-drag cannot carry over to the next body selected.
   return <ScadEditor key={node.id} node={node} />;
 }
 
 function ScadEditor({ node }: { node: SceneNode }) {
-  const [scadText, setScadText] = useState(node.scad ?? '');
+  const displayScad = useMemo(
+    () => (node.scad !== undefined ? node.scad : generateScadForNode(node)),
+    // Re-derive only when `node.scad` changes (or on remount for a new `node.id`).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [node.id, node.scad],
+  );
+  const [scadText, setScadText] = useState(displayScad);
   const [scadError, setScadError] = useState<string | null>(null);
   const [isScadCompiling, setIsScadCompiling] = useState(false);
 
@@ -57,7 +58,7 @@ function ScadEditor({ node }: { node: SceneNode }) {
   const updateCodeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const compileGenRef = useRef(0);
   const mountedRef = useRef(true);
-  const lastCommittedScadRef = useRef<string | undefined>(node.scad);
+  const lastCommittedScadRef = useRef<string | undefined>(displayScad);
   const nodeId = node.id;
 
   const cancelPendingSlide = useCallback(() => {
@@ -74,10 +75,10 @@ function ScadEditor({ node }: { node: SceneNode }) {
   // The editor follows the stored source: a compile, an undo or the MCP
   // bridge can each change it underneath the textarea. Only the source — an
   // edit anywhere else on the body leaves an unsaved draft alone.
-  const [shownScad, setShownScad] = useState(node.scad);
-  if (node.scad !== shownScad) {
-    setShownScad(node.scad);
-    setScadText(node.scad ?? '');
+  const [shownScad, setShownScad] = useState(displayScad);
+  if (displayScad !== shownScad) {
+    setShownScad(displayScad);
+    setScadText(displayScad);
     setScadError(null);
     setSlidingValues({});
   }
@@ -85,8 +86,8 @@ function ScadEditor({ node }: { node: SceneNode }) {
   // An external source change (Undo, preset reload, MCP) supersedes any
   // in-flight compile or pending slider timer from before it.
   useEffect(() => {
-    if (node.scad !== lastCommittedScadRef.current) {
-      lastCommittedScadRef.current = node.scad;
+    if (displayScad !== lastCommittedScadRef.current) {
+      lastCommittedScadRef.current = displayScad;
       compileGenRef.current += 1;
       setIsScadCompiling(false);
       if (updateCodeTimeoutRef.current !== null) {
@@ -94,9 +95,9 @@ function ScadEditor({ node }: { node: SceneNode }) {
         updateCodeTimeoutRef.current = null;
       }
       slidingValuesRef.current = {};
-      scadTextRef.current = node.scad ?? '';
+      scadTextRef.current = displayScad;
     }
-  }, [node.scad]);
+  }, [displayScad]);
 
   const scadVars = useMemo(() => parseScadVariables(scadText), [scadText]);
 

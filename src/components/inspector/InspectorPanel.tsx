@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type RefObject } from 'react';
+import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import type * as THREE from 'three';
 import { SlidersHorizontal, X } from 'lucide-react';
 import { useStore } from '../../store/useStore';
@@ -35,20 +35,39 @@ export function InspectorPanel({ threeSceneRef }: { threeSceneRef: RefObject<THR
     usePanels.getState().setPropertiesOpen(true);
   }, [patternTarget, selectedId, isPlaying]);
 
+  const resizeCleanupRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    if (!selectedNode || isPlaying) {
+      resizeCleanupRef.current?.();
+      resizeCleanupRef.current = null;
+    }
+  }, [selectedNode, isPlaying]);
+
+  useEffect(() => () => {
+    resizeCleanupRef.current?.();
+    resizeCleanupRef.current = null;
+  }, []);
+
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
+    resizeCleanupRef.current?.();
     const handleMouseMove = (moveEvent: MouseEvent) => {
       const newWidth = window.innerWidth - moveEvent.clientX;
       if (newWidth >= 280 && newWidth <= 800) {
         setPropertiesWidth(newWidth);
       }
     };
-    const handleMouseUp = () => {
+    const cleanup = () => {
       window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
+      window.removeEventListener('mouseup', cleanup);
+      window.removeEventListener('blur', cleanup);
+      if (resizeCleanupRef.current === cleanup) resizeCleanupRef.current = null;
     };
+    resizeCleanupRef.current = cleanup;
     window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
+    window.addEventListener('mouseup', cleanup);
+    window.addEventListener('blur', cleanup);
   }, []);
 
   return (
@@ -114,7 +133,7 @@ export function InspectorPanel({ threeSceneRef }: { threeSceneRef: RefObject<THR
           </h2>
 
           <div className="flex flex-col gap-4">
-            <InspectorCards node={selectedNode} threeSceneRef={threeSceneRef} />
+            <InspectorCards key={selectedNode.id} node={selectedNode} threeSceneRef={threeSceneRef} />
 
           </div>
         </aside>

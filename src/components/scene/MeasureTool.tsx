@@ -44,23 +44,67 @@ const KIND_COLOUR: Record<string, string> = {
 };
 
 /**
- * True when this object is part of a body rather than part of the scenery.
+ * True when this object is a visible part of a body rather than hidden geometry
+ * or scenery.
  *
- * Every geom is drawn inside a `<group name={nodeId}>` (see SceneVisuals), and
- * nothing else in the canvas is. That one fact separates the model from the
- * infinite floor grid, the gizmos and the overlays, without this file having to
- * keep a list of them.
+ * Every geom is drawn inside a `<group name={nodeId}>` (see SceneVisuals),
+ * except unselected static boxes which live in an `InstancedMesh` carrying
+ * `userData.nodeIds`. Hidden objects/ancestors and invisible/zero-opacity
+ * materials are excluded.
  */
-function isBodyGeometry(object: THREE.Object3D): boolean {
-  for (let node: THREE.Object3D | null = object; node; node = node.parent) {
-    if (node.userData?.isOverlay) return false;
-    if (node.type === 'Group' && node.name) return true;
+// eslint-disable-next-line react-refresh/only-export-components
+export function isBodyGeometry(object: THREE.Object3D): boolean {
+  let hasBody = false;
+  const inst = object as THREE.InstancedMesh;
+  if (inst.isInstancedMesh && Array.isArray(object.userData?.nodeIds) && !object.userData?.isBackground) {
+    hasBody = true;
   }
-  return false;
+  for (let node: THREE.Object3D | null = object; node; node = node.parent) {
+    if (!node.visible || node.userData?.isOverlay || node.userData?.isBackground) return false;
+    if (typeof node.userData?.bodyId === 'string') hasBody = true;
+    if (node.type === 'Group' && node.name) hasBody = true;
+  }
+  if (!hasBody) return false;
+  const mesh = object as THREE.Mesh;
+  if (mesh.material) {
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    if (mats.length > 0 && mats.every((m) => m.visible === false || (m.opacity ?? 1) <= 0)) return false;
+  }
+  return true;
+}
+
+/** True when a raycast intersection hits a visible body geom (skipping hidden zero-scale instances). */
+// eslint-disable-next-line react-refresh/only-export-components
+export function isMeasurableHit(hit: Pick<THREE.Intersection, 'object' | 'instanceId'>): boolean {
+  if (!isBodyGeometry(hit.object)) return false;
+  const inst = hit.object as THREE.InstancedMesh;
+  if (inst.isInstancedMesh) {
+    if (typeof hit.instanceId !== 'number' || hit.instanceId < 0 || hit.instanceId >= inst.count) return false;
+    const owners = inst.userData?.nodeIds as (string | undefined)[] | undefined;
+    if (Array.isArray(owners) && !owners[hit.instanceId]) return false;
+    const im = new THREE.Matrix4();
+    inst.getMatrixAt(hit.instanceId, im);
+    const scale = new THREE.Vector3().setFromMatrixScale(im);
+    if (scale.lengthSq() < 1e-12) return false;
+  }
+  return true;
+}
+
+/** World transform of a hit mesh, composing `matrixWorld * instanceMatrix` for `InstancedMesh` hits. */
+// eslint-disable-next-line react-refresh/only-export-components
+export function hitWorldMatrix(mesh: THREE.Mesh, instanceId?: number): THREE.Matrix4 {
+  const inst = mesh as THREE.InstancedMesh;
+  if (inst.isInstancedMesh && typeof instanceId === 'number' && instanceId >= 0 && instanceId < inst.count) {
+    const im = new THREE.Matrix4();
+    inst.getMatrixAt(instanceId, im);
+    return new THREE.Matrix4().multiplyMatrices(mesh.matrixWorld, im);
+  }
+  return mesh.matrixWorld;
 }
 
 /** The three world-space corners of the triangle a raycast hit. */
-function triangleOf(mesh: THREE.Mesh, faceIndex: number): Vec3[] {
+// eslint-disable-next-line react-refresh/only-export-components
+export function triangleOf(mesh: THREE.Mesh, faceIndex: number, worldMatrix: THREE.Matrix4 = mesh.matrixWorld): Vec3[] {
   const position = mesh.geometry.getAttribute('position');
   if (!position) return [];
   const index = mesh.geometry.getIndex();
@@ -69,7 +113,7 @@ function triangleOf(mesh: THREE.Mesh, faceIndex: number): Vec3[] {
     const at = index ? index.getX(faceIndex * 3 + k) : faceIndex * 3 + k;
     if (at >= position.count) return [];
     const point = new THREE.Vector3().fromBufferAttribute(position as THREE.BufferAttribute, at);
-    mesh.localToWorld(point);
+    point.applyMatrix4(worldMatrix);
     corners.push([point.x, point.y, point.z]);
   }
   return corners;
@@ -83,12 +127,13 @@ function triangleOf(mesh: THREE.Mesh, faceIndex: number): Vec3[] {
  * the model. Reading it off the geometry's own parameters is exact, and does
  * not depend on how finely the cylinder happened to be tessellated.
  */
-function analyticCentres(mesh: THREE.Mesh): SnapCandidate[] {
+// eslint-disable-next-line react-refresh/only-export-components
+export function analyticCentres(mesh: THREE.Mesh, worldMatrix: THREE.Matrix4 = mesh.matrixWorld): SnapCandidate[] {
   const parameters = (mesh.geometry as unknown as { parameters?: Record<string, number> }).parameters;
   const type = mesh.geometry.type;
   const out: SnapCandidate[] = [];
   const world = (x: number, y: number, z: number): Vec3 => {
-    const point = mesh.localToWorld(new THREE.Vector3(x, y, z));
+    const point = new THREE.Vector3(x, y, z).applyMatrix4(worldMatrix);
     return [point.x, point.y, point.z];
   };
 
@@ -98,7 +143,7 @@ function analyticCentres(mesh: THREE.Mesh): SnapCandidate[] {
     const half = ((parameters?.height ?? parameters?.length ?? 0) as number) / 2;
     const radius = (parameters?.radiusTop ?? parameters?.radius) as number | undefined;
     // The geometry is built along its own Y, whatever the group holding it has
-    // been rotated to; localToWorld is what puts that back into the viewport.
+    // been rotated to; worldMatrix puts that back into the viewport.
     out.push({ point: world(0, 0, 0), kind: 'centre', label: 'Axis centre', radius });
     if (half > 0) {
       out.push({ point: world(0, half, 0), kind: 'centre', label: 'End centre', radius });
@@ -112,11 +157,35 @@ export const MeasureTool = () => {
   const { scene, camera, gl } = useThree();
   const measureMode = useStore((s) => s.measureMode);
   const setMeasureMode = useStore((s) => s.setMeasureMode);
+  const isPlaying = useStore((s) => s.isPlaying);
+  const sceneNodes = useStore((s) => s.sceneGraph.nodes);
 
   const [picks, setPicks] = useState<SnapCandidate[]>([]);
   const [hover, setHover] = useState<SnapCandidate | null>(null);
   const pointer = useRef({ x: 0, y: 0 });
   const wanted = measureMode === 'angle' ? 3 : 2;
+
+  // Clear picks and hover when leaving measure mode, starting playback, or
+  // when the scene graph changes (scene swap / body edit / undo).
+  const [seenContext, setSeenContext] = useState({ measureMode, isPlaying, sceneNodes });
+  if (
+    seenContext.measureMode !== measureMode ||
+    seenContext.isPlaying !== isPlaying ||
+    seenContext.sceneNodes !== sceneNodes
+  ) {
+    const nodesChanged = seenContext.sceneNodes !== sceneNodes;
+    setSeenContext({ measureMode, isPlaying, sceneNodes });
+    if (!measureMode || isPlaying || nodesChanged) {
+      if (picks.length > 0) setPicks([]);
+      if (hover !== null) setHover(null);
+    }
+  }
+
+  useEffect(() => {
+    if (isPlaying && useStore.getState().measureMode) {
+      setMeasureMode(null);
+    }
+  }, [isPlaying, setMeasureMode]);
 
   // Read by the key handler, which is registered once and must not be torn down
   // and rebuilt on every pick — and must not decide what Esc means from inside
@@ -129,8 +198,9 @@ export const MeasureTool = () => {
   /** Where a world point lands on the screen, in the same pixels as the pointer. */
   const project = useCallback((p: Vec3) => {
     const rect = gl.domElement.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
     const v = new THREE.Vector3(p[0], p[1], p[2]).project(camera);
-    if (v.z > 1) return null; // behind the camera
+    if (v.z > 1 || v.z < -1) return null; // outside near/far clip (e.g. behind the camera)
     return {
       x: rect.left + ((v.x + 1) / 2) * rect.width,
       y: rect.top + ((1 - v.y) / 2) * rect.height,
@@ -159,6 +229,7 @@ export const MeasureTool = () => {
   /** Everything worth snapping to near where the pointer is aiming. */
   const candidatesNow = useCallback((): SnapCandidate | null => {
     const rect = gl.domElement.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
     const caster = new THREE.Raycaster();
     caster.setFromCamera(
       new THREE.Vector2(
@@ -167,17 +238,18 @@ export const MeasureTool = () => {
       ),
       camera,
     );
-    const hit = caster.intersectObjects(scene.children, true).find((i) => isBodyGeometry(i.object));
+    const hit = caster.intersectObjects(scene.children, true).find((i) => isMeasurableHit(i));
     if (!hit) return null;
 
     const mesh = hit.object as THREE.Mesh;
+    const worldMatrix = hitWorldMatrix(mesh, hit.instanceId);
     const candidates: SnapCandidate[] = [
       { point: [hit.point.x, hit.point.y, hit.point.z], kind: 'surface', label: 'On the face' },
     ];
 
     if (mesh.isMesh && mesh.geometry) {
       if (hit.faceIndex !== undefined && hit.faceIndex !== null) {
-        const corners = triangleOf(mesh, hit.faceIndex);
+        const corners = triangleOf(mesh, hit.faceIndex, worldMatrix);
         for (const corner of corners) candidates.push({ point: corner, kind: 'vertex', label: 'Corner' });
         for (let i = 0; i < corners.length; i++) {
           const next = corners[(i + 1) % corners.length];
@@ -191,24 +263,24 @@ export const MeasureTool = () => {
         }
       }
 
-      candidates.push(...analyticCentres(mesh));
+      candidates.push(...analyticCentres(mesh, worldMatrix));
 
       // The circle hunt, on whatever the mesh's own vertices say. This is what
       // finds the middle of a hole that a boolean left behind, where nothing in
       // the document remembers there was ever a cylinder there.
       const position = mesh.geometry.getAttribute('position');
       if (position && position.count <= 400_000) {
-        const local = mesh.worldToLocal(hit.point.clone());
+        const invWorld = worldMatrix.clone().invert();
+        const local = hit.point.clone().applyMatrix4(invWorld);
         // The scale between local and world, so a window in metres on screen is
         // the right number of local units to search in.
-        const spread = new THREE.Vector3();
-        mesh.getWorldScale(spread);
+        const spread = new THREE.Vector3().setFromMatrixScale(worldMatrix);
         const perUnit = Math.max(1e-9, (Math.abs(spread.x) + Math.abs(spread.y) + Math.abs(spread.z)) / 3);
         const radius = (SAMPLE_PIXELS * metresPerPixel(hit.point)) / perUnit;
         const near = nearbyVertices(position.array as ArrayLike<number>, [local.x, local.y, local.z], radius);
         const circle = detectCircle(near);
         if (circle) {
-          const centre = mesh.localToWorld(new THREE.Vector3(...circle.centre));
+          const centre = new THREE.Vector3(...circle.centre).applyMatrix4(worldMatrix);
           candidates.push({
             point: [centre.x, centre.y, centre.z],
             kind: 'centre',
@@ -225,7 +297,7 @@ export const MeasureTool = () => {
   // Pointer tracking and picking. Left button only: the viewport orbits on the
   // right one, which is what makes it safe to take the left for picks.
   useEffect(() => {
-    if (!measureMode) return;
+    if (!measureMode || isPlaying) return;
     // At most one hunt per frame. A pointer move fires far more often than the
     // screen refreshes, and each hunt is a raycast through the whole scene plus
     // a scan of the hit mesh's vertices — cheap once, and jank sixty times.
@@ -281,7 +353,7 @@ export const MeasureTool = () => {
       window.removeEventListener('pointerup', swallow, true);
       window.removeEventListener('click', swallow as EventListener, true);
     };
-  }, [candidatesNow, gl, measureMode, wanted]);
+  }, [candidatesNow, gl, isPlaying, measureMode, wanted]);
 
   // D measures a distance, A an angle, Esc puts the tool away. Pressing the
   // same key again is how you get out of it without reaching for Esc.
@@ -304,9 +376,10 @@ export const MeasureTool = () => {
       if (key !== 'd' && key !== 'a') return;
       // Nothing modal may be interrupted: a running gesture owns the keyboard,
       // and the sculpt brushes have their own idea of what a letter means.
+      // Ignore the `gestureStatus` that MeasureTool itself sets while active!
       const state = useStore.getState();
       // Nor a running simulation, whose control scripts read A and D.
-      if (state.gestureStatus || state.draggedNodeId || state.sculptNodeId || state.paintMode || state.isPlaying) return;
+      if ((!mode && state.gestureStatus) || state.draggedNodeId || state.sculptNodeId || state.paintMode || state.isPlaying) return;
       event.stopImmediatePropagation();
       const asked = key === 'd' ? 'distance' : 'angle';
       setPicks([]);

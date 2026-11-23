@@ -104,14 +104,16 @@ export function JointSettingsCard({ node }: { node: SceneNode }) {
                       <label className="text-[10px] text-slate-500 w-20 shrink-0">Folds to</label>
                       <SettledNumberInput
                         step="5"
+                        max={range[1]}
                         value={range[0]}
-                        onChange={(v) => updateNodeJoint(node.id, { crumpleRangeDeg: [v, range[1]] }, i)}
+                        onChange={(v) => updateNodeJoint(node.id, { crumpleRangeDeg: [Math.min(v, range[1]), range[1]] }, i)}
                         className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
                       />
                       <SettledNumberInput
                         step="5"
+                        min={range[0]}
                         value={range[1]}
-                        onChange={(v) => updateNodeJoint(node.id, { crumpleRangeDeg: [range[0], v] }, i)}
+                        onChange={(v) => updateNodeJoint(node.id, { crumpleRangeDeg: [range[0], Math.max(v, range[0])] }, i)}
                         className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
                       />
                       <span className="text-[10px] text-slate-400 w-8 shrink-0">deg</span>
@@ -282,14 +284,12 @@ export function JointSettingsCard({ node }: { node: SceneNode }) {
                   {isTorque ? 'Control Force' : 'Control Speed'}
                   <span>{joint.actuator.ctrlValue || 0}</span>
                 </label>
-                <input 
-                  type="range" 
+                <RangeInput 
                   min={isTorque ? "-1000" : "-100"} 
                   max={isTorque ? "1000" : "100"} 
                   step={isTorque ? "1" : "0.1"} 
                   value={joint.actuator.ctrlValue || 0} 
-                  onChange={(e) => {
-                    const val = parseFloat(e.target.value);
+                  onChange={(val) => {
                     if (isPlaying) {
                       getPhysicsWorkerClient().setCtrl(`${joint.name}_actuator`, val);
                     }

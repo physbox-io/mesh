@@ -1,5 +1,6 @@
 import { Volume2 } from 'lucide-react';
 import { SliderValue } from '../SliderValue';
+import { SettledColorInput } from '../SettledInputs';
 import { useStore } from '../../store/useStore';
 import type { SceneNode } from '../../types/scene';
 import type { ClothMaterialName, ClothSpec } from '../../types/cloth';
@@ -76,7 +77,7 @@ export function ClothCard({ node }: { node: SceneNode }) {
         </label>
         <label className="flex items-center justify-between gap-2" title="Colour of the cloth">
           <span className={label}>Colour</span>
-          <input type="color" value={hex(rgba)} onChange={(e) => set({ pieces: pieces.map((p) => ({ ...p, rgba: rgbaOf(e.target.value, p.rgba?.[3] ?? 1) })) }, true)} className="w-8 h-6 border border-slate-200 dark:border-slate-700 rounded cursor-pointer bg-white dark:bg-slate-900" />
+          <SettledColorInput value={hex(rgba)} onChange={(h) => set({ pieces: pieces.map((p) => ({ ...p, rgba: rgbaOf(h, p.rgba?.[3] ?? 1) })) }, true)} className="w-8 h-6 border border-slate-200 dark:border-slate-700 rounded cursor-pointer bg-white dark:bg-slate-900" />
         </label>
       </div>
       <div className="flex flex-col gap-1.5 pt-2 border-t border-slate-200/70 dark:border-slate-800">

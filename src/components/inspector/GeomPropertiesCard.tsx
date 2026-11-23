@@ -6,6 +6,7 @@ import { sliderSpan } from '../../utils/sliderSpan';
 import type { SceneGeom, SceneNode } from '../../types/scene';
 import { SliderValue } from '../SliderValue';
 import { RangeInput } from '../RangeInput';
+import { SettledColorInput } from '../SettledInputs';
 import { DocsInfoButton } from '../docs/DocsInfoButton';
 import { MaterialCard } from './MaterialCard';
 import { CouplingCard } from './CouplingCard';
@@ -140,8 +141,23 @@ export function GeomPropertiesCard({ node: selectedNode, part }: { node: SceneNo
           <span>Mass</span>
           <DocsInfoButton tab="gravity" />
         </h3>
-        <label className="text-xs font-medium text-slate-500 flex justify-between">Value <SliderValue value={shownMass} onChange={(v) => updateNodeGeom(selectedNode.id, {mass: v}, activeIndex)} decimals={shownMass > 0 && shownMass < 0.1 ? 3 : 2} unit="kg" min={0} max={50} /></label>
-        <RangeInput min="0" max="50" step="0.001" value={shownMass} onChange={(v) => updateNodeGeom(selectedNode.id, {mass: v}, activeIndex)} className="w-full accent-blue-500 cursor-pointer" />
+        {(() => {
+          const isDynamic = (selectedNode.joints?.length ?? 0) > 0;
+          const setMass = (v: number) => {
+            if (!Number.isFinite(v)) return;
+            if (v <= 0) {
+              updateNodeGeom(selectedNode.id, { mass: isDynamic ? 0.001 : undefined }, activeIndex);
+            } else {
+              updateNodeGeom(selectedNode.id, { mass: isDynamic ? Math.max(0.001, v) : v }, activeIndex);
+            }
+          };
+          return (
+            <>
+              <label className="text-xs font-medium text-slate-500 flex justify-between">Value <SliderValue value={shownMass} onChange={setMass} decimals={shownMass > 0 && shownMass < 0.1 ? 3 : 2} unit="kg" min={isDynamic ? 0.001 : 0} max={50} /></label>
+              <RangeInput min={isDynamic ? '0.001' : '0'} max="50" step="0.001" value={shownMass} onChange={setMass} className="w-full accent-blue-500 cursor-pointer" />
+            </>
+          );
+        })()}
         {mass?.computed && (
           <p className="text-[10px] text-slate-500">
             {mass.scope === 'body' ? 'Whole body, computed' : 'Computed'} from volume × density
@@ -229,25 +245,30 @@ export function GeomPropertiesCard({ node: selectedNode, part }: { node: SceneNo
 
       {part === 'main' && (() => {
         const rgba = geom.rgba || [0.5, 0.5, 0.5, 1];
-        const rHex = Math.floor((rgba[0] ?? 0.5) * 255).toString(16).padStart(2, '0');
-        const gHex = Math.floor((rgba[1] ?? 0.5) * 255).toString(16).padStart(2, '0');
-        const bHex = Math.floor((rgba[2] ?? 0.5) * 255).toString(16).padStart(2, '0');
+        const toHex = (c: number | undefined) =>
+          Math.round(Math.max(0, Math.min(255, (c ?? 0.5) * 255)))
+            .toString(16)
+            .padStart(2, '0');
+        const rHex = toHex(rgba[0]);
+        const gHex = toHex(rgba[1]);
+        const bHex = toHex(rgba[2]);
         return (
           <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
             <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1">Appearance</h3>
             <div className="flex items-center justify-between">
               <span className="text-xs text-slate-500">Color (RGB)</span>
-              <input type="color" value={`#${rHex}${gHex}${bHex}`} 
-                onChange={(e) => {
-                  const hex = e.target.value;
-                  const r = parseInt(hex.slice(1,3), 16)/255;
-                  const g = parseInt(hex.slice(3,5), 16)/255;
-                  const b = parseInt(hex.slice(5,7), 16)/255;
+              <SettledColorInput
+                value={`#${rHex}${gHex}${bHex}`}
+                onChange={(hex) => {
+                  const r = parseInt(hex.slice(1, 3), 16) / 255;
+                  const g = parseInt(hex.slice(3, 5), 16) / 255;
+                  const b = parseInt(hex.slice(5, 7), 16) / 255;
+                  if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) return;
                   // Keep the alpha: picking a colour must not
                   // silently turn a pane of glass back into a wall.
-                  updateNodeGeom(selectedNode.id, {rgba: [r, g, b, rgba[3] ?? 1]}, activeIndex);
-                }} 
-                className="w-8 h-8 rounded cursor-pointer border-0 p-0 shadow-sm" 
+                  updateNodeGeom(selectedNode.id, { rgba: [r, g, b, rgba[3] ?? 1] }, activeIndex);
+                }}
+                className="w-8 h-8 rounded cursor-pointer border-0 p-0 shadow-sm"
               />
             </div>
             <label className="text-xs font-medium text-slate-500 flex justify-between mt-1">
@@ -283,12 +304,21 @@ export function SubGeomSelector({ node: selectedNode }: { node: SceneNode }) {
   const showInternal = useTreeView((s) => s.showInternalParts);
   if (!selectedNode.geoms || selectedNode.geoms.length < 2) return null;
   // A builder's parts are picked here only when the tree lists them too.
-  if (!showInternal && selectedNode.geoms.filter((g) => !g.csgDerived && !g.internal).length < 2) return null;
+  // Collision-only geoms are generated proxies and never directly edited here.
+  const editableGeoms = selectedNode.geoms.filter(
+    (g) => !g.csgDerived && g.role !== 'collision' && (showInternal || !g.internal),
+  );
+  if (editableGeoms.length < 2) return null;
   const activeIndex = (activeGeomIndex >= 0 && activeGeomIndex < selectedNode.geoms.length) ? activeGeomIndex : 0;
   const geom = selectedNode.geoms[activeIndex];
   const hwGroup = geom?.hardware?.group;
   const canDeleteActive = selectedNode.geoms.filter(
-    (g, idx) => idx !== activeIndex && !(hwGroup && g.hardware?.group === hwGroup) && !g.csgDerived && g.csg !== 'difference',
+    (g, idx) =>
+      idx !== activeIndex &&
+      !(hwGroup && g.hardware?.group === hwGroup) &&
+      !g.csgDerived &&
+      g.role !== 'collision' &&
+      g.csg !== 'difference',
   ).length >= 1;
 
   return (
@@ -301,11 +331,11 @@ export function SubGeomSelector({ node: selectedNode }: { node: SceneNode }) {
           className="flex-1 min-w-0 px-2.5 py-1.5 border border-slate-200 dark:border-slate-700 rounded text-xs bg-white dark:bg-slate-950 text-slate-700 dark:text-slate-200 outline-none focus:border-blue-500 cursor-pointer font-medium"
         >
           {selectedNode.geoms.map((g, idx) => (
-            // Generated boolean geoms aren't editable — a body with
-            // 16 sector colliders would otherwise bury its two real
-            // shapes at the bottom of this list. Values stay the
-            // real indices so activeGeomIndex still means one thing.
-            g.csgDerived || (g.internal && !showInternal) ? null : (
+            // Generated boolean and collision geoms aren't editable — a body with
+            // 16 sector colliders would otherwise bury its two real shapes at the
+            // bottom of this list. Values stay the real indices so activeGeomIndex
+            // still means one thing.
+            g.csgDerived || g.role === 'collision' || (g.internal && !showInternal) ? null : (
             <option key={idx} value={idx}>
               {g.csg === 'difference' ? '\u2796 ' : g.csg === 'intersection' ? '\u2229 ' : ''}{g.name || `Geom ${idx + 1}`} ({g.type})
             </option>

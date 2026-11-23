@@ -71,8 +71,13 @@ export function JointTypeCard({ node }: { node: SceneNode }) {
             </div>
             <SettledTextInput
               value={node.joints[0].name || ''}
-              clean={(raw) => raw.replace(/[^a-zA-Z0-9_]/g, '_')}
-              onChange={(cleanName) => updateNodeJoint(node.id, { name: cleanName })}
+              clean={(raw) => (raw.trim().length === 0 ? '' : raw.replace(/[^a-zA-Z0-9_]/g, '_'))}
+              validate={(v) => v.trim().length > 0}
+              onChange={(cleanName) => {
+                const trimmed = cleanName.trim();
+                if (!trimmed) return;
+                updateNodeJoint(node.id, { name: trimmed });
+              }}
               className="w-full px-2 py-1 border border-slate-200 rounded text-xs font-mono bg-white text-slate-800 outline-none focus:border-blue-500 shadow-sm"
               placeholder="e.g. cart_slide"
             />

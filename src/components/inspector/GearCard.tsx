@@ -4,6 +4,26 @@ import { SliderValue } from '../SliderValue';
 import { RangeInput } from '../RangeInput';
 import { guardedEdit } from '../../utils/sizeEdit';
 
+/**
+ * Positive signature for a legacy primitive box-cog gear (cylinder hub + box
+ * teeth, no SCAD / involute `toothForm` / mesh geoms). Prevents imported STLs
+ * or custom bodies named `"gearbox"` / `"landing_gear"` from matching.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function isLegacyGear(node: SceneNode): boolean {
+  return (
+    node.id.includes('gear') &&
+    !node.scad &&
+    !node.toothForm &&
+    Array.isArray(node.geoms) &&
+    node.geoms.length > 0 &&
+    node.geoms[0]?.type === 'cylinder' &&
+    Array.isArray(node.geoms[0]?.size) &&
+    node.geoms[0].size.length > 0 &&
+    !node.geoms.some((g) => g.type === 'mesh')
+  );
+}
+
 /** Gear Config */
 export function GearCard({ node }: { node: SceneNode }) {
   const addPusherPeg = useStore((s) => s.addPusherPeg);
@@ -12,10 +32,11 @@ export function GearCard({ node }: { node: SceneNode }) {
   const updateNodeGeom = useStore((s) => s.updateNodeGeom);
   const updatePusherPeg = useStore((s) => s.updatePusherPeg);
 
-  // A cut gear (Gears & Drives) is resized by rebuilding it, not here: these
-  // sliders rewrite the geoms as box cogs and would throw its teeth away.
-  if (!(node.id.includes('gear') && node.geoms) || node.toothForm) return null;
-  const pegGeom = node.geoms.find((g) => g.name.includes('peg'));
+  // A cut gear (Gears & Drives), SCAD gear, or mesh named "gear" is not a
+  // legacy primitive cog: these sliders rewrite the geoms as box cogs and
+  // would throw its teeth/mesh away.
+  if (!isLegacyGear(node)) return null;
+  const pegGeom = node.geoms.find((g) => g.name?.includes('peg'));
   const gearRadius = node.geoms[0].size[0];
   return (
     <div className="flex flex-col gap-4">
@@ -55,7 +76,7 @@ export function GearCard({ node }: { node: SceneNode }) {
       </div>
 
       {/* generateGearGeoms always places the peg, so `pos` is there. */}
-      {pegGeom && pegGeom.pos ? (
+      {pegGeom && pegGeom.pos && Array.isArray(pegGeom.size) && pegGeom.size.length >= 2 ? (
         <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
           <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1">📍 Pusher Peg Properties</h3>
           <label className="text-xs font-medium text-slate-500 flex justify-between">

@@ -7,6 +7,7 @@ import type { ModelMirror } from '../../types/sceneLayer';
 import { layoutPattern, patternSvg, type PatternPiece } from '../../utils/cloth/patternSvg';
 import { downloadBlob } from '../../utils/downloadBlob';
 import { openTiledPrintWindow, type PaperFormat } from '../../utils/tiledPaperPrint';
+import { RangeInput } from '../RangeInput';
 
 /** Overlay colours on the pattern preview. */
 const OVERLAY = { boning: '#d97706', zipper: '#2563eb', trim: '#334' };
@@ -105,10 +106,10 @@ export function GarmentCard({ node }: { node: SceneNode }) {
       {pattern && (
         <div className="flex items-center gap-2 text-[10px] text-slate-600 dark:text-slate-300">
           <span>Repeat</span>
-          <input
-            type="range" min={0.05} max={0.8} step={0.01} value={pattern.scale ?? 0.25}
-            onChange={(e) => setPattern({ ...pattern, scale: parseFloat(e.target.value) }, true)}
-            className="flex-1 accent-purple-600"
+          <RangeInput
+            min={0.05} max={0.8} step={0.01} value={pattern.scale ?? 0.25}
+            onChange={(v) => setPattern({ ...pattern, scale: v }, true)}
+            className="flex-1 accent-purple-600 cursor-pointer"
           />
           <span className="tabular-nums w-10 text-right">{Math.round((pattern.scale ?? 0.25) * 100)} cm</span>
         </div>

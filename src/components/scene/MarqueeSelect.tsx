@@ -7,6 +7,70 @@ import type { SceneNode } from '../../types/scene';
 /** How far the pointer has to move before a press is a box rather than a click, px. */
 const DRAG_PX = 5;
 
+/** True when every material on a mesh is hidden or fully transparent. */
+function isMaterialHidden(material: THREE.Material | THREE.Material[] | undefined): boolean {
+  if (!material) return false;
+  const mats = Array.isArray(material) ? material : [material];
+  return mats.length > 0 && mats.every((m) => m.visible === false || (m.opacity ?? 1) <= 0);
+}
+
+/**
+ * Computes each visible body's world-space bounding box from its OWN visible
+ * meshes (without letting child `<group name=...>` bodies skew their parent's
+ * centre), skipping `visible === false` objects/ancestors and zero-scale
+ * `(0,0,0)` hidden `InstancedMesh` slots.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function collectVisibleBodyBounds(
+  scene: THREE.Object3D,
+  nodeIds: Set<string>,
+): Map<string, THREE.Box3> {
+  const centreOf = new Map<string, THREE.Box3>();
+  scene.updateMatrixWorld(true);
+  const instMat = new THREE.Matrix4();
+  const scaleVec = new THREE.Vector3();
+  const posVec = new THREE.Vector3();
+  const meshBox = new THREE.Box3();
+
+  const walk = (o: THREE.Object3D, ownerId: string | null) => {
+    if (!o.visible || o.userData?.isOverlay || o.userData?.isBackground) return;
+    const currentOwner = o.name && nodeIds.has(o.name) ? o.name : ownerId;
+
+    const inst = o as THREE.InstancedMesh;
+    const owners = o.userData?.nodeIds as (string | undefined)[] | undefined;
+    if (inst.isInstancedMesh && Array.isArray(owners)) {
+      if (!isMaterialHidden(inst.material)) {
+        for (let i = 0; i < inst.count; i++) {
+          const id = owners[i];
+          if (!id || !nodeIds.has(id)) continue;
+          inst.getMatrixAt(i, instMat);
+          scaleVec.setFromMatrixScale(instMat);
+          if (scaleVec.lengthSq() < 1e-12) continue;
+          posVec.setFromMatrixPosition(instMat).applyMatrix4(inst.matrixWorld);
+          centreOf.set(id, (centreOf.get(id) ?? new THREE.Box3()).expandByPoint(posVec));
+        }
+      }
+      return;
+    }
+
+    const mesh = o as THREE.Mesh;
+    if (mesh.isMesh && mesh.geometry && currentOwner && !isMaterialHidden(mesh.material)) {
+      if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+      if (mesh.geometry.boundingBox && !mesh.geometry.boundingBox.isEmpty()) {
+        meshBox.copy(mesh.geometry.boundingBox).applyMatrix4(mesh.matrixWorld);
+        if (!meshBox.isEmpty()) {
+          centreOf.set(currentOwner, (centreOf.get(currentOwner) ?? new THREE.Box3()).union(meshBox));
+        }
+      }
+    }
+
+    for (const child of o.children) walk(child, currentOwner);
+  };
+
+  walk(scene, null);
+  return centreOf;
+}
+
 /**
  * Select Multiple's box: drag across the viewport with the left button and
  * every body whose middle lands inside the box is selected. Shift keeps what
@@ -34,6 +98,23 @@ export function MarqueeSelect() {
     let start: { x: number; y: number } | null = null;
     let box: HTMLDivElement | null = null;
     let swallowClick = false;
+    let swallowTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const clearSwallow = () => {
+      swallowClick = false;
+      if (swallowTimer !== null) {
+        clearTimeout(swallowTimer);
+        swallowTimer = null;
+      }
+    };
+
+    const cancelDrag = () => {
+      if (box) {
+        box.remove();
+        box = null;
+      }
+      start = null;
+    };
 
     const rectOf = (e: PointerEvent) => {
       const x0 = Math.min(start!.x, e.clientX), x1 = Math.max(start!.x, e.clientX);
@@ -62,14 +143,21 @@ export function MarqueeSelect() {
         const r = rectOf(e);
         box.remove();
         box = null;
+        clearSwallow();
         swallowClick = true;
+        // Clear on the next macrotask so releasing off-canvas (where no
+        // synthetic click fires) never swallows the user's next click.
+        swallowTimer = setTimeout(() => {
+          swallowClick = false;
+          swallowTimer = null;
+        }, 0);
         useStore.getState().selectMany(bodiesIn(r), e.shiftKey);
       }
       start = null;
     };
     const click = (e: MouseEvent) => {
       if (!swallowClick) return;
-      swallowClick = false;
+      clearSwallow();
       e.stopPropagation();
       e.preventDefault();
     };
@@ -77,6 +165,7 @@ export function MarqueeSelect() {
     /** Bodies whose on-screen middle is inside the rectangle (client px). */
     const bodiesIn = (r: { x0: number; x1: number; y0: number; y1: number }): string[] => {
       const bounds = canvas.getBoundingClientRect();
+      if (bounds.width <= 0 || bounds.height <= 0) return [];
       const inside = (world: THREE.Vector3) => {
         const p = world.clone().project(camera);
         if (p.z > 1 || p.z < -1) return false;
@@ -89,26 +178,7 @@ export function MarqueeSelect() {
       walk(useStore.getState().sceneGraph.nodes);
 
       const hit: string[] = [];
-      const centreOf = new Map<string, THREE.Box3>();
-      scene.updateMatrixWorld();
-      scene.traverse((o) => {
-        if (o.name && ids.has(o.name)) {
-          const b = new THREE.Box3().setFromObject(o);
-          if (!b.isEmpty()) centreOf.set(o.name, (centreOf.get(o.name) ?? new THREE.Box3()).union(b));
-        }
-        const inst = o as THREE.InstancedMesh;
-        const owners = o.userData?.nodeIds as (string | undefined)[] | undefined;
-        if (inst.isInstancedMesh && owners) {
-          const m = new THREE.Matrix4();
-          for (let i = 0; i < inst.count; i++) {
-            const id = owners[i];
-            if (!id) continue;
-            inst.getMatrixAt(i, m);
-            const p = new THREE.Vector3().setFromMatrixPosition(m).applyMatrix4(inst.matrixWorld);
-            centreOf.set(id, (centreOf.get(id) ?? new THREE.Box3()).expandByPoint(p));
-          }
-        }
-      });
+      const centreOf = collectVisibleBodyBounds(scene, ids);
       for (const [id, b] of centreOf) if (inside(b.getCenter(new THREE.Vector3()))) hit.push(id);
       return hit;
     };
@@ -116,13 +186,18 @@ export function MarqueeSelect() {
     window.addEventListener('pointerdown', down, true);
     window.addEventListener('pointermove', move, true);
     window.addEventListener('pointerup', up, true);
+    window.addEventListener('pointercancel', cancelDrag, true);
+    window.addEventListener('blur', cancelDrag);
     window.addEventListener('click', click, true);
     return () => {
+      clearSwallow();
+      cancelDrag();
       window.removeEventListener('pointerdown', down, true);
       window.removeEventListener('pointermove', move, true);
       window.removeEventListener('pointerup', up, true);
+      window.removeEventListener('pointercancel', cancelDrag, true);
+      window.removeEventListener('blur', cancelDrag);
       window.removeEventListener('click', click, true);
-      box?.remove();
     };
   }, [on, gl, camera, scene]);
 

@@ -15,7 +15,6 @@ import { DocsInfoButton } from '../docs/DocsInfoButton';
  */
 export function ContainerWaterCard({ node }: { node: SceneNode }) {
   const updateNode = useStore((s) => s.updateNode);
-  const recompile = useStore((s) => s.recompile);
 
   const basin = useMemo(() => measureContainerBasin(node), [node]);
   if (!basin) return null;
@@ -27,9 +26,7 @@ export function ContainerWaterCard({ node }: { node: SceneNode }) {
   const curDepthMm = +(fill * maxDepthMm).toFixed(0);
 
   const applyFill = (nextFill: number | undefined) => {
-    updateNode(node.id, { waterFill: nextFill }, true);
-    const latest = useStore.getState().sceneGraph;
-    void recompile(latest, undefined, false);
+    updateNode(node.id, { waterFill: nextFill });
   };
 
   return (

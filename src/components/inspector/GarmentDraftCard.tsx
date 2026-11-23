@@ -1,5 +1,6 @@
 import { RangeInput } from '../RangeInput';
 import { SliderValue } from '../SliderValue';
+import { SettledColorInput } from '../SettledInputs';
 import { useStore } from '../../store/useStore';
 import type { SceneNode } from '../../types/scene';
 import type { GarmentDraft, GarmentKind } from '../../types/cloth';
@@ -50,7 +51,7 @@ export function GarmentDraftCard({ node }: { node: SceneNode }) {
         </label>
         <label className="flex items-center justify-between gap-2" title="Colour of the cloth">
           <span className={label}>Colour</span>
-          <input type="color" value={hex(s.rgba)} onChange={(e) => set('rgba', rgbaOf(e.target.value, s.rgba[3] ?? 1), true)} className="w-8 h-6 border border-slate-200 dark:border-slate-700 rounded cursor-pointer bg-white dark:bg-slate-900" />
+          <SettledColorInput value={hex(s.rgba)} onChange={(h) => set('rgba', rgbaOf(h, s.rgba[3] ?? 1), true)} className="w-8 h-6 border border-slate-200 dark:border-slate-700 rounded cursor-pointer bg-white dark:bg-slate-900" />
         </label>
         <label className="flex items-center justify-between gap-2" title="Worn over every garment of a lower layer: 0 next to the body, 1 over that, ...">
           <span className={label}>Layer</span>

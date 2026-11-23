@@ -89,11 +89,12 @@ interface HierarchyRowProps {
  * rows that changed rather than the whole tree.
  */
 function HierarchyRow({ node, depth, ancestorHidden, collapsedIds, onToggleCollapsed }: HierarchyRowProps) {
-  const isSelected = useStore((s) => s.selectedNodeId === node.id);
+  const isSelected = useStore((s) => s.selectedNodeId === node.id || s.extraSelectedIds.includes(node.id));
   // -1 unless one of this body's geoms was picked on its own.
   const activeGeomIndex = useStore((s) => (s.selectedNodeId === node.id && s.geomFocused ? s.activeGeomIndex : -1));
   const isHidden = useStore((s) => s.hiddenNodeIds.includes(node.id));
   const toggleNodeHidden = useStore((s) => s.toggleNodeHidden);
+  const toggleExtraSelected = useStore((s) => s.toggleExtraSelected);
   const deleteNodeGeom = useStore((s) => s.deleteNodeGeom);
   const setActiveGeomIndex = useStore((s) => s.setActiveGeomIndex);
   const updateNodeGeom = useStore((s) => s.updateNodeGeom);
@@ -110,7 +111,14 @@ function HierarchyRow({ node, depth, ancestorHidden, collapsedIds, onToggleColla
   return (
     <div className="flex flex-col">
       <div
-        onClick={() => select(node.id)}
+        onClick={(e) => {
+          if (e.shiftKey || e.ctrlKey || e.metaKey) {
+            if (!useStore.getState().selectedNodeId) select(node.id);
+            else toggleExtraSelected(node.id);
+            return;
+          }
+          select(node.id);
+        }}
         style={{ paddingLeft: `${depth === 0 ? 8 : 4}px` }}
         className={`flex items-center px-2 py-1.5 rounded-md border cursor-pointer transition-colors shadow-sm mb-1 ${
           isSelected && activeGeomIndex === -1
@@ -202,7 +210,9 @@ function HierarchyRow({ node, depth, ancestorHidden, collapsedIds, onToggleColla
                     onClick={(e) => {
                       e.stopPropagation();
                       deleteNodeGeom(node.id, idx);
-                      setActiveGeomIndex(0, false);
+                      if (useStore.getState().selectedNodeId === node.id) {
+                        setActiveGeomIndex(0, false);
+                      }
                     }}
                     className={`${g.internal ? '' : 'ml-auto '}pl-1 p-0.5 rounded text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 cursor-pointer shrink-0 transition-opacity ${
                       isGeomSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
@@ -246,8 +256,29 @@ export function HierarchyTree() {
   const setShowInternal = useTreeView((s) => s.setShowInternalParts);
 
   // Bodies folded shut in the hierarchy. View state only, so not in the store,
-  // and everything starts open.
+  // and everything starts open. Prune stale IDs when the scene graph changes.
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set());
+  const [seenNodes, setSeenNodes] = useState(nodes);
+  if (nodes !== seenNodes) {
+    setSeenNodes(nodes);
+    if (collapsedIds.size > 0) {
+      const liveIds = new Set<string>();
+      const walk = (list: SceneNode[]) => {
+        for (const n of list) {
+          liveIds.add(n.id);
+          if (n.children?.length) walk(n.children);
+        }
+      };
+      walk(nodes);
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of collapsedIds) {
+        if (liveIds.has(id)) next.add(id);
+        else changed = true;
+      }
+      if (changed) setCollapsedIds(next);
+    }
+  }
   const toggleCollapsed = useCallback((id: string) => {
     setCollapsedIds((prev) => {
       const next = new Set(prev);

@@ -11,7 +11,6 @@ import { JOIN_MATERIALS, joinMaterial, rodJoinLimits } from '../../utils/joinMat
  */
 export function JoinCard({ node }: { node: SceneNode }) {
   const updateNode = useStore((s) => s.updateNode);
-  const updateNodeGeom = useStore((s) => s.updateNodeGeom);
   const m = joinMaterial(node.joinMaterial);
   if (!m) return null;
   const gi = (node.geoms || []).findIndex((g) => g.type === 'ellipsoid' || g.type === 'sphere');
@@ -22,8 +21,14 @@ export function JoinCard({ node }: { node: SceneNode }) {
   const pick = (id: string) => {
     const next = joinMaterial(id);
     if (!next) return;
-    updateNode(node.id, { joinMaterial: next.id });
-    if (gi >= 0) updateNodeGeom(node.id, { rgba: [...next.rgba], density: next.density }, gi);
+    if (gi >= 0 && node.geoms) {
+      const nextGeoms = node.geoms.map((g, i) =>
+        i === gi ? { ...g, rgba: [...next.rgba], density: next.density } : g,
+      );
+      updateNode(node.id, { joinMaterial: next.id, geoms: nextGeoms });
+    } else {
+      updateNode(node.id, { joinMaterial: next.id });
+    }
   };
 
   return (

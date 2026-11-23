@@ -10,6 +10,7 @@ import { RangeInput } from '../RangeInput';
 import { DocsInfoButton } from '../docs/DocsInfoButton';
 import { ShapeParamFields } from './ShapeParamFields';
 import { CurveFields } from './CurveFields';
+import { isLegacyGear } from './GearCard';
 
 /*
  * Resize. Here, after rotation, because it is the third thing
@@ -39,7 +40,7 @@ export function ResizeCard({ node: selectedNode }: { node: SceneNode }) {
   };
   return (
     <>
-      {!selectedNode.id.includes('gear') && (
+      {!isLegacyGear(selectedNode) && (
         <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-3">
           <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 flex items-center gap-1.5">
             <span className="flex items-center gap-1">📏 Resize Component</span>

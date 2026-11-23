@@ -19,6 +19,7 @@
 // proven out, and Etch and Volt have the same problem in their export dialogs.
 
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { useStore } from '../store/useStore';
 
 /**
  * Holds a value still until edits stop.
@@ -59,6 +60,7 @@ export function useCommitted<T>(
   value: T,
   commit: (v: T) => void,
   delayMs: number,
+  onExternalCancel?: () => void,
 ): [draft: T, setDraft: (v: T) => void, flush: () => void, cancel: () => void] {
   const [draft, setDraftState] = useState(value);
 
@@ -66,11 +68,18 @@ export function useCommitted<T>(
   // and making the timer depend on it would restart the wait on every keystroke
   // of *any* field on the panel.
   const commitRef = useRef(commit);
+  const valueRef = useRef(value);
+  const onExternalCancelRef = useRef(onExternalCancel);
   // Written in an effect, not during render: the timer that reads it can only
   // fire after the commit has happened anyway.
   useEffect(() => { commitRef.current = commit; }, [commit]);
+  useEffect(() => { valueRef.current = value; }, [value]);
+  useEffect(() => { onExternalCancelRef.current = onExternalCancel; }, [onExternalCancel]);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pendingRef = useRef<{ v: T } | null>(null);
+  // Capture the originating commit callback alongside the pending value so
+  // switching `activeGeomIndex` or `selectedNodeId` mid-debounce commits to
+  // the originating target rather than the newly rendered closure.
+  const pendingRef = useRef<{ v: T; commit: (v: T) => void } | null>(null);
 
   /*
    * Follow the value while nothing is pending, so a change from anywhere else —
@@ -82,6 +91,33 @@ export function useCommitted<T>(
     if (pendingRef.current === null) setDraftState(value);
   }, [value]);
 
+  // Cancel any pending debounced draft if Undo, Redo, or a scene/history reset
+  // occurs while a timer is in flight so a late timer never overwrites Undo or
+  // wipes the redoStack.
+  useEffect(() => {
+    return useStore.subscribe((state, prev) => {
+      if (pendingRef.current === null) return;
+      const didUndo = state.redoStack.length > prev.redoStack.length;
+      const didRedo =
+        prev.tempUndoState === null &&
+        prev.redoStack.length > 0 &&
+        state.redoStack.length === prev.redoStack.length - 1 &&
+        state.undoStack !== prev.undoStack;
+      const didHistoryReset =
+        state.sceneGraph !== prev.sceneGraph &&
+        (state.undoStack !== prev.undoStack || state.redoStack !== prev.redoStack);
+      if (didUndo || didRedo || didHistoryReset) {
+        if (timerRef.current !== null) {
+          clearTimeout(timerRef.current);
+          timerRef.current = null;
+        }
+        pendingRef.current = null;
+        setDraftState(valueRef.current);
+        onExternalCancelRef.current?.();
+      }
+    });
+  }, []);
+
   const send = useCallback(() => {
     if (timerRef.current !== null) {
       clearTimeout(timerRef.current);
@@ -90,7 +126,7 @@ export function useCommitted<T>(
     const pending = pendingRef.current;
     if (!pending) return;
     pendingRef.current = null;
-    commitRef.current(pending.v);
+    pending.commit(pending.v);
   }, []);
 
   const cancel = useCallback(() => {
@@ -99,13 +135,13 @@ export function useCommitted<T>(
       timerRef.current = null;
     }
     pendingRef.current = null;
-    setDraftState(value);
-  }, [value]);
+    setDraftState(valueRef.current);
+  }, []);
 
   const setDraft = useCallback(
     (v: T) => {
       setDraftState(v);
-      pendingRef.current = { v };
+      pendingRef.current = { v, commit: commitRef.current };
       if (timerRef.current !== null) clearTimeout(timerRef.current);
       timerRef.current = setTimeout(send, delayMs);
     },
@@ -114,6 +150,7 @@ export function useCommitted<T>(
 
   // An unmount mid-edit — a panel closing, a selection changing — still means
   // the number was typed. Losing it silently is worse than committing it late.
+  // Flush to the originating closure captured in `pending.commit`.
   useEffect(() => () => {
     if (timerRef.current !== null) {
       clearTimeout(timerRef.current);
@@ -121,7 +158,7 @@ export function useCommitted<T>(
     }
     const pending = pendingRef.current;
     pendingRef.current = null;
-    if (pending) commitRef.current(pending.v);
+    if (pending) pending.commit(pending.v);
   }, []);
 
   return [draft, setDraft, send, cancel];

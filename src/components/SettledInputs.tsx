@@ -1,4 +1,4 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useState } from 'react';
 import { NumberInput } from '@physbox-io/ui';
 import { useCommitted } from '../hooks/useSettled';
 
@@ -29,22 +29,34 @@ export interface SettledTextInputProps
   onChange: (v: string) => void;
   /** Applied to each keystroke before it is held, e.g. stripping punctuation. */
   clean?: (raw: string) => string;
+  /** Optional predicate; invalid drafts are not committed and revert on blur/Enter. */
+  validate?: (v: string) => boolean;
 }
 
 export const SettledTextInput: React.FC<SettledTextInputProps> = ({
-  value, onChange, clean, onBlur, onKeyDown, ...rest
+  value, onChange, clean, validate, onBlur, onKeyDown, ...rest
 }) => {
-  const [draft, setDraft, flush] = useCommitted(value, onChange, SETTLE_MS);
+  const commit = useCallback((v: string) => {
+    if (validate && !validate(v)) return;
+    onChange(v);
+  }, [onChange, validate]);
+  const [draft, setDraft, flush, cancel] = useCommitted(value, commit, SETTLE_MS);
 
   const handleBlur = useCallback((e: React.FocusEvent<HTMLInputElement>) => {
-    flush();
+    if (validate && !validate(draft)) cancel();
+    else flush();
     onBlur?.(e);
-  }, [flush, onBlur]);
+  }, [cancel, draft, flush, onBlur, validate]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') flush();
+    if (e.key === 'Enter') {
+      if (validate && !validate(draft)) cancel();
+      else flush();
+    } else if (e.key === 'Escape') {
+      cancel();
+    }
     onKeyDown?.(e);
-  }, [flush, onKeyDown]);
+  }, [cancel, draft, flush, onKeyDown, validate]);
 
   return (
     <input
@@ -64,38 +76,124 @@ export interface SettledNumberInputProps
   onChange: (v: number) => void;
 }
 
+function parseBound(bound: number | string | undefined): number | undefined {
+  if (bound === undefined || bound === '') return undefined;
+  const n = typeof bound === 'number' ? bound : Number(bound);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 /**
  * A plain `<input type="number">`, settled. Its spinner arrows count as typing:
  * holding one walks the value up without asking for the work at every step.
+ *
+ * Out-of-range values are deferred while typing (so intermediate digits like
+ * `"0"` on the way to `"0.5"` or `"-"` on the way to `"-5"` survive) and are
+ * never committed by the debounce timer; on blur or Enter they clamp to
+ * `[min, max]`.
  */
 export const SettledNumberInput: React.FC<SettledNumberInputProps> = ({
-  value, onChange, onBlur, onKeyDown, ...rest
+  value, onChange, min, max, onBlur, onKeyDown, ...rest
 }) => {
-  // Kept as text so a half-typed number — "-", "1.", "" — survives; only a
-  // finished, parseable one is ever sent on.
-  const [draft, setDraft, flush] = useCommitted(String(value), (text) => {
+  const lo = parseBound(min);
+  const hi = parseBound(max);
+  const [text, setText] = useState(String(value));
+  const [seenValue, setSeenValue] = useState(value);
+  if (!Object.is(value, seenValue)) {
+    setSeenValue(value);
+    setText(String(value));
+  }
+
+  const commit = useCallback((n: number) => {
+    if (!Number.isFinite(n)) return;
+    if (lo !== undefined && n < lo) return;
+    if (hi !== undefined && n > hi) return;
+    onChange(n);
+  }, [hi, lo, onChange]);
+
+  const resetText = useCallback(() => setText(String(value)), [value]);
+  const [, setPending, flush, cancel] = useCommitted(value, commit, SETTLE_MS, resetText);
+
+  const commitFinished = useCallback(() => {
     const n = parseFloat(text);
-    if (Number.isFinite(n)) onChange(n);
-  }, SETTLE_MS);
+    if (!Number.isFinite(n)) {
+      cancel();
+      setText(String(value));
+      return;
+    }
+    const clamped = Math.min(hi ?? Infinity, Math.max(lo ?? -Infinity, n));
+    setText(String(clamped));
+    if (clamped !== n) {
+      if (!Object.is(clamped, value)) {
+        setPending(clamped);
+        flush();
+      } else {
+        cancel();
+      }
+      return;
+    }
+    flush();
+  }, [cancel, flush, hi, lo, setPending, text, value]);
 
   const handleBlur = useCallback((e: React.FocusEvent<HTMLInputElement>) => {
-    flush();
+    commitFinished();
     onBlur?.(e);
-  }, [flush, onBlur]);
+  }, [commitFinished, onBlur]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') flush();
+    if (e.key === 'Enter') commitFinished();
+    else if (e.key === 'Escape') {
+      cancel();
+      setText(String(value));
+    }
     onKeyDown?.(e);
-  }, [flush, onKeyDown]);
+  }, [cancel, commitFinished, onKeyDown, value]);
 
   return (
     <input
       {...rest}
       type="number"
+      min={min}
+      max={max}
+      value={text}
+      onChange={(e) => {
+        const raw = e.target.value;
+        setText(raw);
+        const n = parseFloat(raw);
+        if (!Number.isFinite(n) || (lo !== undefined && n < lo) || (hi !== undefined && n > hi)) {
+          cancel();
+          return;
+        }
+        setPending(n);
+      }}
+      onBlur={handleBlur}
+      onKeyDown={handleKeyDown}
+    />
+  );
+};
+
+export interface SettledColorInputProps
+  extends Omit<React.InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange' | 'type'> {
+  value: string;
+  onChange: (hex: string) => void;
+  commitDelay?: number;
+}
+
+/** A colour picker that settles drag ticks before writing to the scene graph. */
+export const SettledColorInput: React.FC<SettledColorInputProps> = ({
+  value, onChange, commitDelay = 120, onBlur, ...rest
+}) => {
+  const [draft, setDraft, flush] = useCommitted(value, onChange, commitDelay);
+  const handleBlur = useCallback((e: React.FocusEvent<HTMLInputElement>) => {
+    flush();
+    onBlur?.(e);
+  }, [flush, onBlur]);
+  return (
+    <input
+      {...rest}
+      type="color"
       value={draft}
       onChange={(e) => setDraft(e.target.value)}
       onBlur={handleBlur}
-      onKeyDown={handleKeyDown}
     />
   );
 };
@@ -104,6 +202,7 @@ export interface SettledNumberFieldProps {
   value: number;
   onChange: (v: number) => void;
   min?: number;
+  max?: number;
   className?: string;
 }
 
@@ -114,9 +213,14 @@ export interface SettledNumberFieldProps {
  * This is that decision, for the callers whose work is expensive.
  */
 export const SettledNumberField: React.FC<SettledNumberFieldProps> = ({
-  value, onChange, min, className,
+  value, onChange, min, max, className,
 }) => {
-  const [draft, setDraft, flush] = useCommitted(value, onChange, SETTLE_MS);
+  const commit = useCallback((v: number) => {
+    if (!Number.isFinite(v)) return;
+    const clamped = Math.min(max ?? Infinity, Math.max(min ?? -Infinity, v));
+    onChange(clamped);
+  }, [max, min, onChange]);
+  const [draft, setDraft, flush] = useCommitted(value, commit, SETTLE_MS);
   return (
     <NumberInput
       value={draft}

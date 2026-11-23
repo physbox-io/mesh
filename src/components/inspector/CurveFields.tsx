@@ -4,6 +4,7 @@ import { lengthSpan } from '../../utils/sliderSpan';
 import type { SceneNode } from '../../types/scene';
 import { SliderValue } from '../SliderValue';
 import { RangeInput } from '../RangeInput';
+import { SettledNumberInput } from '../SettledInputs';
 
 /** A curved track's section and control points. Part of the Resize card. */
 export function CurveFields({ node }: { node: SceneNode }) {
@@ -89,16 +90,16 @@ export function CurveFields({ node }: { node: SceneNode }) {
         {(node.curvePoints || []).map((pt: number[], pi: number) => (
           <div key={pi} className="flex items-center gap-1">
             {[0, 1, 2].map((axis) => (
-              <input
+              <SettledNumberInput
                 key={axis}
-                type="number"
                 step="10"
                 value={Math.round(pt[axis] * 1e5) / 100}
-                onChange={(e) => {
+                onChange={(mmVal) => {
                   // Shown in mm, stored in metres.
-                  const val = parseFloat(e.target.value) / 1000;
-                  if (isNaN(val)) return;
+                  const val = mmVal / 1000;
+                  if (!Number.isFinite(val)) return;
                   const pts = (node.curvePoints || []).map((p: number[]) => [...p]);
+                  if (!pts[pi]) return;
                   pts[pi][axis] = val;
                   updateCurveParams(node.id, { points: pts });
                 }}
@@ -124,10 +125,14 @@ export function CurveFields({ node }: { node: SceneNode }) {
           onClick={() => {
             const pts = (node.curvePoints || []).map((p: number[]) => [...p]);
             const n = pts.length;
-            // extend past the last point along the last span direction
-            const last = pts[n - 1];
-            const prev = pts[n - 2] || [last[0] - 1, last[1], last[2]];
-            pts.push([last[0] + (last[0] - prev[0]), last[1] + (last[1] - prev[1]), last[2] + (last[2] - prev[2])]);
+            if (n === 0) {
+              pts.push([0, 0, 0]);
+            } else {
+              // extend past the last point along the last span direction
+              const last = pts[n - 1];
+              const prev = pts[n - 2] || [last[0] - 1, last[1], last[2]];
+              pts.push([last[0] + (last[0] - prev[0]), last[1] + (last[1] - prev[1]), last[2] + (last[2] - prev[2])]);
+            }
             updateCurveParams(node.id, { points: pts });
           }}
           className="mt-1 px-2 py-1 text-xs font-medium rounded border border-dashed border-slate-300 dark:border-slate-700 text-slate-500 hover:border-blue-400 hover:text-blue-500 transition-colors"

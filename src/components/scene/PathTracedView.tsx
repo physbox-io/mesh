@@ -5,6 +5,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
 import { WebGLPathTracer, ShapedAreaLight, DenoiseMaterial } from 'three-gpu-pathtracer';
 import { useStore } from '../../store/useStore';
+import { useSection } from '../../store/sectionStore';
 import { useViewQuality, usePathTraceStatus, type PathTracePhase } from '../../store/viewQualityStore';
 import type { BackgroundId } from '../../types/scene';
 import { BACKGROUND_LIGHTING } from '../../utils/backgroundScenery';
@@ -162,6 +163,7 @@ export function PathTracedView({ background }: { background: string }) {
   const gl = useThree((s) => s.gl);
   const invalidate = useThree((s) => s.invalidate);
   const backgroundPreset = useStore((s) => s.background);
+  const sectionCut = useSection((s) => s.cut);
 
   const state = useRef({
     sceneSig: [] as number[],
@@ -234,7 +236,7 @@ export function PathTracedView({ background }: { background: string }) {
     state.current.sceneDirty = true;
     state.current.lastChange = performance.now();
     invalidate();
-  }, [background, backgroundPreset, tuningKey, invalidate]);
+  }, [background, backgroundPreset, sectionCut, tuningKey, invalidate]);
 
   // gl, scene and camera from the frame's own state rather than from render,
   // the same way GridFadeFollowsCamera reads them: this writes to the renderer.
@@ -262,7 +264,10 @@ export function PathTracedView({ background }: { background: string }) {
       s.lastChange = now;
     };
 
-    if (useStore.getState().isPlaying) {
+    // Suspend path-traced composite while playing or while Section View is cutting
+    // (the path tracer does not clip to `SectionCut`'s plane and would paint
+    // unclipped geometry on top of the section cut).
+    if (useStore.getState().isPlaying || useSection.getState().cut !== null) {
       holdBack();
       s.sceneDirty = true;
       report('waiting', 0);
@@ -382,6 +387,15 @@ export function PathTracedView({ background }: { background: string }) {
     }
     s.showing = true;
 
+    // Guard against a 0x0 drawing buffer (e.g. hidden/collapsed canvas) before
+    // `renderSample()` resizes FBOs and triggers WebGL framebuffer errors.
+    const drawSize = gl.getDrawingBufferSize(_drawSize);
+    if (drawSize.width <= 0 || drawSize.height <= 0) {
+      holdBack();
+      report('waiting', 0);
+      return;
+    }
+
     // The shader compiles on the GPU driver's own threads; the tracer draws
     // nothing until it has, so say so rather than look stuck.
     // isCompiling is the tracer's own getter, left out of its type declarations.
@@ -493,7 +507,7 @@ export function collectBodies(scene: THREE.Scene): THREE.Mesh[] {
     if (instanced.isInstancedMesh && instanced.count <= 0) return;
     const material = mesh.material as THREE.MeshStandardMaterial;
     if (Array.isArray(mesh.material) || !material.isMeshStandardMaterial) return;
-    if (material.wireframe || material.opacity <= 0) return;
+    if (material.wireframe || !material.visible || material.opacity <= 0) return;
     bodies.push(mesh);
   });
   return bodies;
@@ -539,7 +553,16 @@ export function sceneSignature(bodies: THREE.Mesh[]): number[] {
       material.color.g,
       material.color.b,
       material.opacity,
+      material.roughness,
+      material.metalness,
+      material.emissive.r,
+      material.emissive.g,
+      material.emissive.b,
       material.emissiveIntensity,
+      typeof material.userData?.glow === 'number' ? material.userData.glow : 0,
+      material.transparent ? 1 : 0,
+      material.side,
+      material.visible ? 1 : 0,
     );
     const instanced = mesh as THREE.InstancedMesh;
     if (instanced.isInstancedMesh) {
@@ -581,6 +604,7 @@ const _instanceMatrix = new THREE.Matrix4();
 const _instanceColor = new THREE.Color();
 const _keyPosition = new THREE.Vector3();
 const _keyTarget = new THREE.Vector3();
+const _drawSize = new THREE.Vector2();
 
 /**
  * Cloth meshes bind their metre-scaled weave `normalMap` to `channel = 1` (`uv1`),
@@ -1044,18 +1068,22 @@ export function buildTracedScene(
     k.getWorldPosition(_keyPosition);
     k.target.getWorldPosition(_keyTarget);
     const distance = _keyPosition.distanceTo(_keyTarget);
-    const angularRadius =
-      backgroundPreset !== 'studio'
-        ? BACKGROUND_LIGHTING[backgroundPreset].keyLightAngularRadius
-        : KEY_LIGHT_ANGULAR_RADIUS;
-    const radius = distance * Math.tan(angularRadius);
-    const solidAngle = (Math.PI * radius * radius) / (distance * distance);
-    const keyIntensity = k.intensity * (tuning?.keyScale ?? 1);
-    const disc = new ShapedAreaLight(k.color, keyIntensity / solidAngle, radius * 2, radius * 2);
-    disc.isCircular = true;
-    disc.position.copy(_keyPosition);
-    disc.lookAt(_keyTarget);
-    traced.add(disc);
+    if (distance > 1e-6) {
+      const angularRadius =
+        backgroundPreset !== 'studio'
+          ? BACKGROUND_LIGHTING[backgroundPreset].keyLightAngularRadius
+          : KEY_LIGHT_ANGULAR_RADIUS;
+      const radius = distance * Math.tan(angularRadius);
+      const solidAngle = (Math.PI * radius * radius) / (distance * distance);
+      if (solidAngle > 1e-12 && Number.isFinite(solidAngle)) {
+        const keyIntensity = k.intensity * (tuning?.keyScale ?? 1);
+        const disc = new ShapedAreaLight(k.color, keyIntensity / solidAngle, radius * 2, radius * 2);
+        disc.isCircular = true;
+        disc.position.copy(_keyPosition);
+        disc.lookAt(_keyTarget);
+        traced.add(disc);
+      }
+    }
   }
 
   return traced;
