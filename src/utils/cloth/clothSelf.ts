@@ -36,6 +36,7 @@ import type { ClothModel } from './clothModel';
 import { isLayeredPair } from './clothLayers';
 
 const CELL = 0.03;
+const INV_CELL = 1 / CELL;
 const nextPow2 = (v: number) => {
   let p = 1024;
   while (p < v) p <<= 1;
@@ -89,6 +90,11 @@ interface Group {
    * not their neighbour (`active`, into `particles`), and those triangles, CSR.
    * Most of a garment has none; only these are tested each substep.
    */
+  /** Unique undirected triangle edges (global particle pairs) for fast sagitta evaluation. */
+  sagittaEdges: Int32Array;
+  /** Per-triangle dedup stamp and generation counter for O(1) candidate deduplication. */
+  triStamp: Int32Array;
+  stampGen: number;
   active: Int32Array;
   activeCount: number;
   candStart: Int32Array;
@@ -125,8 +131,11 @@ export class SelfContacts {
 
   /** Each particle's extra gap: its half thickness plus the sagitta of its edges, up to MAX_HALF. */
   private sagitta(g: Group, x: Float64Array) {
-    const T = g.tris, N = this.normal, E = this.extra;
-    for (const i of g.all) { N[3 * i] = 0; N[3 * i + 1] = 0; N[3 * i + 2] = 0; E[i] = 0; }
+    const T = g.tris, N = this.normal, E = this.extra, all = g.all, allHalf = g.allHalf;
+    for (let q = 0; q < all.length; q++) {
+      const i = all[q], k = 3 * i;
+      N[k] = 0; N[k + 1] = 0; N[k + 2] = 0; E[i] = 0;
+    }
     for (let t = 0; t < T.length; t += 3) {
       const a = 3 * T[t], b = 3 * T[t + 1], c = 3 * T[t + 2];
       const ux = x[b] - x[a], uy = x[b + 1] - x[a + 1], uz = x[b + 2] - x[a + 2];
@@ -136,23 +145,25 @@ export class SelfContacts {
       N[b] += nx; N[b + 1] += ny; N[b + 2] += nz;
       N[c] += nx; N[c + 1] += ny; N[c + 2] += nz;
     }
-    for (const i of g.all) {
-      const k = 3 * i, l = Math.hypot(N[k], N[k + 1], N[k + 2]);
-      if (l > 0) { N[k] /= l; N[k + 1] /= l; N[k + 2] /= l; }
+    for (let q = 0; q < all.length; q++) {
+      const k = 3 * all[q], nx = N[k], ny = N[k + 1], nz = N[k + 2];
+      const l = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (l > 0) { const inv = 1 / l; N[k] = nx * inv; N[k + 1] = ny * inv; N[k + 2] = nz * inv; }
     }
-    // Largest sagitta over each point's edges (each interior edge is seen twice; harmless).
-    for (let t = 0; t < T.length; t += 3) {
-      for (let e = 0; e < 3; e++) {
-        const i = T[t + e], j = T[t + (e + 1) % 3], a = 3 * i, b = 3 * j;
-        const L = Math.hypot(x[a] - x[b], x[a + 1] - x[b + 1], x[a + 2] - x[b + 2]);
-        const s = (L * Math.hypot(N[a] - N[b], N[a + 1] - N[b + 1], N[a + 2] - N[b + 2])) / 8;
-        if (s > E[i]) E[i] = s;
-        if (s > E[j]) E[j] = s;
-      }
+    // Largest sagitta over each point's unique undirected triangle edges.
+    const SE = g.sagittaEdges;
+    for (let e = 0; e < SE.length; e += 2) {
+      const i = SE[e], j = SE[e + 1], a = 3 * i, b = 3 * j;
+      const dx = x[a] - x[b], dy = x[a + 1] - x[b + 1], dz = x[a + 2] - x[b + 2];
+      const dnx = N[a] - N[b], dny = N[a + 1] - N[b + 1], dnz = N[a + 2] - N[b + 2];
+      const s = 0.125 * Math.sqrt((dx * dx + dy * dy + dz * dz) * (dnx * dnx + dny * dny + dnz * dnz));
+      if (s > E[i]) E[i] = s;
+      if (s > E[j]) E[j] = s;
     }
-    for (let q = 0; q < g.all.length; q++) {
-      const i = g.all[q], h = g.allHalf[q];
-      E[i] = Math.max(0, Math.min(MAX_HALF, h + E[i]) - h);
+    for (let q = 0; q < all.length; q++) {
+      const i = all[q], h = allHalf[q];
+      const v = Math.min(MAX_HALF, h + E[i]) - h;
+      E[i] = v > 0 ? v : 0;
     }
   }
 
@@ -171,16 +182,17 @@ export class SelfContacts {
       if (rebuild) { this.sagitta(g, x); build(g, x, reach + MOVE_MARGIN); candidates(g, x); }
       const X = this.extra;
       const T = g.tris, C = g.cand, CS = g.candStart;
+      const reach2 = reach * reach;
       for (let ai = 0; ai < g.activeCount; ai++) {
         const pi = g.active[ai], i = g.particles[pi], k = 3 * i;
         const px = x[k], py = x[k + 1], pz = x[k + 2];
-        let best = reach, bt = -1, bq0 = 0, bq1 = 0, bq2 = 0, bb1 = 0, bb2 = 0;
+        let best2 = reach2, bt = -1, bq0 = 0, bq1 = 0, bq2 = 0, bb1 = 0, bb2 = 0;
         for (let e = CS[ai]; e < CS[ai + 1]; e++) {
           const t = C[e];
           closest(px, py, pz, x, 3 * T[3 * t], 3 * T[3 * t + 1], 3 * T[3 * t + 2], out);
-          const dx = px - out[0], dy = py - out[1], dz = pz - out[2], d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-          if (d >= best) continue;
-          best = d; bt = t; bq0 = out[0]; bq1 = out[1]; bq2 = out[2]; bb1 = out[3]; bb2 = out[4];
+          const dx = px - out[0], dy = py - out[1], dz = pz - out[2], d2 = dx * dx + dy * dy + dz * dz;
+          if (d2 >= best2) continue;
+          best2 = d2; bt = t; bq0 = out[0]; bq1 = out[1]; bq2 = out[2]; bb1 = out[3]; bb2 = out[4];
         }
         if (bt < 0) continue;
         const ia = T[3 * bt], ib = T[3 * bt + 1], ic = T[3 * bt + 2];
@@ -203,7 +215,7 @@ export class SelfContacts {
         if (sd >= sep || sd < -MAX_DEPTH) continue;
         // Only a triangle the point is over (to within the separation): one
         // beside it on its own flat sheet is no fold, however near.
-        if (best * best - sd * sd > sep * sep) continue;
+        if (best2 - sd * sd > sep * sep) continue;
         const wp = w[i], wa = w[ia], wb = w[ib], wc = w[ic];
         const den = wp + b0 * b0 * wa + bb1 * bb1 * wb + bb2 * bb2 * wc;
         if (den <= 0) continue;
@@ -235,28 +247,33 @@ export class SelfContacts {
 function candidates(g: Group, x: Float64Array) {
   const T = g.tris, B = g.box, NS = g.nearStart, NR = g.near, mask = g.mask;
   const PP = g.pPiece, TP = g.tPiece, LP = g.layered, np = g.nPieces;
+  const triStamp = g.triStamp;
+  let stamp = g.stampGen;
   let count = 0, total = 0;
   g.candStart[0] = 0;
   for (let pi = 0; pi < g.particles.length; pi++) {
     const i = g.particles[pi], k = 3 * i, pRow = PP[pi] * np;
     const px = x[k], py = x[k + 1], pz = x[k + 2];
-    const b = hash(Math.floor(px / CELL), Math.floor(py / CELL), Math.floor(pz / CELL), mask);
+    const b = hash(Math.floor(px * INV_CELL), Math.floor(py * INV_CELL), Math.floor(pz * INV_CELL), mask);
+    const e0 = g.start[b], e1 = g.start[b + 1];
+    if (e0 === e1) continue;
+    if (++stamp >= 0x7fffffff) { triStamp.fill(0); stamp = 1; }
     const n0 = NS[pi], n1 = NS[pi + 1], from = total;
-    for (let e = g.start[b]; e < g.start[b + 1]; e++) {
-      const t = g.entries[e], o = 6 * t;
+    for (let e = e0; e < e1; e++) {
+      const t = g.entries[e];
+      if (triStamp[t] === stamp) continue;
+      triStamp[t] = stamp;
       if (LP[pRow + TP[t]]) continue;
+      const o = 6 * t;
       if (px < B[o] || py < B[o + 1] || pz < B[o + 2] || px > B[o + 3] || py > B[o + 4] || pz > B[o + 5]) continue;
       const ia = T[3 * t], ib = T[3 * t + 1], ic = T[3 * t + 2];
       if (has(NR, n0, n1, ia) || has(NR, n0, n1, ib) || has(NR, n0, n1, ic)) continue;
-      // Two cells hashed to one bucket enter a triangle twice.
-      let dup = false;
-      for (let q = from; q < total; q++) if (g.cand[q] === t) { dup = true; break; }
-      if (dup) continue;
       if (total >= g.cand.length) { const grown = new Int32Array(Math.max(1024, g.cand.length * 2)); grown.set(g.cand); g.cand = grown; }
       g.cand[total++] = t;
     }
     if (total > from) { g.active[count++] = pi; g.candStart[count] = total; }
   }
+  g.stampGen = stamp;
   g.activeCount = count;
 }
 
@@ -357,6 +374,18 @@ function buildGroup(pieces: SelfPiece[], w: Float64Array, links: ArrayLike<numbe
   if (!particles.length || !tris.length) return null;
   const nt = tris.length / 3;
   const buckets = nextPow2(Math.max(1024, 2 * nt));
+  // Unique undirected triangle edges for sagitta pass (halves edge work on interior edges).
+  const seenEdge = new Set<number>(), sagEdges: number[] = [];
+  const stride = Math.max(1, w.length);
+  for (let t = 0; t < tris.length; t += 3) {
+    const a = tris[t], b = tris[t + 1], c = tris[t + 2];
+    const k0 = a < b ? a * stride + b : b * stride + a;
+    if (!seenEdge.has(k0)) { seenEdge.add(k0); sagEdges.push(a, b); }
+    const k1 = b < c ? b * stride + c : c * stride + b;
+    if (!seenEdge.has(k1)) { seenEdge.add(k1); sagEdges.push(b, c); }
+    const k2 = c < a ? c * stride + a : a * stride + c;
+    if (!seenEdge.has(k2)) { seenEdge.add(k2); sagEdges.push(c, a); }
+  }
   return {
     tris: Int32Array.from(tris), particles: Int32Array.from(particles), half: Float64Array.from(half), mu: Float64Array.from(mu),
     triHalf: Float64Array.from(triHalf), triMu: Float64Array.from(triMu),
@@ -365,6 +394,7 @@ function buildGroup(pieces: SelfPiece[], w: Float64Array, links: ArrayLike<numbe
     buckets, mask: buckets - 1,
     start: new Int32Array(buckets + 1), fill: new Int32Array(buckets), range: new Int32Array(nt * 6), entries: new Int32Array(0), box: new Float64Array(nt * 6),
     reach: 2 * maxHalf,
+    sagittaEdges: Int32Array.from(sagEdges), triStamp: new Int32Array(nt), stampGen: 0,
     active: new Int32Array(particles.length), activeCount: 0, candStart: new Int32Array(particles.length + 1), cand: new Int32Array(1024),
   };
 }
@@ -376,13 +406,21 @@ function build(g: Group, x: Float64Array, reach: number) {
   let total = 0;
   for (let t = 0; t < nt; t++) {
     const a = 3 * T[3 * t], b = 3 * T[3 * t + 1], c = 3 * T[3 * t + 2], o = 6 * t;
-    for (let k = 0; k < 3; k++) {
-      B[o + k] = Math.min(x[a + k], x[b + k], x[c + k]) - reach;
-      B[o + 3 + k] = Math.max(x[a + k], x[b + k], x[c + k]) + reach;
-      range[o + k] = Math.floor(B[o + k] / CELL);
-      range[o + 3 + k] = Math.floor(B[o + 3 + k] / CELL);
-    }
-    for (let ix = range[o]; ix <= range[o + 3]; ix++) for (let iy = range[o + 1]; iy <= range[o + 4]; iy++) for (let iz = range[o + 2]; iz <= range[o + 5]; iz++) {
+    const ax = x[a], bx = x[b], cx = x[c];
+    const loX = (ax < bx ? (ax < cx ? ax : cx) : (bx < cx ? bx : cx)) - reach;
+    const hiX = (ax > bx ? (ax > cx ? ax : cx) : (bx > cx ? bx : cx)) + reach;
+    const ay = x[a + 1], by = x[b + 1], cy = x[c + 1];
+    const loY = (ay < by ? (ay < cy ? ay : cy) : (by < cy ? by : cy)) - reach;
+    const hiY = (ay > by ? (ay > cy ? ay : cy) : (by > cy ? by : cy)) + reach;
+    const az = x[a + 2], bz = x[b + 2], cz = x[c + 2];
+    const loZ = (az < bz ? (az < cz ? az : cz) : (bz < cz ? bz : cz)) - reach;
+    const hiZ = (az > bz ? (az > cz ? az : cz) : (bz > cz ? bz : cz)) + reach;
+    B[o] = loX; B[o + 1] = loY; B[o + 2] = loZ; B[o + 3] = hiX; B[o + 4] = hiY; B[o + 5] = hiZ;
+    const ix0 = Math.floor(loX * INV_CELL), ix1 = Math.floor(hiX * INV_CELL);
+    const iy0 = Math.floor(loY * INV_CELL), iy1 = Math.floor(hiY * INV_CELL);
+    const iz0 = Math.floor(loZ * INV_CELL), iz1 = Math.floor(hiZ * INV_CELL);
+    range[o] = ix0; range[o + 1] = iy0; range[o + 2] = iz0; range[o + 3] = ix1; range[o + 4] = iy1; range[o + 5] = iz1;
+    for (let ix = ix0; ix <= ix1; ix++) for (let iy = iy0; iy <= iy1; iy++) for (let iz = iz0; iz <= iz1; iz++) {
       start[hash(ix, iy, iz, mask) + 1]++; total++;
     }
   }
@@ -391,7 +429,8 @@ function build(g: Group, x: Float64Array, reach: number) {
   fill.set(start.subarray(0, buckets));
   for (let t = 0; t < nt; t++) {
     const o = 6 * t;
-    for (let ix = range[o]; ix <= range[o + 3]; ix++) for (let iy = range[o + 1]; iy <= range[o + 4]; iy++) for (let iz = range[o + 2]; iz <= range[o + 5]; iz++) {
+    const ix0 = range[o], iy0 = range[o + 1], iz0 = range[o + 2], ix1 = range[o + 3], iy1 = range[o + 4], iz1 = range[o + 5];
+    for (let ix = ix0; ix <= ix1; ix++) for (let iy = iy0; iy <= iy1; iy++) for (let iz = iz0; iz <= iz1; iz++) {
       g.entries[fill[hash(ix, iy, iz, mask)]++] = t;
     }
   }
@@ -402,22 +441,25 @@ const out = [0, 0, 0, 0, 0];
 function closest(px: number, py: number, pz: number, x: Float64Array, a: number, b: number, c: number, o: number[]) {
   const ax = x[a], ay = x[a + 1], az = x[a + 2];
   const abx = x[b] - ax, aby = x[b + 1] - ay, abz = x[b + 2] - az, acx = x[c] - ax, acy = x[c + 1] - ay, acz = x[c + 2] - az;
-  const set = (v: number, ww: number) => { o[0] = ax + abx * v + acx * ww; o[1] = ay + aby * v + acy * ww; o[2] = az + abz * v + acz * ww; o[3] = v; o[4] = ww; };
   const apx = px - ax, apy = py - ay, apz = pz - az;
   const d1 = abx * apx + aby * apy + abz * apz, d2 = acx * apx + acy * apy + acz * apz;
-  if (d1 <= 0 && d2 <= 0) return set(0, 0);
+  if (d1 <= 0 && d2 <= 0) { o[0] = ax; o[1] = ay; o[2] = az; o[3] = 0; o[4] = 0; return; }
   const bpx = px - x[b], bpy = py - x[b + 1], bpz = pz - x[b + 2];
   const d3 = abx * bpx + aby * bpy + abz * bpz, d4 = acx * bpx + acy * bpy + acz * bpz;
-  if (d3 >= 0 && d4 <= d3) return set(1, 0);
+  if (d3 >= 0 && d4 <= d3) { o[0] = x[b]; o[1] = x[b + 1]; o[2] = x[b + 2]; o[3] = 1; o[4] = 0; return; }
   const vc = d1 * d4 - d3 * d2;
-  if (vc <= 0 && d1 >= 0 && d3 <= 0) return set(d1 / (d1 - d3), 0);
+  if (vc <= 0 && d1 >= 0 && d3 <= 0) { const v = d1 / (d1 - d3); o[0] = ax + abx * v; o[1] = ay + aby * v; o[2] = az + abz * v; o[3] = v; o[4] = 0; return; }
   const cpx = px - x[c], cpy = py - x[c + 1], cpz = pz - x[c + 2];
   const d5 = abx * cpx + aby * cpy + abz * cpz, d6 = acx * cpx + acy * cpy + acz * cpz;
-  if (d6 >= 0 && d5 <= d6) return set(0, 1);
+  if (d6 >= 0 && d5 <= d6) { o[0] = x[c]; o[1] = x[c + 1]; o[2] = x[c + 2]; o[3] = 0; o[4] = 1; return; }
   const vb = d5 * d2 - d1 * d6;
-  if (vb <= 0 && d2 >= 0 && d6 <= 0) return set(0, d2 / (d2 - d6));
+  if (vb <= 0 && d2 >= 0 && d6 <= 0) { const ww = d2 / (d2 - d6); o[0] = ax + acx * ww; o[1] = ay + acy * ww; o[2] = az + acz * ww; o[3] = 0; o[4] = ww; return; }
   const va = d3 * d6 - d5 * d4;
-  if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) { const v = (d4 - d3) / (d4 - d3 + (d5 - d6)); return set(1 - v, v); }
-  const den = 1 / (va + vb + vc);
-  return set(vb * den, vc * den);
+  if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) {
+    const ww = (d4 - d3) / (d4 - d3 + (d5 - d6)), v = 1 - ww;
+    o[0] = ax + abx * v + acx * ww; o[1] = ay + aby * v + acy * ww; o[2] = az + abz * v + acz * ww; o[3] = v; o[4] = ww;
+    return;
+  }
+  const den = 1 / (va + vb + vc), v = vb * den, ww = vc * den;
+  o[0] = ax + abx * v + acx * ww; o[1] = ay + aby * v + acy * ww; o[2] = az + abz * v + acz * ww; o[3] = v; o[4] = ww;
 }

@@ -18,7 +18,7 @@ import type { BodyFormMeasurements, GarmentDraft, GarmentPlane } from '../../typ
 import { bodyFormGeoms, bodyFormSection, bodyLandmarks, formSkin } from './bodyForm';
 import { formLimbs, type FormLimb, type LimbName, type LimbSectionAt } from './formLimbs';
 import type { LimbPath } from './limbPath';
-import { gridOver, meshSdfWithin, sampleGrid } from './formSdf';
+import { gridOver, meshSdfWithin, sampleGrid, sampleGridXYZ } from './formSdf';
 import { CLOTH_MATERIALS } from './clothMesh';
 import { garmentSettings } from './garments';
 import { ontoField, surfaceNet } from './surfaceNets';
@@ -263,6 +263,14 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
   }
   const weights = new Float64Array(nCovers);
   const dArr = new Float64Array(nCovers);
+  const coverZDep = new Uint8Array(nCovers);
+  const coverConstSink = new Float64Array(nCovers);
+  for (let ci = 0; ci < nCovers; ci++) {
+    const cov = plan.covers[ci];
+    coverZDep[ci] = cov.snug || cov.taper ? 1 : 0;
+    coverConstSink[ci] = Math.max(0, cov.off - rest);
+  }
+  const invBlend = 1 / BLEND;
   const p = [0, 0, 0], at = [0, 0, 0], up = [0, 0, 0];
   let idx = 0;
   for (let k = 0; k < nz; k++) {
@@ -276,46 +284,49 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
           if (v < dmin) dmin = v;
         }
         if (dmin > rk) { field[idx] = dmin; continue; }
-        p[0] = grid.min[0] + i * H; p[1] = yj; p[2] = zk;
-        // Hung from what it rests on: its girth ease below it, not round it. The
-        // surface is the form's moved down by the ease there (a sleeve on an arm,
-        // slack underneath; a bodice's shoulder seam on the shoulder), so a girth
-        // is kept and what faces up is at the rest clearance. One move at a point
-        // for every part, blended as the ease is: moved apart, an arm's root
-        // stood up through a body moved further down. A flare is length, not
-        // girth, and is not moved.
-        // The move is the ease where it is read from, the lifted point (a snug
-        // band's eases off above it): found in a few steps, as it varies slowly.
-        let w0 = 0;
+        const px = grid.min[0] + i * H;
+        p[0] = px; p[1] = yj; p[2] = zk;
+        let w0 = 0, anyZDep = 0, constSinkSum = 0;
         for (let ci = 0; ci < nCovers; ci++) {
-          const w = Math.exp(-(partSdfs[ci][idx] - dmin) / BLEND);
-          const wc = w < 1e-3 ? 0 : w;
-          weights[ci] = wc;
-          w0 += wc;
+          const dd = partSdfs[ci][idx] - dmin;
+          if (dd > BLEND_REACH) { weights[ci] = 0; continue; }
+          const w = Math.exp(-dd * invBlend);
+          if (w < 1e-3) { weights[ci] = 0; continue; }
+          weights[ci] = w;
+          w0 += w;
+          if (coverZDep[ci]) anyZDep = 1;
+          else constSinkSum += w * coverConstSink[ci];
         }
         let sink = 0;
-        at[0] = p[0]; at[1] = p[1];
-        for (let it = 0; it < 3; it++) {
-          at[2] = zk + sink;
-          let next = 0;
-          for (let ci = 0; ci < nCovers; ci++) {
-            if (weights[ci]) next += weights[ci] * Math.max(0, partOff(plan.covers[ci], at, false) - rest);
+        if (!anyZDep) {
+          sink = constSinkSum / w0;
+        } else {
+          at[0] = px; at[1] = yj;
+          for (let it = 0; it < 3; it++) {
+            at[2] = zk + sink;
+            let next = constSinkSum;
+            for (let ci = 0; ci < nCovers; ci++) {
+              if (weights[ci] && coverZDep[ci]) next += weights[ci] * Math.max(0, partOff(plan.covers[ci], at, false) - rest);
+            }
+            sink = next / w0;
           }
-          sink = next / w0;
         }
         sinkGrid[idx] = sink;
         // The surface as the form has it, at the height it hangs from: each
         // part's distance and stand-off (a flare by height, a snug band) read there.
-        up[0] = p[0]; up[1] = p[1]; up[2] = zk + sink;
+        const zUp = zk + sink;
+        up[0] = px; up[1] = yj; up[2] = zUp;
         let hung = Infinity;
         for (let ci = 0; ci < nCovers; ci++) {
-          const v = sink > 0 ? sampleGrid(grid, partSdfs[ci], up) : partSdfs[ci][idx];
+          const v = sink > 0 ? sampleGridXYZ(grid, partSdfs[ci], px, yj, zUp) : partSdfs[ci][idx];
           dArr[ci] = v;
           if (v < hung) hung = v;
         }
         let wsum = 0, esum = 0;
         for (let ci = 0; ci < nCovers; ci++) {
-          const w = Math.exp(-(dArr[ci] - hung) / BLEND);
+          const dd = dArr[ci] - hung;
+          if (dd > BLEND_REACH) continue;
+          const w = Math.exp(-dd * invBlend);
           if (w < 1e-3) continue;
           wsum += w;
           esum += w * partOff(plan.covers[ci], up);

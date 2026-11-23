@@ -162,48 +162,119 @@ function cg(apply: (x: Float64Array, out: Float64Array) => void, b: Float64Array
  * the root of its area. Two points pinned, far apart, so the map is fixed.
  */
 function lscm(n: number, tris: number[], frames: { p: V2[]; area: number }[], pin: [number, V2][]): V2[] {
-  // Each triangle's rows: r = sum_j (v_j g_j - u_j R90 g_j), g_j = grad phi_j.
-  // Flat arrays (corner j of row c of triangle t at 6t + 3c + j): the
-  // operator is applied thousands of times.
-  const T = frames.length, idx = new Int32Array(3 * T), cu = new Float64Array(6 * T), cv = new Float64Array(6 * T);
-  frames.forEach(({ p, area }, t) => {
-    const w = Math.sqrt(Math.max(area, 1e-16));
-    for (let j = 0; j < 3; j++) {
-      idx[3 * t + j] = tris[3 * t + j];
-      const a = p[(j + 1) % 3], b = p[(j + 2) % 3];
-      // Opposite edge turned a quarter, over twice the area.
-      const g: V2 = [-(b[1] - a[1]) / (2 * area || 1e-16), (b[0] - a[0]) / (2 * area || 1e-16)];
-      const r90: V2 = [-g[1], g[0]];
-      for (let c = 0; c < 2; c++) { cv[6 * t + 3 * c + j] = w * g[c]; cu[6 * t + 3 * c + j] = -w * r90[c]; }
-    }
-  });
+  // Assemble exact symmetric normal equations M = A^T A in vertex-level CSR:
+  // each off-diagonal 2x2 block between vertices (i, j) has the form
+  // [[s, a], [-a, s]] where s = sum w^2 (g_i . g_j) and a = sum w^2 (g_i x g_j),
+  // and each diagonal 2x2 block is diagV[i] * I_2.
+  const T = frames.length;
   const pinned = new Map(pin);
   const isPinned = new Uint8Array(n);
-  for (const [i] of pin) isPinned[i] = 1;
-  // y's rows' residuals, spread back: out += sign * A^T A y.
-  const normal = (y: Float64Array, out: Float64Array, sign: number) => {
-    for (let t = 0; t < T; t++) {
-      const i0 = 2 * idx[3 * t], i1 = 2 * idx[3 * t + 1], i2 = 2 * idx[3 * t + 2];
-      for (let c = 0; c < 2; c++) {
-        const o = 6 * t + 3 * c;
-        const r = cu[o] * y[i0] + cv[o] * y[i0 + 1] + cu[o + 1] * y[i1] + cv[o + 1] * y[i1 + 1] + cu[o + 2] * y[i2] + cv[o + 2] * y[i2 + 1];
-        out[i0] += sign * cu[o] * r; out[i0 + 1] += sign * cv[o] * r;
-        out[i1] += sign * cu[o + 1] * r; out[i1 + 1] += sign * cv[o + 1] * r;
-        out[i2] += sign * cu[o + 2] * r; out[i2 + 1] += sign * cv[o + 2] * r;
+  const pinU = new Float64Array(n), pinV = new Float64Array(n);
+  for (const [i, q] of pin) { isPinned[i] = 1; pinU[i] = q[0]; pinV[i] = q[1]; }
+
+  // Pass 1: count directed off-diagonal triangle contributions per free row.
+  const rawCount = new Int32Array(n);
+  for (let t = 0; t < T; t++) {
+    const v0 = tris[3 * t], v1 = tris[3 * t + 1], v2 = tris[3 * t + 2];
+    const f0 = !isPinned[v0], f1 = !isPinned[v1], f2 = !isPinned[v2];
+    if (f0) { if (f1) rawCount[v0]++; if (f2) rawCount[v0]++; }
+    if (f1) { if (f0) rawCount[v1]++; if (f2) rawCount[v1]++; }
+    if (f2) { if (f0) rawCount[v2]++; if (f1) rawCount[v2]++; }
+  }
+  const rawPtr = new Int32Array(n + 1);
+  for (let i = 0; i < n; i++) rawPtr[i + 1] = rawPtr[i] + rawCount[i];
+  const rawTotal = rawPtr[n];
+  const rawCol = new Int32Array(rawTotal);
+  const rawSym = new Float64Array(rawTotal);
+  const rawSkew = new Float64Array(rawTotal);
+  const rawFill = rawPtr.slice(0, n);
+  const diagFree = new Float64Array(n);
+  const b = new Float64Array(2 * n);
+
+  const gx = new Float64Array(3), gy = new Float64Array(3), vs = new Int32Array(3);
+  for (let t = 0; t < T; t++) {
+    const { p, area } = frames[t];
+    const w2 = Math.max(area, 1e-16);
+    const inv2A = 1 / (2 * area || 1e-16);
+    vs[0] = tris[3 * t]; vs[1] = tris[3 * t + 1]; vs[2] = tris[3 * t + 2];
+    for (let j = 0; j < 3; j++) {
+      const a = p[(j + 1) % 3], bp = p[(j + 2) % 3];
+      gx[j] = -(bp[1] - a[1]) * inv2A;
+      gy[j] = (bp[0] - a[0]) * inv2A;
+    }
+    for (let j = 0; j < 3; j++) {
+      const vi = vs[j];
+      if (isPinned[vi]) continue;
+      const gxj = gx[j], gyj = gy[j];
+      diagFree[vi] += w2 * (gxj * gxj + gyj * gyj);
+      for (let k = 0; k < 3; k++) {
+        if (k === j) continue;
+        const vj = vs[k], gxk = gx[k], gyk = gy[k];
+        const s = w2 * (gxj * gxk + gyj * gyk);
+        const sk = w2 * (gyj * gxk - gxj * gyk);
+        if (isPinned[vj]) {
+          const xu = pinU[vj], xv = pinV[vj];
+          b[2 * vi] -= s * xu + sk * xv;
+          b[2 * vi + 1] -= s * xv - sk * xu;
+        } else {
+          const pos = rawFill[vi]++;
+          rawCol[pos] = vj;
+          rawSym[pos] = s;
+          rawSkew[pos] = sk;
+        }
       }
     }
-    for (let i = 0; i < n; i++) if (isPinned[i]) { out[2 * i] = 0; out[2 * i + 1] = 0; }
+  }
+
+  // Pass 2: deduplicate each row into compact CSR (merges interior edges shared by 2 triangles).
+  const stamp = new Int32Array(n).fill(-1);
+  const slotOf = new Int32Array(n);
+  const rowPtr = new Int32Array(n + 1);
+  const colIdx = new Int32Array(rawTotal);
+  const valSym = new Float64Array(rawTotal);
+  const valSkew = new Float64Array(rawTotal);
+  let nnz = 0;
+  for (let i = 0; i < n; i++) {
+    rowPtr[i] = nnz;
+    for (let p = rawPtr[i], end = rawPtr[i + 1]; p < end; p++) {
+      const j = rawCol[p];
+      if (stamp[j] === i) {
+        const dst = slotOf[j];
+        valSym[dst] += rawSym[p];
+        valSkew[dst] += rawSkew[p];
+      } else {
+        stamp[j] = i;
+        slotOf[j] = nnz;
+        colIdx[nnz] = j;
+        valSym[nnz] = rawSym[p];
+        valSkew[nnz] = rawSkew[p];
+        nnz++;
+      }
+    }
+  }
+  rowPtr[n] = nnz;
+
+  const apply = (y: Float64Array, out: Float64Array) => {
+    for (let i = 0; i < n; i++) {
+      const i2 = 2 * i, d = diagFree[i];
+      let su = d * y[i2], sv = d * y[i2 + 1];
+      for (let p = rowPtr[i], end = rowPtr[i + 1]; p < end; p++) {
+        const j2 = 2 * colIdx[p];
+        const yu = y[j2], yv = y[j2 + 1];
+        const s = valSym[p], sk = valSkew[p];
+        su += s * yu + sk * yv;
+        sv += s * yv - sk * yu;
+      }
+      out[i2] = su;
+      out[i2 + 1] = sv;
+    }
   };
-  // Normal equations restricted to the free unknowns.
-  const apply = (y: Float64Array, out: Float64Array) => { out.fill(0); normal(y, out, 1); };
-  // Right-hand side: minus what the pinned values contribute.
-  const xp = new Float64Array(2 * n);
-  for (const [i, q] of pin) { xp[2 * i] = q[0]; xp[2 * i + 1] = q[1]; }
-  const b = new Float64Array(2 * n);
-  normal(xp, b, -1);
   const diag = new Float64Array(2 * n);
-  for (let t = 0; t < T; t++) for (let c = 0; c < 2; c++) for (let j = 0; j < 3; j++) { const v = idx[3 * t + j], o = 6 * t + 3 * c + j; diag[2 * v] += cu[o] ** 2; diag[2 * v + 1] += cv[o] ** 2; }
-  for (const i of pinned.keys()) { diag[2 * i] = 1; diag[2 * i + 1] = 1; }
+  for (let i = 0; i < n; i++) {
+    const dv = isPinned[i] ? 1 : diagFree[i];
+    diag[2 * i] = dv;
+    diag[2 * i + 1] = dv;
+  }
   const free = new Float64Array(2 * n);
   cg(apply, b, free, diag, 4000, 1e-18);
   const out: V2[] = [];
@@ -223,6 +294,7 @@ function arap(n: number, tris: number[], frames: { p: V2[]; area: number }[], in
   const nF = frames.length, E = 3 * nF;
   const ea = new Int32Array(E), eb = new Int32Array(E), ew = new Float64Array(E);
   const diag = new Float64Array(n);
+  const rawCount = new Int32Array(n);
   for (let t = 0; t < nF; t++) {
     const p = frames[t].p;
     for (let j = 0; j < 3; j++) {
@@ -237,21 +309,61 @@ function arap(n: number, tris: number[], frames: { p: V2[]; area: number }[], in
       ew[3 * t + j] = w;
       diag[va] += w;
       diag[vb] += w;
+      rawCount[va]++;
+      rawCount[vb]++;
     }
   }
   diag[0] += 1;
-  const applyL = (x: Float64Array, out: Float64Array) => {
-    out.fill(0);
-    for (let e = 0; e < E; e++) {
-      const a = ea[e], b = eb[e], d = ew[e] * (x[a] - x[b]);
-      out[a] += d; out[b] -= d;
+  // Assemble deduplicated CSR for the fixed cotangent Laplacian L (cuts half-edge work in half + sequential writes).
+  const rawPtr = new Int32Array(n + 1);
+  for (let i = 0; i < n; i++) rawPtr[i + 1] = rawPtr[i] + rawCount[i];
+  const rawTotal = rawPtr[n];
+  const rawCol = new Int32Array(rawTotal), rawVal = new Float64Array(rawTotal);
+  const rawFill = rawPtr.slice(0, n);
+  for (let e = 0; e < E; e++) {
+    const a = ea[e], b = eb[e], w = ew[e];
+    const pa = rawFill[a]++; rawCol[pa] = b; rawVal[pa] = w;
+    const pb = rawFill[b]++; rawCol[pb] = a; rawVal[pb] = w;
+  }
+  const stamp = new Int32Array(n).fill(-1), slotOf = new Int32Array(n);
+  const rowPtr = new Int32Array(n + 1);
+  const colIdx = new Int32Array(rawTotal), val = new Float64Array(rawTotal);
+  let nnz = 0;
+  for (let i = 0; i < n; i++) {
+    rowPtr[i] = nnz;
+    for (let p = rawPtr[i], end = rawPtr[i + 1]; p < end; p++) {
+      const j = rawCol[p];
+      if (stamp[j] === i) {
+        val[slotOf[j]] += rawVal[p];
+      } else {
+        stamp[j] = i;
+        slotOf[j] = nnz;
+        colIdx[nnz] = j;
+        val[nnz] = rawVal[p];
+        nnz++;
+      }
     }
-    out[0] += x[0]; // anchor the first point, so the system is not singular
+  }
+  rowPtr[n] = nnz;
+  const applyL = (x: Float64Array, out: Float64Array) => {
+    for (let i = 0; i < n; i++) {
+      let sum = diag[i] * x[i];
+      for (let p = rowPtr[i], end = rowPtr[i + 1]; p < end; p++) sum -= val[p] * x[colIdx[p]];
+      out[i] = sum;
+    }
   };
   const scratch = makeCgScratch(diag);
   const bu = new Float64Array(n), bv = new Float64Array(n);
   const xu = new Float64Array(n), xv = new Float64Array(n);
   for (let i = 0; i < n; i++) { xu[i] = uv[i][0]; xv[i] = uv[i][1]; }
+  // Flat edge vectors per triangle (6 floats per triangle: e0x, e0y, e1x, e1y, e2x, e2y) for fast local-step access.
+  const triEdge = new Float64Array(6 * nF);
+  for (let t = 0; t < nF; t++) {
+    const p = frames[t].p, o = 6 * t;
+    triEdge[o] = p[1][0] - p[2][0]; triEdge[o + 1] = p[1][1] - p[2][1];
+    triEdge[o + 2] = p[2][0] - p[0][0]; triEdge[o + 3] = p[2][1] - p[0][1];
+    triEdge[o + 4] = p[0][0] - p[1][0]; triEdge[o + 5] = p[0][1] - p[1][1];
+  }
   for (let it = 0; it < iters; it++) {
     // Eased cloth rests as long along the seam as the layout makes it, between
     // its true length and that plus its ease: its triangle stretched that way.
@@ -263,28 +375,38 @@ function arap(n: number, tris: number[], frames: { p: V2[]; area: number }[], in
       // The layout's stretch along the seam: F dir, F = (current edges) (true edges)^-1.
       const x = (dir[0] * by - dir[1] * bx) / det, y = (ax * dir[1] - ay * dir[0]) / det;
       const fx = x * (xu[i1] - xu[i0]) + y * (xu[i2] - xu[i0]), fy = x * (xv[i1] - xv[i0]) + y * (xv[i2] - xv[i0]);
-      const f = Math.min(1 + ease, Math.max(1, Math.hypot(fx, fy)));
-      frames[t].p = p0.map((q) => { const along = (q[0] - p0[0][0]) * dir[0] + (q[1] - p0[0][1]) * dir[1]; return [q[0] + (f - 1) * along * dir[0], q[1] + (f - 1) * along * dir[1]] as V2; });
+      const f = Math.min(1 + ease, Math.max(1, Math.sqrt(fx * fx + fy * fy)));
+      const fp = p0.map((q) => { const along = (q[0] - p0[0][0]) * dir[0] + (q[1] - p0[0][1]) * dir[1]; return [q[0] + (f - 1) * along * dir[0], q[1] + (f - 1) * along * dir[1]] as V2; });
+      frames[t].p = fp;
+      const o = 6 * t;
+      triEdge[o] = fp[1][0] - fp[2][0]; triEdge[o + 1] = fp[1][1] - fp[2][1];
+      triEdge[o + 2] = fp[2][0] - fp[0][0]; triEdge[o + 3] = fp[2][1] - fp[0][1];
+      triEdge[o + 4] = fp[0][0] - fp[1][0]; triEdge[o + 5] = fp[0][1] - fp[1][1];
     }
     bu.fill(0); bv.fill(0);
     for (let t = 0; t < nF; t++) {
-      const p = frames[t].p;
+      const e0 = 3 * t, o = 6 * t;
+      const va0 = ea[e0], vb0 = eb[e0], w0 = ew[e0];
+      const va1 = ea[e0 + 1], vb1 = eb[e0 + 1], w1 = ew[e0 + 1];
+      const va2 = ea[e0 + 2], vb2 = eb[e0 + 2], w2 = ew[e0 + 2];
+      const ex0 = triEdge[o], ey0 = triEdge[o + 1];
+      const ex1 = triEdge[o + 2], ey1 = triEdge[o + 3];
+      const ex2 = triEdge[o + 4], ey2 = triEdge[o + 5];
+      const ux0 = xu[va0] - xu[vb0], uy0 = xv[va0] - xv[vb0];
+      const ux1 = xu[va1] - xu[vb1], uy1 = xv[va1] - xv[vb1];
+      const ux2 = xu[va2] - xu[vb2], uy2 = xv[va2] - xv[vb2];
       // Best rotation: from the covariance of true and current edges.
-      let s00 = 0, s01 = 0, s10 = 0, s11 = 0;
-      for (let j = 0; j < 3; j++) {
-        const a = (j + 1) % 3, b = (j + 2) % 3, e = 3 * t + j, w = ew[e], va = ea[e], vb = eb[e];
-        const ex = p[a][0] - p[b][0], ey = p[a][1] - p[b][1];
-        const ux = xu[va] - xu[vb], uy = xv[va] - xv[vb];
-        s00 += w * ux * ex; s01 += w * ux * ey; s10 += w * uy * ex; s11 += w * uy * ey;
-      }
+      const s00 = w0 * ux0 * ex0 + w1 * ux1 * ex1 + w2 * ux2 * ex2;
+      const s01 = w0 * ux0 * ey0 + w1 * ux1 * ey1 + w2 * ux2 * ey2;
+      const s10 = w0 * uy0 * ex0 + w1 * uy1 * ex1 + w2 * uy2 * ex2;
+      const s11 = w0 * uy0 * ey0 + w1 * uy1 * ey1 + w2 * uy2 * ey2;
       const ang = Math.atan2(s10 - s01, s00 + s11), c = Math.cos(ang), s = Math.sin(ang);
-      for (let j = 0; j < 3; j++) {
-        const a = (j + 1) % 3, b = (j + 2) % 3, e = 3 * t + j, w = ew[e], va = ea[e], vb = eb[e];
-        const ex = p[a][0] - p[b][0], ey = p[a][1] - p[b][1];
-        const rx = c * ex - s * ey, ry = s * ex + c * ey;
-        bu[va] += w * rx; bu[vb] -= w * rx;
-        bv[va] += w * ry; bv[vb] -= w * ry;
-      }
+      const rx0 = w0 * (c * ex0 - s * ey0), ry0 = w0 * (s * ex0 + c * ey0);
+      const rx1 = w1 * (c * ex1 - s * ey1), ry1 = w1 * (s * ex1 + c * ey1);
+      const rx2 = w2 * (c * ex2 - s * ey2), ry2 = w2 * (s * ex2 + c * ey2);
+      bu[va0] += rx0; bu[vb0] -= rx0; bv[va0] += ry0; bv[vb0] -= ry0;
+      bu[va1] += rx1; bu[vb1] -= rx1; bv[va1] += ry1; bv[vb1] -= ry1;
+      bu[va2] += rx2; bu[vb2] -= rx2; bv[va2] += ry2; bv[vb2] -= ry2;
     }
     bu[0] += xu[0]; bv[0] += xv[0];
     // Warm-started from the last layout; intermediate steps only need modest CG accuracy.
@@ -355,7 +477,7 @@ export function flattenPanel(name: string, shellPoints: number[][], shellTris: n
   // two ends of its centre line instead, so a piece the same either side
   // flattens the same either side: pinned at a sleeve's cuff and the hem's
   // far corner, a batwing gown's front came out lopsided, one sleeve higher.
-  let a = 0, b = 1, far = -1;
+  let a = 0, b = 1;
   let xLo = Infinity, xHi = -Infinity, yLo = Infinity, yHi = -Infinity, ySum = 0;
   for (const q of P) {
     xLo = Math.min(xLo, q[0]); xHi = Math.max(xHi, q[0]);
@@ -375,13 +497,17 @@ export function flattenPanel(name: string, shellPoints: number[][], shellTris: n
   const sameSideMid = dualCrossing ? rawMid.filter((i) => P[i][1] * domSign >= 0) : rawMid;
   const onMid = sameSideMid.length >= 2 ? sameSideMid : rawMid;
   const stride = Math.max(1, Math.floor(P.length / 200));
+  let far2 = -1;
   for (let i = 0; i < P.length; i += stride) {
+    const pi = P[i], px = pi[0], py = pi[1], pz = pi[2];
     for (let j = 0; j < P.length; j++) {
       if (i === j) continue;
-      const dd = Math.hypot(P[i][0] - P[j][0], P[i][1] - P[j][1], P[i][2] - P[j][2]);
-      if (dd > far) { far = dd; a = i; b = j; }
+      const pj = P[j], dx = px - pj[0], dy = py - pj[1], dz = pz - pj[2];
+      const dd2 = dx * dx + dy * dy + dz * dz;
+      if (dd2 > far2) { far2 = dd2; a = i; b = j; }
     }
   }
+  let far = far2 >= 0 ? Math.sqrt(far2) : -1;
   // Only where the centre line runs most of the piece: two pins close together
   // (a one-shouldered front that crosses the middle for a hand's breadth) would
   // leave the map's turn and scale to chance.

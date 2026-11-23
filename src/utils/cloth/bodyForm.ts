@@ -475,19 +475,49 @@ export function formArmPath(m: BodyFormMeasurements, side: 1 | -1): LimbPath {
   return formLimbs(m)[side > 0 ? 'armL' : 'armR'].path;
 }
 
+const geomsCache = new Map<string, { part: string; geom: Omit<SceneGeom, 'name' | 'rgba'> }[]>();
+const trigCache = new Map<number, { cos: Float64Array; sin: Float64Array }>();
+function unitCircle(n: number): { cos: Float64Array; sin: Float64Array } {
+  let hit = trigCache.get(n);
+  if (!hit) {
+    const cos = new Float64Array(n), sin = new Float64Array(n);
+    const step = (2 * Math.PI) / n;
+    for (let i = 0; i < n; i++) { const th = step * i; cos[i] = Math.cos(th); sin[i] = Math.sin(th); }
+    hit = { cos, sin };
+    trigCache.set(n, hit);
+  }
+  return hit;
+}
+
 /** The form's geoms, named `<prefix>_<part>`. */
 export function bodyFormGeoms(m: BodyFormMeasurements, prefix: string): SceneGeom[] {
-  const P = proportions(m);
-  const geoms = bodyFormGeomsRaw(m, prefix);
-  // The torso is one smooth surface, lofted through the hull of its tape
-  // profile's sections and these parts': it is what is drawn, and it is what collides, as a stack of
-  // convex slabs cut from it. Drawn as slices the torso read as a pile of
-  // rings; colliding as slices it had grooves between them that cloth sank
-  // into, below the surface you could see.
-  const isTorsoPart = (g: SceneGeom) => /_(bust\w*|shoulder\w*|deltoid\w*|neck)$/.test(g.name);
-  const rows = prefix === 'form' ? formRows(m) : torsoRows(m, geoms.filter(isTorsoPart), P.crotchZ - 0.005 * P.s, P.neckTop, torsoProfile(m, formTapes(m)));
+  const key = geomCacheKey(m);
+  let templates = geomsCache.get(key);
+  if (!templates) {
+    const geoms = bodyFormGeomsRaw(m, '');
+    // The torso is one smooth surface, lofted through the hull of its tape
+    // profile's sections and these parts': it is what is drawn, and it is what collides, as a stack of
+    // convex slabs cut from it. Drawn as slices the torso read as a pile of
+    // rings; colliding as slices it had grooves between them that cloth sank
+    // into, below the surface you could see.
+    const isTorsoPart = (g: SceneGeom) => /_(bust\w*|shoulder\w*|deltoid\w*|neck)$/.test(g.name);
+    const rows = formRows(m);
+    const rgba = DEFAULT_MANNEQUIN_RGBA;
+    const all = [...geoms.filter((g) => !isTorsoPart(g)), torsoSkin(rows, '_skin', rgba), ...torsoSlabs(rows, '_torso', rgba)];
+    templates = all.map((g) => {
+      const { name, rgba: _rgba, ...rest } = g;
+      void _rgba;
+      return { part: name.startsWith('_') ? name.slice(1) : name, geom: rest };
+    });
+    if (geomsCache.size >= 16) geomsCache.delete(geomsCache.keys().next().value as string);
+    geomsCache.set(key, templates);
+  }
   const rgba = skinToneRgba(m.skinTone);
-  return [...geoms.filter((g) => !isTorsoPart(g)), torsoSkin(rows, `${prefix}_skin`, rgba), ...torsoSlabs(rows, `${prefix}_torso`, rgba)];
+  return templates.map(({ part, geom }) => ({
+    ...geom,
+    name: `${prefix}_${part}`,
+    rgba: [...rgba],
+  }) as SceneGeom);
 }
 
 /**
@@ -636,26 +666,27 @@ export interface TorsoRow { z: number; centreY: number; radii: number[] }
  */
 function torsoRows(m: BodyFormMeasurements, parts: SceneGeom[], z0: number, z1: number, torso: ReturnType<typeof torsoProfile>, withHead = true, ang = TORSO_ANGLES, rowStep = 0.012): TorsoRow[] {
   const ANG = ang, ROWS = Math.max(8, Math.round((z1 - z0) / rowStep));
+  const c64 = unitCircle(64), c48 = unitCircle(48), c16 = unitCircle(16), cAng = unitCircle(ANG);
   const rows: TorsoRow[] = [];
   for (let r = 0; r <= ROWS; r++) {
     const z = z0 + ((z1 - z0) * r) / ROWS;
     const pts: [number, number][] = [];
     const e = torso(z);
-    if (e) for (let i = 0; i < 64; i++) { const th = (2 * Math.PI * i) / 64; pts.push([e.a * Math.cos(th), e.cy + e.b * Math.sin(th)]); }
+    if (e) for (let i = 0; i < 64; i++) pts.push([e.a * c64.cos[i], e.cy + e.b * c64.sin[i]]);
     for (const g of parts) {
       if (g.type === 'ellipsoid' || g.type === 'sphere') {
         const [a, b, c] = g.type === 'sphere' ? [g.size[0], g.size[0], g.size[0]] : g.size;
         const p = g.pos ?? [0, 0, 0], t = (z - p[2]) / c;
         if (Math.abs(t) >= 1) continue;
-        const k = Math.sqrt(1 - t * t);
-        for (let i = 0; i < 48; i++) { const th = (2 * Math.PI * i) / 48; pts.push([p[0] + a * k * Math.cos(th), p[1] + b * k * Math.sin(th)]); }
+        const k = Math.sqrt(1 - t * t), ak = a * k, bk = b * k;
+        for (let i = 0; i < 48; i++) pts.push([p[0] + ak * c48.cos[i], p[1] + bk * c48.sin[i]]);
       } else if (g.type === 'capsule' && g.fromto) {
-        const [ax, ay, az, bx, by, bz] = g.fromto, rad = g.size[0];
+        const [ax, ay, az, bx, by, bz] = g.fromto, rad = g.size[0], r2 = rad * rad;
         for (let j = 0; j <= 12; j++) {
           const f = j / 12, px = ax + (bx - ax) * f, py = ay + (by - ay) * f, dz = z - (az + (bz - az) * f);
           if (Math.abs(dz) >= rad) continue;
-          const h = Math.sqrt(rad * rad - dz * dz);
-          for (let i = 0; i < 16; i++) { const th = (2 * Math.PI * i) / 16; pts.push([px + h * Math.cos(th), py + h * Math.sin(th)]); }
+          const h = Math.sqrt(r2 - dz * dz);
+          for (let i = 0; i < 16; i++) pts.push([px + h * c16.cos[i], py + h * c16.sin[i]]);
         }
       }
     }
@@ -664,48 +695,57 @@ function torsoRows(m: BodyFormMeasurements, parts: SceneGeom[], z0: number, z1: 
     let cy = 0;
     for (const p of hull) cy += p[1];
     cy /= hull.length;
-    const radii: number[] = [];
+    const radii: number[] = new Array(ANG);
+    const hl = hull.length;
     for (let i = 0; i < ANG; i++) {
-      const th = (2 * Math.PI * i) / ANG, dx = Math.cos(th), dy = Math.sin(th);
+      const dx = cAng.cos[i], dy = cAng.sin[i];
       let best = 0;
-      for (let k = 0; k < hull.length; k++) {
-        const [x1, y1] = hull[k], [x2, y2] = hull[(k + 1) % hull.length];
+      for (let k = 0; k < hl; k++) {
+        const p1 = hull[k], p2 = hull[k + 1 < hl ? k + 1 : 0];
+        const x1 = p1[0], y1 = p1[1] - cy;
         // The ray (0, cy) + t (dx, dy) against this edge.
-        const ex = x2 - x1, ey = y2 - y1, den = dx * ey - dy * ex;
+        const ex = p2[0] - x1, ey = p2[1] - p1[1], den = dx * ey - dy * ex;
         if (Math.abs(den) < 1e-12) continue;
-        const t = (x1 * ey - (y1 - cy) * ex) / den, u = (x1 * dy - (y1 - cy) * dx) / den;
-        if (t > 0 && u >= -1e-9 && u <= 1 + 1e-9) best = Math.max(best, t);
+        const invDen = 1 / den;
+        const t = (x1 * ey - y1 * ex) * invDen, u = (x1 * dy - y1 * dx) * invDen;
+        if (t > best && u >= -1e-9 && u <= 1 + 1e-9) best = t;
       }
-      radii.push(best);
+      radii[i] = best;
     }
     rows.push({ z, centreY: cy, radii });
   }
   // A running mean up each column, twice, over about +-4 cm (including row 0 so the pelvic bottom has no unsmoothed step).
   const W = 3;
+  const sum = new Float64Array(ANG);
   for (let pass = 0; pass < 2; pass++) {
-    const copy = rows.map((r) => ({ ...r, radii: r.radii.slice() }));
+    const copy = rows.map((r) => ({ centreY: r.centreY, radii: r.radii.slice() }));
     for (let r = 0; r + 1 < rows.length; r++) {
       let cy = 0, n = 0;
-      const sum = new Array(ANG).fill(0);
-      for (let q = Math.max(0, r - W); q <= Math.min(rows.length - 1, r + W); q++) {
+      sum.fill(0);
+      const q0 = r - W > 0 ? r - W : 0, q1 = r + W < rows.length - 1 ? r + W : rows.length - 1;
+      for (let q = q0; q <= q1; q++) {
         cy += copy[q].centreY; n++;
-        for (let i = 0; i < ANG; i++) sum[i] += copy[q].radii[i];
+        const cr = copy[q].radii;
+        for (let i = 0; i < ANG; i++) sum[i] += cr[i];
       }
-      rows[r].centreY = cy / n;
-      rows[r].radii = sum.map((x) => x / n);
+      const invN = 1 / n;
+      rows[r].centreY = cy * invN;
+      const dst = rows[r].radii;
+      for (let i = 0; i < ANG; i++) dst[i] = sum[i] * invN;
     }
   }
-  const P = proportions(m), S = P.s;
+  const P = proportions(m), S = P.s, invS = 1 / S;
   // The muscles, on the smoothed shape: applied before blending limb roots so
   // gluteal/abdominal relief cannot push the bottom of the pelvis back outside
   // the upper thighs.
-  const marks = { bustZ: P.bustZ / S, shoulderZ: P.shoulderZ / S, waistZ: P.waistZ / S, hipZ: P.hipZ / S, crotchZ: P.crotchZ / S };
+  const marks = { bustZ: P.bustZ * invS, shoulderZ: P.shoulderZ * invS, waistZ: P.waistZ * invS, hipZ: P.hipZ * invS, crotchZ: P.crotchZ * invS };
   for (const row of rows) {
-    row.radii = row.radii.map((r, i) => {
-      const th = (2 * Math.PI * i) / ANG, c = Math.cos(th), sn = Math.sin(th);
+    const zS = row.z * invS, rads = row.radii;
+    for (let i = 0; i < ANG; i++) {
+      const r = rads[i], c = cAng.cos[i], sn = cAng.sin[i];
       const front = Math.min(1, Math.max(0, -sn / 0.45)), back = Math.min(1, Math.max(0, sn / 0.45));
-      return r + torsoRelief(m.figure, (r * c) / S, row.z / S, front, back, marks) * S;
-    });
+      rads[i] = r + torsoRelief(m.figure, (r * c) * invS, zS, front, back, marks) * S;
+    }
   }
   blendLimbRoots(m, rows, P, withHead);
   // Smooth the pelvic/inguinal contours azimuthally and vertically below hipZ

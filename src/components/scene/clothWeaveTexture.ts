@@ -47,9 +47,13 @@ const plain = (n: number) => (x: number, y: number) => {
 /** Twill: diagonal ribs, `n` threads a tile, warp over three under one. */
 const twill = (n: number) => (x: number, y: number) => 0.75 * thread(x * n + y * n) + 0.25 * thread(y * n) + 0.15 * noise(x, y, 16);
 
+const knit12 = knit(12, 12);
+const plain32 = plain(32);
+const plain48 = plain(48);
+
 const WEAVES: Record<ClothMaterialName, Weave> = {
   jersey: { tile: 0.012, depth: 0.6, height: knit(8, 10) },
-  rib: { tile: 0.016, depth: 0.9, height: (x, y) => 0.7 * thread(x * 6) + 0.3 * knit(12, 12)(x, y) },
+  rib: { tile: 0.016, depth: 0.9, height: (x, y) => 0.7 * thread(x * 6) + 0.3 * knit12(x, y) },
   spandex: { tile: 0.006, depth: 0.3, height: knit(8, 10) },
   woven: { tile: 0.008, depth: 0.45, height: plain(16) },
   canvas: { tile: 0.012, depth: 0.8, height: plain(12) },
@@ -57,14 +61,28 @@ const WEAVES: Record<ClothMaterialName, Weave> = {
   ripstop: {
     tile: 0.02,
     depth: 0.55,
-    height: (x, y) => 0.45 * plain(32)(x, y) + 0.55 * Math.max(Math.pow(thread(x * 4), 10), Math.pow(thread(y * 4), 10)),
+    height: (x, y) => {
+      const tx = thread(x * 4), ty = thread(y * 4);
+      const tx2 = tx * tx, tx4 = tx2 * tx2, ty2 = ty * ty, ty4 = ty2 * ty2;
+      const rx = tx4 * tx4 * tx2, ry = ty4 * ty4 * ty2;
+      return 0.45 * plain32(x, y) + 0.55 * (rx > ry ? rx : ry);
+    },
   },
   shadeCloth: { tile: 0.02, depth: 0.9, height: plain(8) },
   denim: { tile: 0.012, depth: 0.8, height: twill(12) },
   leather: { tile: 0.04, depth: 0.5, height: (x, y) => 0.6 * noise(x, y, 24) + 0.4 * noise(x, y, 48) },
   // A ripstop shell: a fine weave with a heavier thread every 6 mm, barely
   // proud of it (stronger, a puffer read as waffle).
-  taffeta: { tile: 0.024, depth: 0.25, height: (x, y) => 0.6 * plain(48)(x, y) + 0.4 * Math.max(Math.pow(thread(x * 4), 8), Math.pow(thread(y * 4), 8)) },
+  taffeta: {
+    tile: 0.024,
+    depth: 0.25,
+    height: (x, y) => {
+      const tx = thread(x * 4), ty = thread(y * 4);
+      const tx2 = tx * tx, tx4 = tx2 * tx2, ty2 = ty * ty, ty4 = ty2 * ty2;
+      const rx = tx4 * tx4, ry = ty4 * ty4;
+      return 0.6 * plain48(x, y) + 0.4 * (rx > ry ? rx : ry);
+    },
+  },
   velvet: { tile: 0.01, depth: 0.25, height: (x, y) => noise(x, y, 32) },
 };
 
@@ -76,14 +94,26 @@ export function weaveTexture(name: ClothMaterialName): THREE.DataTexture {
   if (tex) return tex;
   const w = WEAVES[name] ?? WEAVES.woven;
   const h = new Float32Array(SIZE * SIZE);
-  for (let j = 0; j < SIZE; j++) for (let i = 0; i < SIZE; i++) h[j * SIZE + i] = w.height(i / SIZE, j / SIZE);
+  const invSize = 1 / SIZE;
+  const heightFn = w.height;
+  for (let j = 0; j < SIZE; j++) {
+    const y = j * invSize, row = j * SIZE;
+    for (let i = 0; i < SIZE; i++) h[row + i] = heightFn(i * invSize, y);
+  }
   const px = new Uint8Array(SIZE * SIZE * 4);
-  const at = (i: number, j: number) => h[((j + SIZE) % SIZE) * SIZE + ((i + SIZE) % SIZE)];
+  const mask = SIZE - 1;
   const k = w.depth * 4;
-  for (let j = 0; j < SIZE; j++) for (let i = 0; i < SIZE; i++) {
-    const dx = (at(i + 1, j) - at(i - 1, j)) * k, dy = (at(i, j + 1) - at(i, j - 1)) * k;
-    const l = Math.hypot(dx, dy, 1), o = 4 * (j * SIZE + i);
-    px[o] = Math.round((0.5 - dx / l / 2) * 255); px[o + 1] = Math.round((0.5 - dy / l / 2) * 255); px[o + 2] = Math.round((0.5 + 0.5 / l) * 255); px[o + 3] = 255;
+  for (let j = 0; j < SIZE; j++) {
+    const row = j * SIZE, rowUp = ((j + 1) & mask) * SIZE, rowDn = ((j - 1) & mask) * SIZE;
+    for (let i = 0; i < SIZE; i++) {
+      const dx = (h[row + ((i + 1) & mask)] - h[row + ((i - 1) & mask)]) * k;
+      const dy = (h[rowUp + i] - h[rowDn + i]) * k;
+      const invL = 1 / Math.sqrt(dx * dx + dy * dy + 1), o = 4 * (row + i);
+      px[o] = Math.round((0.5 - dx * invL * 0.5) * 255);
+      px[o + 1] = Math.round((0.5 - dy * invL * 0.5) * 255);
+      px[o + 2] = Math.round((0.5 + 0.5 * invL) * 255);
+      px[o + 3] = 255;
+    }
   }
   tex = new THREE.DataTexture(px, SIZE, SIZE, THREE.RGBAFormat);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;

@@ -20,6 +20,22 @@
 /** Cloth through cloth: an edge (a, b) through triangle t, at parameter s along the edge and (b1, b2) in t. */
 export interface ClothCrossing { a: number; b: number; e: number; t: number; s: number; b1: number; b2: number; p: number[] }
 
+interface UntangleHash {
+  buckets: number;
+  mask: number;
+  start: Int32Array;
+  fill: Int32Array;
+  range: Int32Array;
+  entries: Int32Array;
+  box: Float64Array;
+  triStamp: Int32Array;
+  triGen: number;
+  edgeStamp: Int32Array;
+  edgeGen: number;
+  activeEdges: Int32Array;
+  inList: Uint8Array;
+}
+
 export interface UntangleMesh {
   tris: Int32Array;
   /** Each particle's representative after joining sewn particles (stitches): joined particles never cross each other. */
@@ -27,7 +43,17 @@ export interface UntangleMesh {
   /** Unique edges, by particle, and the (up to two) triangles on each. */
   edges: Int32Array;
   edgeTris: Int32Array;
+  /** Per triangle, its 3 unique edge indices (3 * nt), for O(|only|) local crossing checks. */
+  triEdges?: Int32Array;
+  /** Reusable spatial-hash scratch buffers (allocated lazily and reused across calls). */
+  _hash?: UntangleHash;
 }
+
+const nextPow2 = (v: number) => {
+  let p = 1024;
+  while (p < v) p <<= 1;
+  return p;
+};
 
 /** The mesh as untangling needs it, from every cloth triangle and every stitch. */
 export function untangleMesh(n: number, tris: Int32Array, stitches: ArrayLike<number>): UntangleMesh {
@@ -35,111 +61,171 @@ export function untangleMesh(n: number, tris: Int32Array, stitches: ArrayLike<nu
   const find = (a: number): number => { while (root[a] !== a) { root[a] = root[root[a]]; a = root[a]; } return a; };
   for (let k = 0; k + 1 < stitches.length; k += 2) { const a = find(stitches[k]), b = find(stitches[k + 1]); if (a !== b) root[a] = b; }
   for (let i = 0; i < n; i++) root[i] = find(i);
+  const nt = tris.length / 3;
   const index = new Map<number, number>(), E: number[] = [], ET: number[] = [];
-  for (let t = 0; t < tris.length / 3; t++) for (let k = 0; k < 3; k++) {
-    const p = tris[3 * t + k], q = tris[3 * t + (k + 1) % 3], a = Math.min(p, q), b = Math.max(p, q), key = a * n + b;
-    let e = index.get(key);
-    if (e === undefined) { e = E.length / 2; index.set(key, e); E.push(a, b); ET.push(t, -1); }
-    else if (ET[2 * e + 1] < 0) ET[2 * e + 1] = t;
+  const triEdges = new Int32Array(tris.length);
+  for (let t = 0; t < nt; t++) {
+    const t3 = 3 * t;
+    for (let k = 0; k < 3; k++) {
+      const p = tris[t3 + k], q = tris[t3 + (k + 1) % 3], a = p < q ? p : q, b = p < q ? q : p, key = a * n + b;
+      let e = index.get(key);
+      if (e === undefined) { e = E.length / 2; index.set(key, e); E.push(a, b); ET.push(t, -1); }
+      else if (ET[2 * e + 1] < 0) ET[2 * e + 1] = t;
+      triEdges[t3 + k] = e;
+    }
   }
-  return { tris, root, edges: Int32Array.from(E), edgeTris: Int32Array.from(ET) };
+  return { tris, root, edges: Int32Array.from(E), edgeTris: Int32Array.from(ET), triEdges };
 }
 
 const CELL = 0.02;
+const INV_CELL = 1 / CELL;
 /** How near two crossings missing an end are taken to be one contour. */
 const LINK_NEAR = 0.015;
 const cellKey = (ix: number, iy: number, iz: number) => (Math.imul(ix, 73856093) ^ Math.imul(iy, 19349663) ^ Math.imul(iz, 83492791)) | 0;
+const bucketHash = (ix: number, iy: number, iz: number, mask: number) => ((Math.imul(ix, 73856093) ^ Math.imul(iy, 19349663) ^ Math.imul(iz, 83492791)) >>> 0) & mask;
+
+function ensureHash(m: UntangleMesh): UntangleHash {
+  let h = m._hash;
+  if (!h) {
+    const nt = m.tris.length / 3, ne = m.edges.length / 2;
+    const buckets = nextPow2(Math.max(1024, 2 * nt));
+    h = {
+      buckets,
+      mask: buckets - 1,
+      start: new Int32Array(buckets + 1),
+      fill: new Int32Array(buckets),
+      range: new Int32Array(6 * nt),
+      entries: new Int32Array(Math.max(1024, 4 * nt)),
+      box: new Float64Array(6 * nt),
+      triStamp: new Int32Array(nt),
+      triGen: 0,
+      edgeStamp: new Int32Array(ne),
+      edgeGen: 0,
+      activeEdges: new Int32Array(ne),
+      inList: new Uint8Array(nt),
+    };
+    m._hash = h;
+  }
+  return h;
+}
+
+const segHit = [0, 0, 0];
 
 /**
  * Every edge through a triangle it is not joined to, among the triangles in
  * `only` (all when null) and the edges of those triangles.
  */
 export function findCrossings(x: ArrayLike<number>, m: UntangleMesh, only: Int32Array | null = null): ClothCrossing[] {
-  const T = m.tris, R = m.root, nt = T.length / 3;
+  const T = m.tris, R = m.root, E = m.edges, nt = T.length / 3, ne = E.length / 2;
   const nList = only ? only.length : nt;
   if (nList === 0) return [];
-  const sparse = only !== null && nList * 4 < nt;
-  const grid = new Map<number, number[]>();
-  // When testing a small local neighbourhood (`only`), pack AABBs into `6 * nList`
-  // instead of allocating `6 * nt` across the whole wardrobe on every untangle step.
-  const box = new Float64Array(6 * (sparse ? nList : nt));
-  const localIdx = sparse ? new Map<number, number>() : null;
+  const h = ensureHash(m);
+  const { start, fill, range, box, triStamp, mask, buckets } = h;
+  start.fill(0);
+  let total = 0;
   for (let li = 0; li < nList; li++) {
     const t = only ? only[li] : li;
-    if (localIdx) localIdx.set(t, li);
-    const o = 6 * (sparse ? li : t);
-    for (let k = 0; k < 3; k++) {
-      const v0 = x[3 * T[3 * t] + k], v1 = x[3 * T[3 * t + 1] + k], v2 = x[3 * T[3 * t + 2] + k];
-      box[o + k] = Math.min(v0, v1, v2); box[o + 3 + k] = Math.max(v0, v1, v2);
-    }
-    for (let ix = Math.floor(box[o] / CELL); ix <= Math.floor(box[o + 3] / CELL); ix++)
-      for (let iy = Math.floor(box[o + 1] / CELL); iy <= Math.floor(box[o + 4] / CELL); iy++)
-        for (let iz = Math.floor(box[o + 2] / CELL); iz <= Math.floor(box[o + 5] / CELL); iz++) {
-          const key = cellKey(ix, iy, iz);
-          const c = grid.get(key);
-          if (c) c.push(t); else grid.set(key, [t]);
+    const t3 = 3 * t, a3 = 3 * T[t3], b3 = 3 * T[t3 + 1], c3 = 3 * T[t3 + 2], o = 6 * t;
+    const x0 = x[a3], x1 = x[b3], x2 = x[c3];
+    const loX = x0 < x1 ? (x0 < x2 ? x0 : x2) : (x1 < x2 ? x1 : x2);
+    const hiX = x0 > x1 ? (x0 > x2 ? x0 : x2) : (x1 > x2 ? x1 : x2);
+    const y0 = x[a3 + 1], y1 = x[b3 + 1], y2 = x[c3 + 1];
+    const loY = y0 < y1 ? (y0 < y2 ? y0 : y2) : (y1 < y2 ? y1 : y2);
+    const hiY = y0 > y1 ? (y0 > y2 ? y0 : y2) : (y1 > y2 ? y1 : y2);
+    const z0 = x[a3 + 2], z1 = x[b3 + 2], z2 = x[c3 + 2];
+    const loZ = z0 < z1 ? (z0 < z2 ? z0 : z2) : (z1 < z2 ? z1 : z2);
+    const hiZ = z0 > z1 ? (z0 > z2 ? z0 : z2) : (z1 > z2 ? z1 : z2);
+    box[o] = loX; box[o + 1] = loY; box[o + 2] = loZ; box[o + 3] = hiX; box[o + 4] = hiY; box[o + 5] = hiZ;
+    const ix0 = Math.floor(loX * INV_CELL), ix1 = Math.floor(hiX * INV_CELL);
+    const iy0 = Math.floor(loY * INV_CELL), iy1 = Math.floor(hiY * INV_CELL);
+    const iz0 = Math.floor(loZ * INV_CELL), iz1 = Math.floor(hiZ * INV_CELL);
+    range[o] = ix0; range[o + 1] = iy0; range[o + 2] = iz0; range[o + 3] = ix1; range[o + 4] = iy1; range[o + 5] = iz1;
+    for (let ix = ix0; ix <= ix1; ix++)
+      for (let iy = iy0; iy <= iy1; iy++)
+        for (let iz = iz0; iz <= iz1; iz++) {
+          start[bucketHash(ix, iy, iz, mask) + 1]++;
+          total++;
         }
   }
-  const out: ClothCrossing[] = [];
-  if (sparse) {
-    const seenTri = new Map<number, number>();
-    for (let e = 0; e < m.edges.length / 2; e++) {
-      const t0 = m.edgeTris[2 * e], t1 = m.edgeTris[2 * e + 1];
-      if (!localIdx!.has(t0) && !(t1 >= 0 && localIdx!.has(t1))) continue;
-      const a = m.edges[2 * e], b = m.edges[2 * e + 1], ra = R[a], rb = R[b];
-      const lo0 = Math.min(x[3 * a], x[3 * b]), lo1 = Math.min(x[3 * a + 1], x[3 * b + 1]), lo2 = Math.min(x[3 * a + 2], x[3 * b + 2]);
-      const hi0 = Math.max(x[3 * a], x[3 * b]), hi1 = Math.max(x[3 * a + 1], x[3 * b + 1]), hi2 = Math.max(x[3 * a + 2], x[3 * b + 2]);
-      for (let ix = Math.floor(lo0 / CELL); ix <= Math.floor(hi0 / CELL); ix++)
-        for (let iy = Math.floor(lo1 / CELL); iy <= Math.floor(hi1 / CELL); iy++)
-          for (let iz = Math.floor(lo2 / CELL); iz <= Math.floor(hi2 / CELL); iz++) {
-            const c = grid.get(cellKey(ix, iy, iz));
-            if (!c) continue;
-            for (let ci = 0; ci < c.length; ci++) {
-              const t = c[ci];
-              if (seenTri.get(t) === e) continue;
-              seenTri.set(t, e);
-              const o = 6 * localIdx!.get(t)!;
-              if (hi0 < box[o] || hi1 < box[o + 1] || hi2 < box[o + 2] || lo0 > box[o + 3] || lo1 > box[o + 4] || lo2 > box[o + 5]) continue;
-              const i0 = T[3 * t], i1 = T[3 * t + 1], i2 = T[3 * t + 2];
-              const r0 = R[i0], r1 = R[i1], r2 = R[i2];
-              if (ra === r0 || ra === r1 || ra === r2 || rb === r0 || rb === r1 || rb === r2) continue;
-              const hit = segmentTriangle(x, a, b, i0, i1, i2);
-              if (hit) out.push({ a, b, e, t, s: hit[0], b1: hit[1], b2: hit[2], p: [x[3 * a] + hit[0] * (x[3 * b] - x[3 * a]), x[3 * a + 1] + hit[0] * (x[3 * b + 1] - x[3 * a + 1]), x[3 * a + 2] + hit[0] * (x[3 * b + 2] - x[3 * a + 2])] });
-            }
-          }
-    }
-    return out;
+  for (let b = 0; b < buckets; b++) start[b + 1] += start[b];
+  if (h.entries.length < total) h.entries = new Int32Array(Math.ceil(total * 1.25));
+  const entries = h.entries;
+  fill.set(start.subarray(0, buckets));
+  for (let li = 0; li < nList; li++) {
+    const t = only ? only[li] : li, o = 6 * t;
+    const ix0 = range[o], iy0 = range[o + 1], iz0 = range[o + 2], ix1 = range[o + 3], iy1 = range[o + 4], iz1 = range[o + 5];
+    for (let ix = ix0; ix <= ix1; ix++)
+      for (let iy = iy0; iy <= iy1; iy++)
+        for (let iz = iz0; iz <= iz1; iz++) {
+          entries[fill[bucketHash(ix, iy, iz, mask)]++] = t;
+        }
   }
-  const inList = only ? new Uint8Array(nt) : null;
-  if (inList && only) for (let li = 0; li < only.length; li++) inList[only[li]] = 1;
-  const stamp = new Int32Array(nt).fill(-1);
-  for (let e = 0; e < m.edges.length / 2; e++) {
-    if (inList) {
-      const t0 = m.edgeTris[2 * e], t1 = m.edgeTris[2 * e + 1];
-      if (!inList[t0] && !(t1 >= 0 && inList[t1])) continue;
+
+  // Collect only edges touching `only` triangles (O(|only|) when sparse, all edges when null).
+  let nEdges = ne;
+  const activeEdges = h.activeEdges;
+  if (only) {
+    const triEdges = m.triEdges;
+    if (triEdges) {
+      let eg = h.edgeGen + 1;
+      if (eg >= 0x7fffffff) { h.edgeStamp.fill(0); eg = 1; }
+      h.edgeGen = eg;
+      const eStamp = h.edgeStamp;
+      nEdges = 0;
+      for (let li = 0; li < nList; li++) {
+        const t3 = 3 * only[li];
+        const e0 = triEdges[t3], e1 = triEdges[t3 + 1], e2 = triEdges[t3 + 2];
+        if (eStamp[e0] !== eg) { eStamp[e0] = eg; activeEdges[nEdges++] = e0; }
+        if (eStamp[e1] !== eg) { eStamp[e1] = eg; activeEdges[nEdges++] = e1; }
+        if (eStamp[e2] !== eg) { eStamp[e2] = eg; activeEdges[nEdges++] = e2; }
+      }
+    } else {
+      const inList = h.inList;
+      for (let li = 0; li < nList; li++) inList[only[li]] = 1;
+      nEdges = 0;
+      for (let e = 0; e < ne; e++) {
+        const t0 = m.edgeTris[2 * e], t1 = m.edgeTris[2 * e + 1];
+        if (inList[t0] || (t1 >= 0 && inList[t1])) activeEdges[nEdges++] = e;
+      }
+      for (let li = 0; li < nList; li++) inList[only[li]] = 0;
     }
-    const a = m.edges[2 * e], b = m.edges[2 * e + 1], ra = R[a], rb = R[b];
-    const lo0 = Math.min(x[3 * a], x[3 * b]), lo1 = Math.min(x[3 * a + 1], x[3 * b + 1]), lo2 = Math.min(x[3 * a + 2], x[3 * b + 2]);
-    const hi0 = Math.max(x[3 * a], x[3 * b]), hi1 = Math.max(x[3 * a + 1], x[3 * b + 1]), hi2 = Math.max(x[3 * a + 2], x[3 * b + 2]);
-    for (let ix = Math.floor(lo0 / CELL); ix <= Math.floor(hi0 / CELL); ix++)
-      for (let iy = Math.floor(lo1 / CELL); iy <= Math.floor(hi1 / CELL); iy++)
-        for (let iz = Math.floor(lo2 / CELL); iz <= Math.floor(hi2 / CELL); iz++) {
-          const c = grid.get(cellKey(ix, iy, iz));
-          if (!c) continue;
-          for (let ci = 0; ci < c.length; ci++) {
-            const t = c[ci];
-            if (stamp[t] === e) continue;
-            stamp[t] = e;
+  }
+
+  const out: ClothCrossing[] = [];
+  let gen = h.triGen;
+  for (let ei = 0; ei < nEdges; ei++) {
+    const e = only ? activeEdges[ei] : ei;
+    if (++gen >= 0x7fffffff) { triStamp.fill(0); gen = 1; }
+    const a = E[2 * e], b = E[2 * e + 1], ra = R[a], rb = R[b];
+    const a3 = 3 * a, b3 = 3 * b;
+    const ax = x[a3], ay = x[a3 + 1], az = x[a3 + 2], bx = x[b3], by = x[b3 + 1], bz = x[b3 + 2];
+    const lo0 = ax < bx ? ax : bx, hi0 = ax < bx ? bx : ax;
+    const lo1 = ay < by ? ay : by, hi1 = ay < by ? by : ay;
+    const lo2 = az < bz ? az : bz, hi2 = az < bz ? bz : az;
+    const ix0 = Math.floor(lo0 * INV_CELL), ix1 = Math.floor(hi0 * INV_CELL);
+    const iy0 = Math.floor(lo1 * INV_CELL), iy1 = Math.floor(hi1 * INV_CELL);
+    const iz0 = Math.floor(lo2 * INV_CELL), iz1 = Math.floor(hi2 * INV_CELL);
+    for (let ix = ix0; ix <= ix1; ix++)
+      for (let iy = iy0; iy <= iy1; iy++)
+        for (let iz = iz0; iz <= iz1; iz++) {
+          const hb = bucketHash(ix, iy, iz, mask);
+          for (let ci = start[hb], cEnd = start[hb + 1]; ci < cEnd; ci++) {
+            const t = entries[ci];
+            if (triStamp[t] === gen) continue;
+            triStamp[t] = gen;
             const o = 6 * t;
             if (hi0 < box[o] || hi1 < box[o + 1] || hi2 < box[o + 2] || lo0 > box[o + 3] || lo1 > box[o + 4] || lo2 > box[o + 5]) continue;
             const i0 = T[3 * t], i1 = T[3 * t + 1], i2 = T[3 * t + 2];
             const r0 = R[i0], r1 = R[i1], r2 = R[i2];
             if (ra === r0 || ra === r1 || ra === r2 || rb === r0 || rb === r1 || rb === r2) continue;
-            const hit = segmentTriangle(x, a, b, i0, i1, i2);
-            if (hit) out.push({ a, b, e, t, s: hit[0], b1: hit[1], b2: hit[2], p: [x[3 * a] + hit[0] * (x[3 * b] - x[3 * a]), x[3 * a + 1] + hit[0] * (x[3 * b + 1] - x[3 * a + 1]), x[3 * a + 2] + hit[0] * (x[3 * b + 2] - x[3 * a + 2])] });
+            if (segmentTriangleInto(x, a, b, i0, i1, i2, segHit)) {
+              const s = segHit[0];
+              out.push({ a, b, e, t, s, b1: segHit[1], b2: segHit[2], p: [ax + s * (bx - ax), ay + s * (by - ay), az + s * (bz - az)] });
+            }
           }
         }
   }
+  h.triGen = gen;
   return out;
 }
 
@@ -151,11 +237,11 @@ export function findCrossings(x: ArrayLike<number>, m: UntangleMesh, only: Int32
  */
 export function crossedPoints(points: number[][], tris: ArrayLike<number>): Set<number> {
   const x = new Float64Array(3 * points.length);
-  points.forEach((p, i) => { x[3 * i] = p[0]; x[3 * i + 1] = p[1]; x[3 * i + 2] = p[2]; });
+  for (let i = 0; i < points.length; i++) { const p = points[i]; x[3 * i] = p[0]; x[3 * i + 1] = p[1]; x[3 * i + 2] = p[2]; }
   const T = Int32Array.from(tris), out = new Set<number>();
   for (const c of findCrossings(x, untangleMesh(points.length, T, []))) {
     out.add(c.a); out.add(c.b);
-    for (let k = 0; k < 3; k++) out.add(T[3 * c.t + k]);
+    out.add(T[3 * c.t]); out.add(T[3 * c.t + 1]); out.add(T[3 * c.t + 2]);
   }
   return out;
 }
@@ -169,41 +255,63 @@ export function crossedPoints(points: number[][], tris: ArrayLike<number>): Set<
  * points, uncrossed off the grid, came out of its relaxing through each other.
  */
 export function undoCrossingMoves(points: number[][], was: number[][], tris: ArrayLike<number>): void {
+  const n = points.length;
+  const T = Int32Array.from(tris);
+  const m = untangleMesh(n, T, []);
+  const x = new Float64Array(3 * n);
+  for (let i = 0; i < n; i++) { const p = points[i]; x[3 * i] = p[0]; x[3 * i + 1] = p[1]; x[3 * i + 2] = p[2]; }
+  const crossed = new Set<number>();
   for (let round = 0; round < 16; round++) {
+    crossed.clear();
+    const hits = findCrossings(x, m);
+    if (!hits.length) return;
+    for (let hi = 0; hi < hits.length; hi++) {
+      const c = hits[hi];
+      crossed.add(c.a); crossed.add(c.b);
+      crossed.add(T[3 * c.t]); crossed.add(T[3 * c.t + 1]); crossed.add(T[3 * c.t + 2]);
+    }
     let undone = 0;
-    for (const v of crossedPoints(points, tris)) if (points[v] !== was[v]) { points[v] = was[v]; undone++; }
+    for (const v of crossed) {
+      if (points[v] !== was[v]) {
+        const wv = was[v];
+        points[v] = wv;
+        x[3 * v] = wv[0]; x[3 * v + 1] = wv[1]; x[3 * v + 2] = wv[2];
+        undone++;
+      }
+    }
     if (!undone) return;
   }
 }
 
-/** Segment (a, b) through triangle (i0, i1, i2), strictly inside both: [s along the segment, b1, b2] or null (Moller-Trumbore). */
-function segmentTriangle(x: ArrayLike<number>, a: number, b: number, i0: number, i1: number, i2: number): number[] | null {
-  const v0x = x[3 * i0], v0y = x[3 * i0 + 1], v0z = x[3 * i0 + 2];
-  const e1x = x[3 * i1] - v0x, e1y = x[3 * i1 + 1] - v0y, e1z = x[3 * i1 + 2] - v0z;
-  const e2x = x[3 * i2] - v0x, e2y = x[3 * i2 + 1] - v0y, e2z = x[3 * i2 + 2] - v0z;
-  const dx = x[3 * b] - x[3 * a], dy = x[3 * b + 1] - x[3 * a + 1], dz = x[3 * b + 2] - x[3 * a + 2];
+/** Segment (a, b) through triangle (i0, i1, i2), strictly inside both: writes [s, b1, b2] into `out` and returns true (Moller-Trumbore). */
+function segmentTriangleInto(x: ArrayLike<number>, a: number, b: number, i0: number, i1: number, i2: number, out: number[]): boolean {
+  const k0 = 3 * i0, k1 = 3 * i1, k2 = 3 * i2, ka = 3 * a, kb = 3 * b;
+  const v0x = x[k0], v0y = x[k0 + 1], v0z = x[k0 + 2];
+  const e1x = x[k1] - v0x, e1y = x[k1 + 1] - v0y, e1z = x[k1 + 2] - v0z;
+  const e2x = x[k2] - v0x, e2y = x[k2 + 1] - v0y, e2z = x[k2 + 2] - v0z;
+  const dx = x[kb] - x[ka], dy = x[kb + 1] - x[ka + 1], dz = x[kb + 2] - x[ka + 2];
   const hx = dy * e2z - dz * e2y, hy = dz * e2x - dx * e2z, hz = dx * e2y - dy * e2x;
   const det = e1x * hx + e1y * hy + e1z * hz;
-  if (Math.abs(det) < 1e-18) return null;
-  const inv = 1 / det, sx = x[3 * a] - v0x, sy = x[3 * a + 1] - v0y, sz = x[3 * a + 2] - v0z;
+  if (Math.abs(det) < 1e-18) return false;
+  const inv = 1 / det, sx = x[ka] - v0x, sy = x[ka + 1] - v0y, sz = x[ka + 2] - v0z;
   const u = inv * (sx * hx + sy * hy + sz * hz);
-  if (u <= 0 || u >= 1) return null;
+  if (u <= 0 || u >= 1) return false;
   const qx = sy * e1z - sz * e1y, qy = sz * e1x - sx * e1z, qz = sx * e1y - sy * e1x;
   const v = inv * (dx * qx + dy * qy + dz * qz);
-  if (v <= 0 || u + v >= 1) return null;
+  if (v <= 0 || u + v >= 1) return false;
   const s = inv * (e2x * qx + e2y * qy + e2z * qz);
-  if (s <= 0 || s >= 1) return null;
-  return [s, u, v];
+  if (s <= 0 || s >= 1) return false;
+  out[0] = s; out[1] = u; out[2] = v;
+  return true;
 }
 
 function triNormal(x: ArrayLike<number>, T: Int32Array, t: number, out: number[]) {
   const a = 3 * T[3 * t], b = 3 * T[3 * t + 1], c = 3 * T[3 * t + 2];
   const ux = x[b] - x[a], uy = x[b + 1] - x[a + 1], uz = x[b + 2] - x[a + 2];
   const vx = x[c] - x[a], vy = x[c + 1] - x[a + 1], vz = x[c + 2] - x[a + 2];
-  let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-  const l = Math.hypot(nx, ny, nz) || 1;
-  nx /= l; ny /= l; nz /= l;
-  out[0] = nx; out[1] = ny; out[2] = nz;
+  const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+  const l = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+  out[0] = nx / l; out[1] = ny / l; out[2] = nz / l;
 }
 
 /**
@@ -215,18 +323,24 @@ function triNormal(x: ArrayLike<number>, T: Int32Array, t: number, out: number[]
  * averaged over the contour points that move it); returns how many particles move.
  */
 export function contourStep(x: ArrayLike<number>, w: ArrayLike<number>, m: UntangleMesh, crossings: ClothCrossing[], step: number, dx: Float64Array, count: Float64Array): number {
-  const T = m.tris, nc = crossings.length;
+  const T = m.tris, nt = T.length / 3, nc = crossings.length;
   // Contours: crossings linked by the triangle pair they share.
-  const byPair = new Map<string, number[]>();
-  const pairKey = (t1: number, t2: number) => (t1 < t2 ? `${t1},${t2}` : `${t2},${t1}`);
-  crossings.forEach((c, i) => {
-    for (const ta of [m.edgeTris[2 * c.e], m.edgeTris[2 * c.e + 1]]) {
-      if (ta < 0) continue;
-      const k = pairKey(ta, c.t);
+  const byPair = new Map<number, number[]>();
+  const pairKey = (t1: number, t2: number) => (t1 < t2 ? t1 * nt + t2 : t2 * nt + t1);
+  for (let i = 0; i < nc; i++) {
+    const c = crossings[i];
+    const ta0 = m.edgeTris[2 * c.e], ta1 = m.edgeTris[2 * c.e + 1];
+    if (ta0 >= 0) {
+      const k = pairKey(ta0, c.t);
       const l = byPair.get(k);
       if (l) l.push(i); else byPair.set(k, [i]);
     }
-  });
+    if (ta1 >= 0) {
+      const k = pairKey(ta1, c.t);
+      const l = byPair.get(k);
+      if (l) l.push(i); else byPair.set(k, [i]);
+    }
+  }
   const link: number[][] = Array.from({ length: nc }, () => []);
   for (const l of byPair.values()) if (l.length === 2) { link[l[0]].push(l[1]); link[l[1]].push(l[0]); }
   // A crossing left with fewer than its two ends (an edge through a corner or

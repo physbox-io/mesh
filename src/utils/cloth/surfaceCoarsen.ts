@@ -16,9 +16,10 @@
 
 import { crossedPoints } from './clothUntangle';
 
-const cross = (u: number[], v: number[]) => [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
-const sub = (a: number[], b: number[]) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-const dist = (a: number[], b: number[]) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+const dist = (a: number[], b: number[]) => {
+  const dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+};
 
 /** Collapse an edge shorter than this share of its target; never make one longer than LONG of it. */
 const SHORT = 0.8;
@@ -62,17 +63,21 @@ export function coarsenSurface(
     return list;
   };
   const ring = (v: number) => { const s = new Set<number>(); for (const t of around(v)) for (let q = 0; q < 3; q++) if (T[3 * t + q] !== v) s.add(T[3 * t + q]); return s; };
-  const normal = (t: number, v?: number, at?: number[]) => {
-    const i0 = T[3 * t], i1 = T[3 * t + 1], i2 = T[3 * t + 2];
-    const a = i0 === v ? at! : P[i0], b = i1 === v ? at! : P[i1], c = i2 === v ? at! : P[i2];
-    const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
-    const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
-    return [uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx];
-  };
   const turnsOk = (t: number, v: number, at: number[]) => {
-    const n0 = normal(t), n1 = normal(t, v, at), l0 = Math.hypot(n0[0], n0[1], n0[2]), l1 = Math.hypot(n1[0], n1[1], n1[2]);
-    if (l1 < 1e-14 || l0 < 1e-14) return false;
-    return (n0[0] * n1[0] + n0[1] * n1[1] + n0[2] * n1[2]) / (l0 * l1) > TURN;
+    const i0 = T[3 * t], i1 = T[3 * t + 1], i2 = T[3 * t + 2];
+    const p0 = P[i0], p1 = P[i1], p2 = P[i2];
+    const ux0 = p1[0] - p0[0], uy0 = p1[1] - p0[1], uz0 = p1[2] - p0[2];
+    const vx0 = p2[0] - p0[0], vy0 = p2[1] - p0[1], vz0 = p2[2] - p0[2];
+    const n0x = uy0 * vz0 - uz0 * vy0, n0y = uz0 * vx0 - ux0 * vz0, n0z = ux0 * vy0 - uy0 * vx0;
+    const l0 = Math.sqrt(n0x * n0x + n0y * n0y + n0z * n0z);
+    if (l0 < 1e-14) return false;
+    const a = i0 === v ? at : p0, b = i1 === v ? at : p1, c = i2 === v ? at : p2;
+    const ux1 = b[0] - a[0], uy1 = b[1] - a[1], uz1 = b[2] - a[2];
+    const vx1 = c[0] - a[0], vy1 = c[1] - a[1], vz1 = c[2] - a[2];
+    const n1x = uy1 * vz1 - uz1 * vy1, n1y = uz1 * vx1 - ux1 * vz1, n1z = ux1 * vy1 - uy1 * vx1;
+    const l1 = Math.sqrt(n1x * n1x + n1y * n1y + n1z * n1z);
+    if (l1 < 1e-14) return false;
+    return (n0x * n1x + n0y * n1y + n0z * n1z) / (l0 * l1) > TURN;
   };
 
   // Never through itself: what crosses as given may, nothing else. A pass
@@ -168,20 +173,40 @@ export function coarsenSurface(
         if (dead[t]) break;
         const a = T[3 * t + e], b = T[3 * t + ((e + 1) % 3)], c = T[3 * t + ((e + 2) % 3)];
         if (fixed[a] && fixed[b]) continue;
-        const other = around(a).filter((u) => u !== t && has(u, b));
-        if (other.length !== 1) continue;
-        const u = other[0], d = [0, 1, 2].map((q) => T[3 * u + q]).find((v) => v !== a && v !== b)!;
+        const other = around(a);
+        let u = -1, otherCount = 0;
+        for (let oi = 0; oi < other.length; oi++) {
+          const ot = other[oi];
+          if (ot !== t && has(ot, b)) { u = ot; otherCount++; }
+        }
+        if (otherCount !== 1) continue;
+        const u0 = T[3 * u], u1 = T[3 * u + 1], u2 = T[3 * u + 2];
+        const d = u0 !== a && u0 !== b ? u0 : u1 !== a && u1 !== b ? u1 : u2;
         if (ring(c).has(d)) continue;
         const dev = (v: number, k: number) => Math.abs(valence[v] + k - 6);
         const before = dev(a, 0) + dev(b, 0) + dev(c, 0) + dev(d, 0), after = dev(a, -1) + dev(b, -1) + dev(c, 1) + dev(d, 1);
         if (after >= before) continue;
         // The two new triangles (c, a, d) and (d, b, c) face as the old did.
-        const n0 = normal(t), n1 = normal(u);
-        const nn = [n0[0] + n1[0], n0[1] + n1[1], n0[2] + n1[2]];
-        const f1 = cross(sub(P[a], P[c]), sub(P[d], P[c])), f2 = cross(sub(P[b], P[d]), sub(P[c], P[d]));
-        const ln = Math.hypot(nn[0], nn[1], nn[2]);
-        const cosA = (f1[0] * nn[0] + f1[1] * nn[1] + f1[2] * nn[2]) / (Math.hypot(f1[0], f1[1], f1[2]) * ln || 1);
-        const cosB = (f2[0] * nn[0] + f2[1] * nn[1] + f2[2] * nn[2]) / (Math.hypot(f2[0], f2[1], f2[2]) * ln || 1);
+        const t0 = P[T[3 * t]], t1 = P[T[3 * t + 1]], t2 = P[T[3 * t + 2]];
+        const n0x = (t1[1] - t0[1]) * (t2[2] - t0[2]) - (t1[2] - t0[2]) * (t2[1] - t0[1]);
+        const n0y = (t1[2] - t0[2]) * (t2[0] - t0[0]) - (t1[0] - t0[0]) * (t2[2] - t0[2]);
+        const n0z = (t1[0] - t0[0]) * (t2[1] - t0[1]) - (t1[1] - t0[1]) * (t2[0] - t0[0]);
+        const q0 = P[u0], q1 = P[u1], q2 = P[u2];
+        const nnx = n0x + ((q1[1] - q0[1]) * (q2[2] - q0[2]) - (q1[2] - q0[2]) * (q2[1] - q0[1]));
+        const nny = n0y + ((q1[2] - q0[2]) * (q2[0] - q0[0]) - (q1[0] - q0[0]) * (q2[2] - q0[2]));
+        const nnz = n0z + ((q1[0] - q0[0]) * (q2[1] - q0[1]) - (q1[1] - q0[1]) * (q2[0] - q0[0]));
+        const pa = P[a], pb = P[b], pc = P[c], pd = P[d];
+        const acx = pa[0] - pc[0], acy = pa[1] - pc[1], acz = pa[2] - pc[2];
+        const dcx = pd[0] - pc[0], dcy = pd[1] - pc[1], dcz = pd[2] - pc[2];
+        const f1x = acy * dcz - acz * dcy, f1y = acz * dcx - acx * dcz, f1z = acx * dcy - acy * dcx;
+        const bdx = pb[0] - pd[0], bdy = pb[1] - pd[1], bdz = pb[2] - pd[2];
+        const cdx = -dcx, cdy = -dcy, cdz = -dcz;
+        const f2x = bdy * cdz - bdz * cdy, f2y = bdz * cdx - bdx * cdz, f2z = bdx * cdy - bdy * cdx;
+        const ln = Math.sqrt(nnx * nnx + nny * nny + nnz * nnz);
+        const lf1 = Math.sqrt(f1x * f1x + f1y * f1y + f1z * f1z);
+        const lf2 = Math.sqrt(f2x * f2x + f2y * f2y + f2z * f2z);
+        const cosA = (f1x * nnx + f1y * nny + f1z * nnz) / (lf1 * ln || 1);
+        const cosB = (f2x * nnx + f2y * nny + f2z * nnz) / (lf2 * ln || 1);
         if (!(cosA > 0.5 && cosB > 0.5)) continue;
         T[3 * t] = c; T[3 * t + 1] = a; T[3 * t + 2] = d;
         T[3 * u] = d; T[3 * u + 1] = b; T[3 * u + 2] = c;
@@ -194,14 +219,28 @@ export function coarsenSurface(
       if (gone[v] || fixed[v]) continue;
       const r = ring(v);
       if (r.size < 3) continue;
-      const m = [0, 0, 0];
-      for (const q of r) for (let k = 0; k < 3; k++) m[k] += P[q][k] / r.size;
-      const nrm = [0, 0, 0];
-      for (const t of around(v)) { const n = normal(t); for (let k = 0; k < 3; k++) nrm[k] += n[k]; }
-      const ln = Math.hypot(nrm[0], nrm[1], nrm[2]) || 1, d = sub(m, P[v]), dn = (d[0] * nrm[0] + d[1] * nrm[1] + d[2] * nrm[2]) / ln;
-      const q = [0, 1, 2].map((k) => P[v][k] + 0.5 * (d[k] - (dn * nrm[k]) / ln));
+      let mx = 0, my = 0, mz = 0;
+      for (const q of r) { const pq = P[q]; mx += pq[0]; my += pq[1]; mz += pq[2]; }
+      const invR = 1 / r.size;
+      mx *= invR; my *= invR; mz *= invR;
+      let nrx = 0, nry = 0, nrz = 0;
+      const ar = around(v);
+      for (let ti = 0; ti < ar.length; ti++) {
+        const t = ar[ti];
+        const p0 = P[T[3 * t]], p1 = P[T[3 * t + 1]], p2 = P[T[3 * t + 2]];
+        nrx += (p1[1] - p0[1]) * (p2[2] - p0[2]) - (p1[2] - p0[2]) * (p2[1] - p0[1]);
+        nry += (p1[2] - p0[2]) * (p2[0] - p0[0]) - (p1[0] - p0[0]) * (p2[2] - p0[2]);
+        nrz += (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]);
+      }
+      const ln2 = nrx * nrx + nry * nry + nrz * nrz;
+      const invLn2 = ln2 > 0 ? 1 / ln2 : 1;
+      const pv = P[v], dx = mx - pv[0], dy = my - pv[1], dz = mz - pv[2];
+      const dn = (dx * nrx + dy * nry + dz * nrz) * invLn2;
+      const q = [pv[0] + 0.5 * (dx - dn * nrx), pv[1] + 0.5 * (dy - dn * nry), pv[2] + 0.5 * (dz - dn * nrz)];
       project(q);
-      if (around(v).every((t) => turnsOk(t, v, q))) P[v] = q;
+      let ok = true;
+      for (let ti = 0; ti < ar.length; ti++) if (!turnsOk(ar[ti], v, q)) { ok = false; break; }
+      if (ok) P[v] = q;
     }
     return 1;
   });
@@ -225,24 +264,48 @@ export function coarsenSurface(
  * derivatives across the surface, both ways it bends, so a saddle counts),
  * between `min` and `max`.
  */
+const curvQ = [0, 0, 0];
 export function curvatureSize(field: (p: number[]) => number, p: number[], step: number, min: number, max: number): number {
-  const f0 = field(p), e = step;
-  const q = [0, 0, 0];
-  const at = (dx: number, dy: number, dz: number) => { q[0] = p[0] + dx; q[1] = p[1] + dy; q[2] = p[2] + dz; return field(q); };
-  const gx = (at(e, 0, 0) - at(-e, 0, 0)) / (2 * e);
-  const gy = (at(0, e, 0) - at(0, -e, 0)) / (2 * e);
-  const gz = (at(0, 0, e) - at(0, 0, -e)) / (2 * e);
-  const gl = Math.hypot(gx, gy, gz);
+  const px = p[0], py = p[1], pz = p[2], e = step, f0 = field(p);
+  const q = curvQ;
+  q[1] = py; q[2] = pz;
+  q[0] = px + e; const fxp = field(q);
+  q[0] = px - e; const fxm = field(q);
+  q[0] = px;
+  q[1] = py + e; const fyp = field(q);
+  q[1] = py - e; const fym = field(q);
+  q[1] = py;
+  q[2] = pz + e; const fzp = field(q);
+  q[2] = pz - e; const fzm = field(q);
+  const inv2e = 0.5 / e;
+  const gx = (fxp - fxm) * inv2e, gy = (fyp - fym) * inv2e, gz = (fzp - fzm) * inv2e;
+  const gl = Math.sqrt(gx * gx + gy * gy + gz * gz);
   if (gl < 1e-9) return min;
   const invE2 = 1 / (e * e), inv4E2 = 0.25 * invE2;
-  const h00 = (at(e, 0, 0) - 2 * f0 + at(-e, 0, 0)) * invE2;
-  const h11 = (at(0, e, 0) - 2 * f0 + at(0, -e, 0)) * invE2;
-  const h22 = (at(0, 0, e) - 2 * f0 + at(0, 0, -e)) * invE2;
-  const h01 = (at(e, e, 0) - at(e, -e, 0) - at(-e, e, 0) + at(-e, -e, 0)) * inv4E2;
-  const h02 = (at(e, 0, e) - at(e, 0, -e) - at(-e, 0, e) + at(-e, 0, -e)) * inv4E2;
-  const h12 = (at(0, e, e) - at(0, e, -e) - at(0, -e, e) + at(0, -e, -e)) * inv4E2;
+  const h00 = (fxp - 2 * f0 + fxm) * invE2;
+  const h11 = (fyp - 2 * f0 + fym) * invE2;
+  const h22 = (fzp - 2 * f0 + fzm) * invE2;
+  q[2] = pz;
+  q[0] = px + e; q[1] = py + e; const fpp0 = field(q);
+  q[1] = py - e; const fpm0 = field(q);
+  q[0] = px - e; q[1] = py + e; const fmp0 = field(q);
+  q[1] = py - e; const fmm0 = field(q);
+  const h01 = (fpp0 - fpm0 - fmp0 + fmm0) * inv4E2;
+  q[1] = py;
+  q[0] = px + e; q[2] = pz + e; const fp0p = field(q);
+  q[2] = pz - e; const fp0m = field(q);
+  q[0] = px - e; q[2] = pz + e; const fm0p = field(q);
+  q[2] = pz - e; const fm0m = field(q);
+  const h02 = (fp0p - fp0m - fm0p + fm0m) * inv4E2;
+  q[0] = px;
+  q[1] = py + e; q[2] = pz + e; const f0pp = field(q);
+  q[2] = pz - e; const f0pm = field(q);
+  q[1] = py - e; q[2] = pz + e; const f0mp = field(q);
+  q[2] = pz - e; const f0mm = field(q);
+  const h12 = (f0pp - f0pm - f0mp + f0mm) * inv4E2;
   // The shape operator: the Hessian across the surface (I - n n) H (I - n n) / |g|; its size, sqrt(k1^2 + k2^2).
-  const nx = gx / gl, ny = gy / gl, nz = gz / gl;
+  const invGl = 1 / gl;
+  const nx = gx * invGl, ny = gy * invGl, nz = gz * invGl;
   const p00 = 1 - nx * nx, p01 = -nx * ny, p02 = -nx * nz;
   const p11 = 1 - ny * ny, p12 = -ny * nz, p22 = 1 - nz * nz;
   // First compute M = H * P
@@ -252,7 +315,7 @@ export function curvatureSize(field: (p: number[]) => number, p: number[], step:
   // Then S = P * M (symmetric)
   const s00 = p00 * m00 + p01 * m10 + p02 * m20, s01 = p00 * m01 + p01 * m11 + p02 * m21, s02 = p00 * m02 + p01 * m12 + p02 * m22;
   const s11 = p01 * m01 + p11 * m11 + p12 * m21, s12 = p01 * m02 + p11 * m12 + p12 * m22, s22 = p02 * m02 + p12 * m12 + p22 * m22;
-  const k = Math.sqrt(s00 * s00 + s11 * s11 + s22 * s22 + 2 * (s01 * s01 + s02 * s02 + s12 * s12)) / gl;
+  const k = Math.sqrt(s00 * s00 + s11 * s11 + s22 * s22 + 2 * (s01 * s01 + s02 * s02 + s12 * s12)) * invGl;
   return Math.min(max, Math.max(min, k > 1e-9 ? SEGMENT / k : max));
 }
 

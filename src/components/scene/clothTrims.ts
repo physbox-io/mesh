@@ -78,6 +78,17 @@ export interface BuiltClothTrims {
   runTeeth: Map<number, Trim[]>;
 }
 
+const trimTemplateCache = new Map<string, THREE.BufferGeometry>();
+function cloneTrimGeometry(kind: string): THREE.BufferGeometry {
+  const key = kind in TRIM_GEOMETRY ? kind : 'stud';
+  let tpl = trimTemplateCache.get(key);
+  if (!tpl) {
+    tpl = TRIM_GEOMETRY[key]();
+    trimTemplateCache.set(key, tpl);
+  }
+  return tpl.clone();
+}
+
 export function buildClothTrims(flex: FlexInfo): BuiltClothTrims {
   const groups: Group[] = [], tapes: Tape[] = [];
   const byKind = new Map<string, Trim[]>();
@@ -87,7 +98,7 @@ export function buildClothTrims(flex: FlexInfo): BuiltClothTrims {
   }
   for (const [kind, items] of byKind) {
     if (items.length === 0) continue;
-    const geom = (TRIM_GEOMETRY[kind] ?? TRIM_GEOMETRY.stud)();
+    const geom = cloneTrimGeometry(kind);
     const c = items[0].rgba;
     const matte = kind === 'button' || kind === 'buttonhole' || kind === 'stitch';
     const mat = new THREE.MeshPhysicalMaterial({ color: new THREE.Color(c[0], c[1], c[2]), metalness: matte ? 0 : 0.9, roughness: matte ? 0.6 : 0.3 });
@@ -125,6 +136,31 @@ export function buildClothTrims(flex: FlexInfo): BuiltClothTrims {
   return { groups, tapes, runTeeth };
 }
 
+// Module-level scratch vectors & tape cache reused across frames (zero per-frame allocations).
+const _at = new THREE.Vector3();
+const _nv = new THREE.Vector3();
+const _tan = new THREE.Vector3();
+const _side = new THREE.Vector3();
+const _tx = new THREE.Vector3();
+const _tz = new THREE.Vector3();
+let _tapeScratch = new Float64Array(0);
+
+function evalTrimFrame(t: Trim, p: ArrayLike<number>, n: ArrayLike<number>, h: number) {
+  const a = 3 * t.particle, b = t.toward !== undefined ? 3 * t.toward : a, u = t.t ?? 0;
+  _at.set(p[a] + (p[b] - p[a]) * u, p[a + 1] + (p[b + 1] - p[a + 1]) * u, p[a + 2] + (p[b + 2] - p[a + 2]) * u);
+  _nv.set(n[a] + (n[b] - n[a]) * u, n[a + 1] + (n[b + 1] - n[a + 1]) * u, n[a + 2] + (n[b + 2] - n[a + 2]) * u);
+  if (_nv.lengthSq() < 1e-12) _nv.set(0, 0, 1);
+  _nv.normalize();
+  if (t.flip) _nv.negate();
+  _tan.set(p[b] - p[a], p[b + 1] - p[a + 1], p[b + 2] - p[a + 2]);
+  _tan.addScaledVector(_nv, -_tan.dot(_nv));
+  if (_tan.lengthSq() < 1e-14) _tan.set(0, 0, 1).addScaledVector(_nv, -_nv.z);
+  if (_tan.lengthSq() < 1e-14) _tan.set(1, 0, 0);
+  _tan.normalize();
+  _side.crossVectors(_nv, _tan);
+  _at.addScaledVector(_nv, h).addScaledVector(_side, t.offset ?? 0);
+}
+
 /** Place `cur` trims on cloth vertices `p` / normals `n`, returning `true` only when any matrix or vertex changed. */
 export function placeClothTrims(
   cur: BuiltClothTrims,
@@ -136,79 +172,80 @@ export function placeClothTrims(
 ): boolean {
   if (cur.groups.length === 0 && cur.tapes.length === 0) return false;
   let anyChanged = false;
-  const at = new THREE.Vector3(), nv = new THREE.Vector3(), tan = new THREE.Vector3(), side = new THREE.Vector3();
-  // Where a trim is on the cloth, its normal and the way its line runs.
-  const frame = (t: Trim) => {
-    const a = 3 * t.particle, b = t.toward !== undefined ? 3 * t.toward : a, u = t.t ?? 0;
-    at.set(p[a] + (p[b] - p[a]) * u, p[a + 1] + (p[b + 1] - p[a + 1]) * u, p[a + 2] + (p[b + 2] - p[a + 2]) * u);
-    nv.set(n[a] + (n[b] - n[a]) * u, n[a + 1] + (n[b + 1] - n[a + 1]) * u, n[a + 2] + (n[b + 2] - n[a + 2]) * u);
-    if (nv.lengthSq() < 1e-12) nv.set(0, 0, 1);
-    nv.normalize();
-    if (t.flip) nv.negate();
-    tan.set(p[b] - p[a], p[b + 1] - p[a + 1], p[b + 2] - p[a + 2]);
-    tan.addScaledVector(nv, -tan.dot(nv));
-    if (tan.lengthSq() < 1e-14) tan.set(0, 0, 1).addScaledVector(nv, -nv.z);
-    if (tan.lengthSq() < 1e-14) tan.set(1, 0, 0);
-    tan.normalize();
-    side.crossVectors(nv, tan);
-    at.addScaledVector(nv, h).addScaledVector(side, t.offset ?? 0);
-  };
-  const dummy = new THREE.Object3D(), tx = new THREE.Vector3(), tz = new THREE.Vector3(), basis = new THREE.Matrix4();
   const cloth = flexName.slice(0, flexName.lastIndexOf('__'));
-  const sliderAt = (t: Trim): Trim => {
-    const teeth = t.run !== undefined ? cur.runTeeth.get(t.run) : undefined, z = t.zip && zips?.find((q) => q.cloth === cloth && q.trim === t.zip!.trim);
-    if (!teeth?.length || !z) return t;
-    let atTooth = teeth[0];
-    for (const q of teeth) if (q.zip!.at <= z.fastened + 1e-9) atTooth = q;
-    return atTooth;
-  };
-  for (const { kind, items, mesh } of cur.groups) {
+  for (let gi = 0; gi < cur.groups.length; gi++) {
+    const { kind, items, mesh } = cur.groups[gi];
     if (mesh.count === 0 || items.length === 0) continue;
     const matArr = mesh.instanceMatrix.array as Float32Array;
     let groupMoved = !mesh.visible;
-    items.forEach((t0, i) => {
-      const t = kind === 'slider' ? sliderAt(t0) : t0;
-      frame(t);
-      if (ALONG.has(kind)) {
+    const isAlong = ALONG.has(kind);
+    const isRestsOn = RESTS_ON.has(kind);
+    const isSlider = kind === 'slider';
+    for (let i = 0; i < items.length; i++) {
+      let t = items[i];
+      if (isSlider && t.run !== undefined && t.zip && zips) {
+        const teeth = cur.runTeeth.get(t.run);
+        if (teeth?.length) {
+          let z: NonNullable<DataMirror['clothZips']>[number] | undefined;
+          for (let zi = 0; zi < zips.length; zi++) {
+            if (zips[zi].cloth === cloth && zips[zi].trim === t.zip.trim) { z = zips[zi]; break; }
+          }
+          if (z) {
+            let atTooth = teeth[0];
+            const lim = z.fastened + 1e-9;
+            for (let ti = 0; ti < teeth.length; ti++) if (teeth[ti].zip!.at <= lim) atTooth = teeth[ti];
+            t = atTooth;
+          }
+        }
+      }
+      evalTrimFrame(t, p, n, h);
+      if (isAlong) {
         // Local +x along the line; a slider's pull (its -x) hangs down it,
         // whichever way the line's run goes.
-        tx.copy(tan);
-        if (kind === 'slider' && tx.z < 0) tx.negate();
-        tz.crossVectors(tx, nv);
+        _tx.copy(_tan);
+        if (isSlider && _tx.z < 0) _tx.negate();
+        _tz.crossVectors(_tx, _nv);
       } else {
         // Local +z up the body, local +x across it.
-        tz.set(0, 0, 1).addScaledVector(nv, -nv.z);
-        if (tz.lengthSq() < 1e-6) tz.set(0, 1, 0).addScaledVector(nv, -nv.y);
-        tz.normalize();
-        tx.crossVectors(nv, tz).normalize();
+        _tz.set(0, 0, 1).addScaledVector(_nv, -_nv.z);
+        if (_tz.lengthSq() < 1e-6) _tz.set(0, 1, 0).addScaledVector(_nv, -_nv.y);
+        _tz.normalize();
+        _tx.crossVectors(_nv, _tz).normalize();
       }
-      basis.makeBasis(tx, nv, tz);
       // Rigid hardware wider than the cloth's spacing rests on the highest
       // cloth under it, not at its one point (the cloth round a clasp stood
       // over it and hid it).
-      if (RESTS_ON.has(kind)) {
+      if (isRestsOn) {
         const reach2 = (t.size * 0.7) ** 2;
+        const ax = _at.x, ay = _at.y, az = _at.z;
+        const nx = _nv.x, ny = _nv.y, nz = _nv.z;
         let lift = 0;
         for (let j = 0; j < p.length; j += 3) {
-          const dx = p[j] - at.x, dy = p[j + 1] - at.y, dz = p[j + 2] - at.z, up = dx * nv.x + dy * nv.y + dz * nv.z;
+          const dx = p[j] - ax, dy = p[j + 1] - ay, dz = p[j + 2] - az, up = dx * nx + dy * ny + dz * nz;
           if (dx * dx + dy * dy + dz * dz - up * up < reach2 && up + h > lift) lift = up + h;
         }
-        at.addScaledVector(nv, lift);
+        _at.addScaledVector(_nv, lift);
       }
-      dummy.position.copy(at);
-      dummy.quaternion.setFromRotationMatrix(basis);
-      dummy.scale.setScalar(kind === 'slider' ? t.size * SLIDER_SCALE : t.size);
-      dummy.updateMatrix();
+      // Write column-major scaled orthonormal basis + translation directly (skips Quaternion round-trip).
+      const sc = isSlider ? t.size * SLIDER_SCALE : t.size;
       const base = i * 16;
-      const els = dummy.matrix.elements;
-      for (let m = 0; m < 16; m++) {
-        const v = Math.fround(els[m]);
-        if (matArr[base + m] !== v) {
-          matArr[base + m] = v;
-          groupMoved = true;
-        }
+      const e0 = Math.fround(_tx.x * sc), e1 = Math.fround(_tx.y * sc), e2 = Math.fround(_tx.z * sc);
+      const e4 = Math.fround(_nv.x * sc), e5 = Math.fround(_nv.y * sc), e6 = Math.fround(_nv.z * sc);
+      const e8 = Math.fround(_tz.x * sc), e9 = Math.fround(_tz.y * sc), e10 = Math.fround(_tz.z * sc);
+      const e12 = Math.fround(_at.x), e13 = Math.fround(_at.y), e14 = Math.fround(_at.z);
+      if (
+        matArr[base] !== e0 || matArr[base + 1] !== e1 || matArr[base + 2] !== e2 || matArr[base + 3] !== 0 ||
+        matArr[base + 4] !== e4 || matArr[base + 5] !== e5 || matArr[base + 6] !== e6 || matArr[base + 7] !== 0 ||
+        matArr[base + 8] !== e8 || matArr[base + 9] !== e9 || matArr[base + 10] !== e10 || matArr[base + 11] !== 0 ||
+        matArr[base + 12] !== e12 || matArr[base + 13] !== e13 || matArr[base + 14] !== e14 || matArr[base + 15] !== 1
+      ) {
+        matArr[base] = e0; matArr[base + 1] = e1; matArr[base + 2] = e2; matArr[base + 3] = 0;
+        matArr[base + 4] = e4; matArr[base + 5] = e5; matArr[base + 6] = e6; matArr[base + 7] = 0;
+        matArr[base + 8] = e8; matArr[base + 9] = e9; matArr[base + 10] = e10; matArr[base + 11] = 0;
+        matArr[base + 12] = e12; matArr[base + 13] = e13; matArr[base + 14] = e14; matArr[base + 15] = 1;
+        groupMoved = true;
       }
-    });
+    }
     if (groupMoved) {
       changed(mesh.instanceMatrix);
       shown(mesh);
@@ -221,30 +258,41 @@ export function placeClothTrims(
     for (let i = 0; i < p.length; i += 3) { cx += p[i]; cy += p[i + 1]; cz += p[i + 2]; }
     const np = Math.max(1, p.length / 3);
     cx /= np; cy /= np; cz /= np;
-    for (const { items, mesh, geometry } of cur.tapes) {
+    for (let ti = 0; ti < cur.tapes.length; ti++) {
+      const { items, mesh, geometry } = cur.tapes[ti];
       const pos = geometry.attributes.position as THREE.BufferAttribute;
       const arr = pos.array as Float32Array;
       let tapeMoved = !mesh.visible;
-      // Each side's tape under its own edge, on the cloth's inner face, from
-      // just past the teeth into its cloth: laid both ways about the line,
-      // half of it stood in the air once the zip was undone, and laid on the
-      // outer face a puffed cloth curving away from it showed it in tatters.
+      const need = items.length * 9;
+      if (_tapeScratch.length < need) _tapeScratch = new Float64Array(need);
+      // Single frame evaluation per tooth (caches at, nv, side for both sign test and vertex write).
       let into = 0;
-      for (const t of items) { frame(t); into += side.x * (cx - at.x) + side.y * (cy - at.y) + side.z * (cz - at.z); }
+      for (let k = 0; k < items.length; k++) {
+        evalTrimFrame(items[k], p, n, h);
+        into += _side.x * (cx - _at.x) + _side.y * (cy - _at.y) + _side.z * (cz - _at.z);
+        const o = 9 * k;
+        _tapeScratch[o] = _at.x - 2 * h * _nv.x;
+        _tapeScratch[o + 1] = _at.y - 2 * h * _nv.y;
+        _tapeScratch[o + 2] = _at.z - 2 * h * _nv.z;
+        _tapeScratch[o + 3] = _side.x;
+        _tapeScratch[o + 4] = _side.y;
+        _tapeScratch[o + 5] = _side.z;
+      }
       const s = into >= 0 ? 1 : -1;
-      items.forEach((t, k) => {
-        frame(t);
-        const w = t.size * TAPE_HALF, out = -0.4 * w * s, inn = 0.8 * w * s;
-        at.addScaledVector(nv, -2 * h);
-        const x0 = Math.fround(at.x + side.x * inn), y0 = Math.fround(at.y + side.y * inn), z0 = Math.fround(at.z + side.z * inn);
-        const x1 = Math.fround(at.x + side.x * out), y1 = Math.fround(at.y + side.y * out), z1 = Math.fround(at.z + side.z * out);
+      for (let k = 0; k < items.length; k++) {
+        const w = items[k].size * TAPE_HALF, out = -0.4 * w * s, inn = 0.8 * w * s;
+        const o = 9 * k;
+        const ax = _tapeScratch[o], ay = _tapeScratch[o + 1], az = _tapeScratch[o + 2];
+        const sx = _tapeScratch[o + 3], sy = _tapeScratch[o + 4], sz = _tapeScratch[o + 5];
+        const x0 = Math.fround(ax + sx * inn), y0 = Math.fround(ay + sy * inn), z0 = Math.fround(az + sz * inn);
+        const x1 = Math.fround(ax + sx * out), y1 = Math.fround(ay + sy * out), z1 = Math.fround(az + sz * out);
         const o0 = 6 * k, o1 = 6 * k + 3;
         if (arr[o0] !== x0 || arr[o0 + 1] !== y0 || arr[o0 + 2] !== z0 || arr[o1] !== x1 || arr[o1 + 1] !== y1 || arr[o1 + 2] !== z1) {
           tapeMoved = true;
         }
         arr[o0] = x0; arr[o0 + 1] = y0; arr[o0 + 2] = z0;
         arr[o1] = x1; arr[o1 + 1] = y1; arr[o1 + 2] = z1;
-      });
+      }
       if (tapeMoved) {
         changed(pos);
         geometry.computeVertexNormals();

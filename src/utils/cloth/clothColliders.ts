@@ -155,34 +155,65 @@ export function buildSdf(points: number[][], tris: ArrayLike<number>): SdfGrid {
   min = min.map((v) => v - pad); max = max.map((v) => v + pad);
   const dims = [0, 1, 2].map((a) => Math.ceil((max[a] - min[a]) / cell) + 1) as [number, number, number];
   const [nx, ny, nz] = dims;
-  const d = new Float32Array(nx * ny * nz).fill(Infinity);
-  const near = new Uint8Array(nx * ny * nz);
-  const align = new Float32Array(nx * ny * nz);
+  const N = nx * ny * nz, nyNx = nx * ny, invCell = 1 / cell;
+  const min0 = min[0], min1 = min[1], min2 = min[2];
+  const d = new Float32Array(N).fill(Infinity);
+  const near = new Uint8Array(N);
+  const align = new Float32Array(N);
   const q = [0, 0, 0];
+  const bandDist = BAND * cell;
+  const bandCheck2 = (bandDist + 1e-5) * (bandDist + 1e-5);
+  const reach = BAND * cell * 1.8;
   for (let t = 0; t < tris.length; t += 3) {
     const a = points[tris[t]], b = points[tris[t + 1]], c = points[tris[t + 2]];
-    const n = [(b[1] - a[1]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[1] - a[1]), (b[2] - a[2]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[2] - a[2]), (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])];
-    const lo = [0, 1, 2].map((ax) => Math.max(0, Math.floor((Math.min(a[ax], b[ax], c[ax]) - min[ax]) / cell) - BAND));
-    const hi = [0, 1, 2].map((ax) => Math.min(dims[ax] - 1, Math.ceil((Math.max(a[ax], b[ax], c[ax]) - min[ax]) / cell) + BAND));
-    const nl = Math.sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) || 1e-12, reach = BAND * cell * 1.8;
-    for (let k = lo[2]; k <= hi[2]; k++) for (let j = lo[1]; j <= hi[1]; j++) for (let i = lo[0]; i <= hi[0]; i++) {
-      const px = min[0] + i * cell, py = min[1] + j * cell, pz = min[2] + k * cell;
-      // Too far from the triangle's plane to be in its band: skip the closest point.
-      if (Math.abs((px - a[0]) * n[0] + (py - a[1]) * n[1] + (pz - a[2]) * n[2]) / nl > reach) continue;
-      closestOnTri(px, py, pz, a, b, c, q);
-      const dist = Math.sqrt((px - q[0]) * (px - q[0]) + (py - q[1]) * (py - q[1]) + (pz - q[2]) * (pz - q[2]));
-      const idx = (k * ny + j) * nx + i;
-      const side = (px - q[0]) * n[0] + (py - q[1]) * n[1] + (pz - q[2]) * n[2];
-      // Inside or out by the nearest face; where two are as near (the
-      // nearest point on the edge or corner they share), by the one facing
-      // the point most squarely. By the first of them found instead, a point
-      // beside the edge of a flat lid read as inside it, from the lid's side.
-      const facing = Math.abs(side) / (nl * Math.max(dist, 1e-12));
-      const cur = Math.abs(d[idx]), tie = Math.abs(dist - cur) <= 1e-6 + 1e-4 * dist;
-      if ((dist < cur && !tie) || (tie && facing > align[idx])) {
-        d[idx] = side < 0 ? -dist : dist;
-        align[idx] = facing;
-        near[idx] = 1;
+    const ax0 = a[0], ay0 = a[1], az0 = a[2];
+    const bx0 = b[0], by0 = b[1], bz0 = b[2];
+    const cx0 = c[0], cy0 = c[1], cz0 = c[2];
+    const n0 = (by0 - ay0) * (cz0 - az0) - (bz0 - az0) * (cy0 - ay0);
+    const n1 = (bz0 - az0) * (cx0 - ax0) - (bx0 - ax0) * (cz0 - az0);
+    const n2 = (bx0 - ax0) * (cy0 - ay0) - (by0 - ay0) * (cx0 - ax0);
+    const nl = Math.sqrt(n0 * n0 + n1 * n1 + n2 * n2) || 1e-12;
+    const planeBound = reach * nl;
+    let minX = ax0 < bx0 ? ax0 : bx0; if (cx0 < minX) minX = cx0;
+    let maxX = ax0 > bx0 ? ax0 : bx0; if (cx0 > maxX) maxX = cx0;
+    let minY = ay0 < by0 ? ay0 : by0; if (cy0 < minY) minY = cy0;
+    let maxY = ay0 > by0 ? ay0 : by0; if (cy0 > maxY) maxY = cy0;
+    let minZ = az0 < bz0 ? az0 : bz0; if (cz0 < minZ) minZ = cz0;
+    let maxZ = az0 > bz0 ? az0 : bz0; if (cz0 > maxZ) maxZ = cz0;
+    const lo0 = Math.max(0, Math.floor((minX - min0) * invCell) - BAND);
+    const hi0 = Math.min(nx - 1, Math.ceil((maxX - min0) * invCell) + BAND);
+    const lo1 = Math.max(0, Math.floor((minY - min1) * invCell) - BAND);
+    const hi1 = Math.min(ny - 1, Math.ceil((maxY - min1) * invCell) + BAND);
+    const lo2 = Math.max(0, Math.floor((minZ - min2) * invCell) - BAND);
+    const hi2 = Math.min(nz - 1, Math.ceil((maxZ - min2) * invCell) + BAND);
+    for (let k = lo2; k <= hi2; k++) {
+      const pz = min2 + k * cell, kOff = k * nyNx, dzA = (pz - az0) * n2;
+      for (let j = lo1; j <= hi1; j++) {
+        const py = min1 + j * cell, jkOff = kOff + j * nx, dyzA = (py - ay0) * n1 + dzA;
+        for (let i = lo0; i <= hi0; i++) {
+          const px = min0 + i * cell;
+          // Too far from the triangle's plane to be in its band: skip the closest point.
+          const pDist = (px - ax0) * n0 + dyzA;
+          if (pDist > planeBound || pDist < -planeBound) continue;
+          closestOnTri(px, py, pz, a, b, c, q);
+          const dx = px - q[0], dy = py - q[1], dz = pz - q[2];
+          const dist2 = dx * dx + dy * dy + dz * dz;
+          if (dist2 > bandCheck2) continue;
+          const dist = Math.sqrt(dist2);
+          const idx = jkOff + i;
+          const side = dx * n0 + dy * n1 + dz * n2;
+          // Inside or out by the nearest face; where two are as near (the
+          // nearest point on the edge or corner they share), by the one facing
+          // the point most squarely. By the first of them found instead, a point
+          // beside the edge of a flat lid read as inside it, from the lid's side.
+          const facing = Math.abs(side) / (nl * (dist > 1e-12 ? dist : 1e-12));
+          const cur = Math.abs(d[idx]), tie = Math.abs(dist - cur) <= 1e-6 + 1e-4 * dist;
+          if ((dist < cur && !tie) || (tie && facing > align[idx])) {
+            d[idx] = side < 0 ? -dist : dist;
+            align[idx] = facing;
+            near[idx] = 1;
+          }
+        }
       }
     }
   }
@@ -190,7 +221,7 @@ export function buildSdf(points: number[][], tris: ArrayLike<number>): SdfGrid {
   // tried; a cell further off may have met only far ones and taken its
   // distance and side from them (one beside a torso's hip read 3 cm inside
   // it). Those go to the fill below.
-  for (let idx = 0; idx < d.length; idx++) if (near[idx] && Math.abs(d[idx]) > BAND * cell) { near[idx] = 0; d[idx] = Infinity; }
+  for (let idx = 0; idx < N; idx++) if (near[idx] && Math.abs(d[idx]) > bandDist) { near[idx] = 0; d[idx] = Infinity; }
   // Which side: by flood from the grid's edge, through every cell further
   // than half a cell from the surface (the cells within half a cell of it
   // close it off, so the flood cannot cross), reached means outside. Those
@@ -198,56 +229,69 @@ export function buildSdf(points: number[][], tris: ArrayLike<number>): SdfGrid {
   // alone, a cell a centimetre off a foot's toe read inside it, and a sock
   // started there.
   const SKIN = 0.6 * cell;
-  const outside = new Uint8Array(nx * ny * nz);
-  const queue: number[] = [];
-  const push = (i: number, j: number, k: number, fromIdx = -1) => {
-    const idx = (k * ny + j) * nx + i;
-    if (outside[idx]) return;
-    if (near[idx]) {
-      if (Math.abs(d[idx]) < SKIN) return;
-      if (fromIdx >= 0 && near[fromIdx] && d[fromIdx] * d[idx] <= 0) return;
+  const outside = new Uint8Array(N);
+  // Reuse one flat Int32Array buffer for both the outside flood stack and the inward BFS queue.
+  const workQueue = new Int32Array(N);
+  let sp = 0;
+  for (let k = 0; k < nz; k++) {
+    const kEdge = k === 0 || k === nz - 1, kOff = k * nyNx;
+    for (let j = 0; j < ny; j++) {
+      const jkEdge = kEdge || j === 0 || j === ny - 1, jkOff = kOff + j * nx;
+      if (jkEdge) {
+        for (let i = 0; i < nx; i++) {
+          const idx = jkOff + i;
+          if (!outside[idx] && !(near[idx] && Math.abs(d[idx]) < SKIN)) { outside[idx] = 1; workQueue[sp++] = idx; }
+        }
+      } else {
+        const i0 = jkOff;
+        if (!outside[i0] && !(near[i0] && Math.abs(d[i0]) < SKIN)) { outside[i0] = 1; workQueue[sp++] = i0; }
+        const i1 = jkOff + nx - 1;
+        if (!outside[i1] && !(near[i1] && Math.abs(d[i1]) < SKIN)) { outside[i1] = 1; workQueue[sp++] = i1; }
+      }
     }
-    outside[idx] = 1; queue.push(idx);
-  };
-  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-    if (i === 0 || j === 0 || k === 0 || i === nx - 1 || j === ny - 1 || k === nz - 1) push(i, j, k);
   }
-  while (queue.length) {
-    const idx = queue.pop()!, i = idx % nx, j = Math.floor(idx / nx) % ny, k = Math.floor(idx / (nx * ny));
-    if (i > 0) push(i - 1, j, k, idx); if (i < nx - 1) push(i + 1, j, k, idx);
-    if (j > 0) push(i, j - 1, k, idx); if (j < ny - 1) push(i, j + 1, k, idx);
-    if (k > 0) push(i, j, k - 1, idx); if (k < nz - 1) push(i, j, k + 1, idx);
+  while (sp > 0) {
+    const idx = workQueue[--sp];
+    const k = (idx / nyNx) | 0;
+    const rem = idx - k * nyNx;
+    const j = (rem / nx) | 0;
+    const i = rem - j * nx;
+    const fromNear = near[idx], fromD = d[idx];
+    if (i > 0) { const ni = idx - 1; if (!outside[ni] && (!near[ni] || (Math.abs(d[ni]) >= SKIN && (!fromNear || fromD * d[ni] > 0)))) { outside[ni] = 1; workQueue[sp++] = ni; } }
+    if (i < nx - 1) { const ni = idx + 1; if (!outside[ni] && (!near[ni] || (Math.abs(d[ni]) >= SKIN && (!fromNear || fromD * d[ni] > 0)))) { outside[ni] = 1; workQueue[sp++] = ni; } }
+    if (j > 0) { const ni = idx - nx; if (!outside[ni] && (!near[ni] || (Math.abs(d[ni]) >= SKIN && (!fromNear || fromD * d[ni] > 0)))) { outside[ni] = 1; workQueue[sp++] = ni; } }
+    if (j < ny - 1) { const ni = idx + nx; if (!outside[ni] && (!near[ni] || (Math.abs(d[ni]) >= SKIN && (!fromNear || fromD * d[ni] > 0)))) { outside[ni] = 1; workQueue[sp++] = ni; } }
+    if (k > 0) { const ni = idx - nyNx; if (!outside[ni] && (!near[ni] || (Math.abs(d[ni]) >= SKIN && (!fromNear || fromD * d[ni] > 0)))) { outside[ni] = 1; workQueue[sp++] = ni; } }
+    if (k < nz - 1) { const ni = idx + nyNx; if (!outside[ni] && (!near[ni] || (Math.abs(d[ni]) >= SKIN && (!fromNear || fromD * d[ni] > 0)))) { outside[ni] = 1; workQueue[sp++] = ni; } }
   }
   const far = cell * (BAND + 1);
-  const inVisited = new Uint8Array(nx * ny * nz);
-  const inQueue = new Int32Array(nx * ny * nz);
+  const inVisited = new Uint8Array(N);
   let inHead = 0, inTail = 0;
-  for (let idx = 0; idx < d.length; idx++) {
+  for (let idx = 0; idx < N; idx++) {
     if (!near[idx]) {
       d[idx] = outside[idx] ? far : -far;
     } else {
       if (Math.abs(d[idx]) >= SKIN) d[idx] = outside[idx] ? Math.abs(d[idx]) : -Math.abs(d[idx]);
       if (d[idx] <= 0) {
         inVisited[idx] = 1;
-        inQueue[inTail++] = idx;
+        workQueue[inTail++] = idx;
       }
     }
   }
   // Propagate signed distance inward (-cell per step) from the narrow band so
   // deep interior cells (> 2 cells inside) still carry an outward gradient.
   while (inHead < inTail) {
-    const idx = inQueue[inHead++], base = d[idx] - cell;
-    const i = idx % nx, j = Math.floor(idx / nx) % ny, k = Math.floor(idx / (nx * ny));
-    const step = (ni: number, nj: number, nk: number) => {
-      const nIdx = (nk * ny + nj) * nx + ni;
-      if (outside[nIdx] || near[nIdx] || inVisited[nIdx]) return;
-      inVisited[nIdx] = 1;
-      d[nIdx] = base;
-      inQueue[inTail++] = nIdx;
-    };
-    if (i > 0) step(i - 1, j, k); if (i < nx - 1) step(i + 1, j, k);
-    if (j > 0) step(i, j - 1, k); if (j < ny - 1) step(i, j + 1, k);
-    if (k > 0) step(i, j, k - 1); if (k < nz - 1) step(i, j, k + 1);
+    const idx = workQueue[inHead++], base = d[idx] - cell;
+    const k = (idx / nyNx) | 0;
+    const rem = idx - k * nyNx;
+    const j = (rem / nx) | 0;
+    const i = rem - j * nx;
+    if (i > 0) { const nIdx = idx - 1; if (!outside[nIdx] && !near[nIdx] && !inVisited[nIdx]) { inVisited[nIdx] = 1; d[nIdx] = base; workQueue[inTail++] = nIdx; } }
+    if (i < nx - 1) { const nIdx = idx + 1; if (!outside[nIdx] && !near[nIdx] && !inVisited[nIdx]) { inVisited[nIdx] = 1; d[nIdx] = base; workQueue[inTail++] = nIdx; } }
+    if (j > 0) { const nIdx = idx - nx; if (!outside[nIdx] && !near[nIdx] && !inVisited[nIdx]) { inVisited[nIdx] = 1; d[nIdx] = base; workQueue[inTail++] = nIdx; } }
+    if (j < ny - 1) { const nIdx = idx + nx; if (!outside[nIdx] && !near[nIdx] && !inVisited[nIdx]) { inVisited[nIdx] = 1; d[nIdx] = base; workQueue[inTail++] = nIdx; } }
+    if (k > 0) { const nIdx = idx - nyNx; if (!outside[nIdx] && !near[nIdx] && !inVisited[nIdx]) { inVisited[nIdx] = 1; d[nIdx] = base; workQueue[inTail++] = nIdx; } }
+    if (k < nz - 1) { const nIdx = idx + nyNx; if (!outside[nIdx] && !near[nIdx] && !inVisited[nIdx]) { inVisited[nIdx] = 1; d[nIdx] = base; workQueue[inTail++] = nIdx; } }
   }
   return new SdfGrid(min, cell, dims, d);
 }

@@ -8,7 +8,7 @@
  * it through itself.
  */
 
-import { sampleGrid, type Grid } from './formSdf';
+import { sampleGridXYZ, type Grid } from './formSdf';
 import { undoCrossingMoves } from './clothUntangle';
 
 export function surfaceNet(g: Grid, f: Float32Array, relax = 4): { points: number[][]; tris: number[] } {
@@ -118,18 +118,29 @@ export function surfaceNet(g: Grid, f: Float32Array, relax = 4): { points: numbe
     if (!nbr[a].includes(b)) nbr[a].push(b);
     if (!nbr[b].includes(a)) nbr[b].push(a);
   }
-  const grad = fieldGradient(g, f), project = ontoField(g, f);
+  const project = ontoField(g, f);
+  const e = g.h * 0.5, inv2e = 1 / (2 * e);
   for (let it = 0; it < relax; it++) {
-    const next = points.map((p, i) => {
-      if (!nbr[i].length) return p;
-      const m = [0, 0, 0];
-      for (const q of nbr[i]) for (let a = 0; a < 3; a++) m[a] += points[q][a] / nbr[i].length;
-      const n = grad(p), l = Math.hypot(n[0], n[1], n[2]) || 1;
-      const dlt = m.map((x, a) => x - p[a]), dn = (dlt[0] * n[0] + dlt[1] * n[1] + dlt[2] * n[2]) / l;
-      const q = p.map((x, a) => x + 0.5 * (dlt[a] - (dn * n[a]) / l));
+    const next: number[][] = new Array(points.length);
+    for (let i = 0; i < points.length; i++) {
+      const p = points[i], nb = nbr[i], deg = nb.length;
+      if (!deg) { next[i] = p; continue; }
+      let mx = 0, my = 0, mz = 0;
+      for (let j = 0; j < deg; j++) { const pq = points[nb[j]]; mx += pq[0]; my += pq[1]; mz += pq[2]; }
+      const invDeg = 1 / deg;
+      mx *= invDeg; my *= invDeg; mz *= invDeg;
+      const px = p[0], py = p[1], pz = p[2];
+      const nxG = (sampleGridXYZ(g, f, px + e, py, pz) - sampleGridXYZ(g, f, px - e, py, pz)) * inv2e;
+      const nyG = (sampleGridXYZ(g, f, px, py + e, pz) - sampleGridXYZ(g, f, px, py - e, pz)) * inv2e;
+      const nzG = (sampleGridXYZ(g, f, px, py, pz + e) - sampleGridXYZ(g, f, px, py, pz - e)) * inv2e;
+      const l2 = nxG * nxG + nyG * nyG + nzG * nzG;
+      const invL2 = l2 > 0 ? 1 / l2 : 1;
+      const dx = mx - px, dy = my - py, dz = mz - pz;
+      const dn = (dx * nxG + dy * nyG + dz * nzG) * invL2;
+      const q = [px + 0.5 * (dx - dn * nxG), py + 0.5 * (dy - dn * nyG), pz + 0.5 * (dz - dn * nzG)];
       project(q);
-      return q;
-    });
+      next[i] = q;
+    }
     const was = points.slice();
     for (let i = 0; i < points.length; i++) points[i] = next[i];
     // Never through itself: off the grid it is not, and a step that took it there is undone where it did.
@@ -140,21 +151,31 @@ export function surfaceNet(g: Grid, f: Float32Array, relax = 4): { points: numbe
 
 /** The gradient of a grid field at p, by central differences half a cell wide. */
 export function fieldGradient(g: Grid, f: Float32Array): (p: number[]) => number[] {
-  const e = g.h * 0.5;
-  return (p) => [0, 1, 2].map((ax) => {
-    const a = p.slice(), b = p.slice(); a[ax] += e; b[ax] -= e;
-    return (sampleGrid(g, f, a) - sampleGrid(g, f, b)) / (2 * e);
-  });
+  const e = g.h * 0.5, inv2e = 1 / (2 * e);
+  return (p) => {
+    const px = p[0], py = p[1], pz = p[2];
+    return [
+      (sampleGridXYZ(g, f, px + e, py, pz) - sampleGridXYZ(g, f, px - e, py, pz)) * inv2e,
+      (sampleGridXYZ(g, f, px, py + e, pz) - sampleGridXYZ(g, f, px, py - e, pz)) * inv2e,
+      (sampleGridXYZ(g, f, px, py, pz + e) - sampleGridXYZ(g, f, px, py, pz - e)) * inv2e,
+    ];
+  };
 }
 
 /** Moves a point onto the field's zero set, in place, by a few Newton steps along its gradient. */
 export function ontoField(g: Grid, f: Float32Array): (p: number[]) => void {
-  const grad = fieldGradient(g, f);
+  const e = g.h * 0.5, inv2e = 1 / (2 * e);
   return (p) => {
     for (let it = 0; it < 3; it++) {
-      const val = sampleGrid(g, f, p), n = grad(p), l2 = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+      const px = p[0], py = p[1], pz = p[2];
+      const val = sampleGridXYZ(g, f, px, py, pz);
+      const nx = (sampleGridXYZ(g, f, px + e, py, pz) - sampleGridXYZ(g, f, px - e, py, pz)) * inv2e;
+      const ny = (sampleGridXYZ(g, f, px, py + e, pz) - sampleGridXYZ(g, f, px, py - e, pz)) * inv2e;
+      const nz = (sampleGridXYZ(g, f, px, py, pz + e) - sampleGridXYZ(g, f, px, py, pz - e)) * inv2e;
+      const l2 = nx * nx + ny * ny + nz * nz;
       if (l2 < 1e-12) return;
-      for (let a = 0; a < 3; a++) p[a] -= (val * n[a]) / l2;
+      const s = val / l2;
+      p[0] = px - s * nx; p[1] = py - s * ny; p[2] = pz - s * nz;
     }
   };
 }

@@ -22,6 +22,11 @@ import type { ClothPull } from '../../types/cloth';
 import type { FlexInfo } from '../../workers/physicsWorkerProtocol';
 
 const Z = new THREE.Vector3(0, 0, 1);
+const _ndc = new THREE.Vector2();
+const _raycaster = new THREE.Raycaster();
+const _planeHit = new THREE.Vector3();
+const _normalScratch = new THREE.Vector3();
+const _cornerScratch = new THREE.Vector3();
 const PEN_RING = 0.008;
 const RING_GEOM = new THREE.RingGeometry(0.9, 1, 48);
 const RING_MAT = new THREE.MeshBasicMaterial({ color: 0xa855f7, side: THREE.DoubleSide, depthTest: false, transparent: true, opacity: 0.85 });
@@ -90,7 +95,8 @@ export function useClothSculpt(node: SceneNode | undefined, flex: FlexInfo) {
     const r = ring.current;
     if (!r || !e.face) return;
     r.position.copy(at);
-    r.quaternion.setFromUnitVectors(Z, e.face.normal.clone().normalize());
+    _normalScratch.copy(e.face.normal).normalize();
+    r.quaternion.setFromUnitVectors(Z, _normalScratch);
     r.visible = true;
   };
 
@@ -119,21 +125,24 @@ export function useClothSculpt(node: SceneNode | undefined, flex: FlexInfo) {
     const g = grab.current;
     if (!g) return null;
     const r = gl.domElement.getBoundingClientRect();
-    const ndc = new THREE.Vector2(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
-    const ray = new THREE.Raycaster();
-    ray.setFromCamera(ndc, camera);
-    const hit = ray.ray.intersectPlane(g.plane, new THREE.Vector3());
-    return hit ? g.obj.worldToLocal(hit) : null;
+    _ndc.set(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
+    _raycaster.setFromCamera(_ndc, camera);
+    const hit = _raycaster.ray.intersectPlane(g.plane, _planeHit);
+    return hit ? g.obj.worldToLocal(hit.clone()) : null;
   };
+  const handHandlersRef = useRef({ onPlane, commitPull, releaseOrbit });
+  useEffect(() => {
+    handHandlersRef.current = { onPlane, commitPull, releaseOrbit };
+  });
   useEffect(() => {
     if (!active || !hand) return;
     const move = (ev: PointerEvent) => {
-      const g = grab.current, p = onPlane(ev);
+      const g = grab.current, p = handHandlersRef.current.onPlane(ev);
       if (!g || !p) return;
       if (p.distanceTo(g.path[g.path.length - 1]) > 0.01) g.path.push(p);
     };
-    const up = () => commitPull();
-    const cancel = () => { grab.current = null; releaseOrbit(); };
+    const up = () => handHandlersRef.current.commitPull();
+    const cancel = () => { grab.current = null; handHandlersRef.current.releaseOrbit(); };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
     window.addEventListener('pointercancel', cancel);
@@ -144,7 +153,7 @@ export function useClothSculpt(node: SceneNode | undefined, flex: FlexInfo) {
       window.removeEventListener('pointercancel', cancel);
       window.removeEventListener('blur', cancel);
     };
-  });
+  }, [active, hand]);
 
   const commit = () => {
     if (hand) return;
@@ -174,11 +183,15 @@ export function useClothSculpt(node: SceneNode | undefined, flex: FlexInfo) {
     setMarks((m) => [...m, ...shown]);
     useStore.getState().updateNode(node.id, { cloth: { ...cloth, garment: next } } as Partial<SceneNode>);
   };
+  const strokeHandlersRef = useRef({ commit, releaseOrbit });
+  useEffect(() => {
+    strokeHandlersRef.current = { commit, releaseOrbit };
+  });
   // The button can come up off the garment.
   useEffect(() => {
     if (!active) return;
-    const up = () => commit();
-    const cancel = () => { stroke.current = null; releaseOrbit(); };
+    const up = () => strokeHandlersRef.current.commit();
+    const cancel = () => { stroke.current = null; strokeHandlersRef.current.releaseOrbit(); };
     window.addEventListener('pointerup', up);
     window.addEventListener('pointercancel', cancel);
     window.addEventListener('blur', cancel);
@@ -187,7 +200,7 @@ export function useClothSculpt(node: SceneNode | undefined, flex: FlexInfo) {
       window.removeEventListener('pointercancel', cancel);
       window.removeEventListener('blur', cancel);
     };
-  });
+  }, [active]);
 
   const handlers = active ? {
     onPointerDown: (e: ThreeEvent<PointerEvent>) => {
@@ -198,7 +211,7 @@ export function useClothSculpt(node: SceneNode | undefined, flex: FlexInfo) {
         const at = local(e), N = flex.vertnum, pos = (e.object as THREE.Mesh).geometry.attributes.position as THREE.BufferAttribute;
         const corners = e.face ? [e.face.a, e.face.b, e.face.c] : [];
         let best = -1, bd = Infinity;
-        for (const c of corners) { const d = at.distanceToSquared(new THREE.Vector3(pos.getX(c), pos.getY(c), pos.getZ(c))); if (d < bd) { bd = d; best = c % N; } }
+        for (const c of corners) { const d = at.distanceToSquared(_cornerScratch.set(pos.getX(c), pos.getY(c), pos.getZ(c))); if (d < bd) { bd = d; best = c % N; } }
         const uv = best >= 0 ? flex.flat?.uv?.[best] : undefined;
         if (!uv) return;
         holdingOrbit.current = true;

@@ -14,6 +14,7 @@
 import type { ClothModel } from './clothModel';
 
 const CELL = 0.04;
+const INV_CELL = 1 / CELL;
 const nextPow2 = (v: number) => {
   let p = 1024;
   while (p < v) p <<= 1;
@@ -184,20 +185,21 @@ export class LayerContacts {
       const reach = deep ? SETTLE_DEPTH : g.pushTris || g.outward[0] ? thick * 2.5 : thick * 2;
       const maxDepth = deep ? SETTLE_DEPTH : MAX_DEPTH;
       if (rebuild) this.build(g, x, reach + MOVE_MARGIN);
-      const T = g.tris, mask = g.mask;
+      const T = g.tris, mask = g.mask, B = g.box, reach2 = reach * reach;
       for (let pi = 0; pi < g.particles.length; pi++) {
         const i = g.particles[pi], k = 3 * i;
         const px = x[k], py = x[k + 1], pz = x[k + 2];
-        const b = hash(Math.floor(px / CELL), Math.floor(py / CELL), Math.floor(pz / CELL), mask);
-        let best = reach, bq0 = 0, bq1 = 0, bq2 = 0, bt = -1;
-        const B = g.box;
-        for (let e = g.start[b]; e < g.start[b + 1]; e++) {
+        const b = hash(Math.floor(px * INV_CELL), Math.floor(py * INV_CELL), Math.floor(pz * INV_CELL), mask);
+        const e0 = g.start[b], e1 = g.start[b + 1];
+        if (e0 === e1) continue;
+        let best2 = reach2, bq0 = 0, bq1 = 0, bq2 = 0, bt = -1;
+        for (let e = e0; e < e1; e++) {
           const t = g.entries[e], o = 6 * t;
           if (px < B[o] || py < B[o + 1] || pz < B[o + 2] || px > B[o + 3] || py > B[o + 4] || pz > B[o + 5]) continue;
           const a = 3 * T[3 * t], bb = 3 * T[3 * t + 1], c = 3 * T[3 * t + 2];
           closest(px, py, pz, x, a, bb, c, out);
-          const dx = px - out[0], dy = py - out[1], dz = pz - out[2], d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-          if (d < best) { best = d; bq0 = out[0]; bq1 = out[1]; bq2 = out[2]; bt = t; }
+          const dx = px - out[0], dy = py - out[1], dz = pz - out[2], d2 = dx * dx + dy * dy + dz * dz;
+          if (d2 < best2) { best2 = d2; bq0 = out[0]; bq1 = out[1]; bq2 = out[2]; bt = t; }
         }
         if (bt < 0) continue;
         const a = 3 * T[3 * bt], bb = 3 * T[3 * bt + 1], c = 3 * T[3 * bt + 2];
@@ -210,7 +212,7 @@ export class LayerContacts {
         if (g.pushTris) {
           const sd = (bq0 - px) * nx + (bq1 - py) * ny + (bq2 - pz) * nz;
           // Only push when the inner particle projects onto the outer triangle (not past an open hem/edge).
-          if (best * best - sd * sd > 0.0035 * 0.0035) continue;
+          if (best2 - sd * sd > 0.0035 * 0.0035) continue;
           const wx = bq0 - x[a], wy = bq1 - x[a + 1], wz = bq2 - x[a + 2];
           const d00 = ux * ux + uy * uy + uz * uz, d01 = ux * vx + uy * vy + uz * vz, d11 = vx * vx + vy * vy + vz * vz;
           const d20 = wx * ux + wy * uy + wz * uz, d21 = wx * vx + wy * vy + wz * vz, den = d00 * d11 - d01 * d01;
@@ -240,17 +242,28 @@ export class LayerContacts {
           const sum = b0 * b0 * w[v0] + b1 * b1 * w[v1] + b2 * b2 * w[v2];
           if (sum <= 0) continue;
           const pdx = x[k] - prev[k], pdy = x[k + 1] - prev[k + 1], pdz = x[k + 2] - prev[k + 2];
-          const mu = g.mu[pi];
-          const pushCorner = (vtx: number, bwq: number) => {
-            const push = (bwq * w[vtx] * depth) / sum;
-            if (push <= 0) return;
-            const vk = 3 * vtx;
-            x[vk] += nx * push; x[vk + 1] += ny * push; x[vk + 2] += nz * push;
-            contactN[vk] += nx * push; contactN[vk + 1] += ny * push; contactN[vk + 2] += nz * push;
-            contactDisp[vk] += pdx * push; contactDisp[vk + 1] += pdy * push; contactDisp[vk + 2] += pdz * push;
-            contactPush[vtx] += push; contactMu[vtx] += mu * push;
-          };
-          pushCorner(v0, b0); pushCorner(v1, b1); pushCorner(v2, b2);
+          const mu = g.mu[pi], scale = depth / sum;
+          const p0 = b0 * w[v0] * scale;
+          if (p0 > 0) {
+            x[a] += nx * p0; x[a + 1] += ny * p0; x[a + 2] += nz * p0;
+            contactN[a] += nx * p0; contactN[a + 1] += ny * p0; contactN[a + 2] += nz * p0;
+            contactDisp[a] += pdx * p0; contactDisp[a + 1] += pdy * p0; contactDisp[a + 2] += pdz * p0;
+            contactPush[v0] += p0; contactMu[v0] += mu * p0;
+          }
+          const p1 = b1 * w[v1] * scale;
+          if (p1 > 0) {
+            x[bb] += nx * p1; x[bb + 1] += ny * p1; x[bb + 2] += nz * p1;
+            contactN[bb] += nx * p1; contactN[bb + 1] += ny * p1; contactN[bb + 2] += nz * p1;
+            contactDisp[bb] += pdx * p1; contactDisp[bb + 1] += pdy * p1; contactDisp[bb + 2] += pdz * p1;
+            contactPush[v1] += p1; contactMu[v1] += mu * p1;
+          }
+          const p2 = b2 * w[v2] * scale;
+          if (p2 > 0) {
+            x[c] += nx * p2; x[c + 1] += ny * p2; x[c + 2] += nz * p2;
+            contactN[c] += nx * p2; contactN[c + 1] += ny * p2; contactN[c + 2] += nz * p2;
+            contactDisp[c] += pdx * p2; contactDisp[c + 1] += pdy * p2; contactDisp[c + 2] += pdz * p2;
+            contactPush[v2] += p2; contactMu[v2] += mu * p2;
+          }
           continue;
         }
         const dtx = ((x[a] - prev[a]) + (x[bb] - prev[bb]) + (x[c] - prev[c])) / 3;
@@ -279,13 +292,21 @@ export class LayerContacts {
     let total = 0;
     for (let t = 0; t < nt; t++) {
       const a = 3 * T[3 * t], b = 3 * T[3 * t + 1], c = 3 * T[3 * t + 2], o = 6 * t;
-      for (let k = 0; k < 3; k++) {
-        B[o + k] = Math.min(x[a + k], x[b + k], x[c + k]) - reach;
-        B[o + 3 + k] = Math.max(x[a + k], x[b + k], x[c + k]) + reach;
-        range[o + k] = Math.floor(B[o + k] / CELL);
-        range[o + 3 + k] = Math.floor(B[o + 3 + k] / CELL);
-      }
-      for (let ix = range[o]; ix <= range[o + 3]; ix++) for (let iy = range[o + 1]; iy <= range[o + 4]; iy++) for (let iz = range[o + 2]; iz <= range[o + 5]; iz++) {
+      const ax = x[a], bx = x[b], cx = x[c];
+      const loX = (ax < bx ? (ax < cx ? ax : cx) : (bx < cx ? bx : cx)) - reach;
+      const hiX = (ax > bx ? (ax > cx ? ax : cx) : (bx > cx ? bx : cx)) + reach;
+      const ay = x[a + 1], by = x[b + 1], cy = x[c + 1];
+      const loY = (ay < by ? (ay < cy ? ay : cy) : (by < cy ? by : cy)) - reach;
+      const hiY = (ay > by ? (ay > cy ? ay : cy) : (by > cy ? by : cy)) + reach;
+      const az = x[a + 2], bz = x[b + 2], cz = x[c + 2];
+      const loZ = (az < bz ? (az < cz ? az : cz) : (bz < cz ? bz : cz)) - reach;
+      const hiZ = (az > bz ? (az > cz ? az : cz) : (bz > cz ? bz : cz)) + reach;
+      B[o] = loX; B[o + 1] = loY; B[o + 2] = loZ; B[o + 3] = hiX; B[o + 4] = hiY; B[o + 5] = hiZ;
+      const ix0 = Math.floor(loX * INV_CELL), ix1 = Math.floor(hiX * INV_CELL);
+      const iy0 = Math.floor(loY * INV_CELL), iy1 = Math.floor(hiY * INV_CELL);
+      const iz0 = Math.floor(loZ * INV_CELL), iz1 = Math.floor(hiZ * INV_CELL);
+      range[o] = ix0; range[o + 1] = iy0; range[o + 2] = iz0; range[o + 3] = ix1; range[o + 4] = iy1; range[o + 5] = iz1;
+      for (let ix = ix0; ix <= ix1; ix++) for (let iy = iy0; iy <= iy1; iy++) for (let iz = iz0; iz <= iz1; iz++) {
         start[hash(ix, iy, iz, mask) + 1]++; total++;
       }
     }
@@ -294,7 +315,8 @@ export class LayerContacts {
     fill.set(start.subarray(0, buckets));
     for (let t = 0; t < nt; t++) {
       const o = 6 * t;
-      for (let ix = range[o]; ix <= range[o + 3]; ix++) for (let iy = range[o + 1]; iy <= range[o + 4]; iy++) for (let iz = range[o + 2]; iz <= range[o + 5]; iz++) {
+      const ix0 = range[o], iy0 = range[o + 1], iz0 = range[o + 2], ix1 = range[o + 3], iy1 = range[o + 4], iz1 = range[o + 5];
+      for (let ix = ix0; ix <= ix1; ix++) for (let iy = iy0; iy <= iy1; iy++) for (let iz = iz0; iz <= iz1; iz++) {
         g.entries[fill[hash(ix, iy, iz, mask)]++] = t;
       }
     }
