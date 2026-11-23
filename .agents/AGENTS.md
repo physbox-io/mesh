@@ -13,10 +13,10 @@
 - **WSL Path & Context**: Run Linux/WSL operations through `wsl -e bash -c "..."` or target `/Ubuntu-20.04/home/boab/...` WSL paths.
 - **No `npx` Usage**: Do not use `npx` to execute commands. Run local binaries directly (e.g. `./node_modules/.bin/vitest`) or package scripts via `npm run <script>` inside the WSL environment.
 
-## 3. Task boundaries in multi-agent runs
-- **Do Not Touch Unrelated Broken Code**: If a build command (e.g. `npm run build` or `tsc`) fails on type or syntax errors in files outside your assigned task, do not fix, modify, or patch those files.
-- **Immediate Reversion**: If unrelated files are modified by accident, revert them with `git checkout <file>`.
-- **Scoped Verification**: Use targeted type checking (`./node_modules/.bin/tsc -b --noEmit` — never bare `tsc --noEmit`, because the root `tsconfig.json` uses project `references` with `"files": []`) and tests on your assigned files rather than editing out-of-scope files to satisfy global build scripts. Stage explicit paths/hunks only (never `git add -A`), as other agents may have concurrent uncommitted changes.
+## 3. Task boundaries & CI/CD ownership in multi-agent runs
+- **CI/CD Failure = You Fix It**: Whenever a CI/CD run or repo-wide check (`tsc -b`, `npm run lint`, `vitest`, `npm run build:image`, or Cloud Build) fails on `main` — even if the failure was introduced by another commit or touches files outside your initial task scope — diagnose and fix it so CI/CD turns green and deploys cleanly.
+- **Respect Uncommitted Concurrent Edits**: Do not overwrite or `git add -A` uncommitted working-tree files actively being edited by another local agent; stage explicit paths/hunks only (`git add <paths>`) and revert only accidental local edits of your own (`git checkout <file>`).
+- **Verification**: Always use `./node_modules/.bin/tsc -b --noEmit` (never bare `tsc --noEmit`, because the root `tsconfig.json` uses project `references` with `"files": []`).
 
 ## 4. Companion MCP server (`~/physbox_mcp`) & repo conventions
 - **Read `CLAUDE.md` and `GUIDE.md`**: Consult `CLAUDE.md` at the repo root for repo-wide traps and multi-file sync checklists.

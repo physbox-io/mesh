@@ -427,17 +427,109 @@ function priorityMaterials(meshes: ThreeMfMesh[], positionsOf: ArrayLike<number>
 
 /**
  * Shared Pass-1 mesh cleaner for both `exportThreeMf` and `exportThreeMfAssemblies`:
- * quantises coordinates to the 0.1 µm grid, drops non-finite, duplicate-vertex,
- * and collinear/zero-area (`|u × v|^2 <= 1e-20`) triangles, and welds vertices
- * that collapse to the same quantised coordinate so 3MF output stays manifold.
+ * quantises coordinates to the 0.1 µm grid, welds vertices that collapse to the
+ * same quantised coordinate, drops non-finite and duplicate-corner (`w0===w1`
+ * etc.) triangles, and drops collinear/zero-area (`|u × v|^2 <= 1e-20`)
+ * triangles ONLY when the post-weld mesh is NOT already a closed 2-manifold!
+ *
+ * Why: on a closed 2-manifold (e.g. a Manifold Boolean mold half), every
+ * directed half-edge already has an exact opposite partner. Dropping a thin
+ * sliver triangle `(A, M, B)` that bridges a T-junction along a Boolean split
+ * seam tears open three unpaired boundary edges (`nonManifold`/`!closed`) in a
+ * mesh that was already watertight! Conversely, on open/dirty soup meshes,
+ * dropping zero-area collinear slivers removes garbage triangles cleanly.
  */
 function weldMeshTriangles(
   rawPositions: ArrayLike<number>,
   rawIndices: ArrayLike<number> | null,
   onValidTriangle?: (i0: number, i1: number, i2: number) => void,
+  weldVertices = true,
 ): { positions: number[]; indices: number[] } {
   const rawVertexCount = Math.floor(rawPositions.length / 3);
   const rawIndexCount = rawIndices ? rawIndices.length : rawVertexCount;
+
+  // Fast topological preservation path for pre-indexed Manifold solids
+  // (`exportThreeMfAssemblies`): first check if EVERY raw triangle is finite
+  // and already forms a closed, consistently wound 2-manifold by vertex index.
+  // If so, keep its exact vertex/triangle topology (only quantising vertex
+  // coordinates to 1e-4 mm) without dropping collapsed-edge pairs or welding
+  // cross-sheet pinch-point vertices, which would break 2-manifoldness!
+  if (!weldVertices && rawIndices && rawIndexCount >= 12) {
+    let allValidByIndex = true;
+    for (let t = 0; t + 2 < rawIndexCount; t += 3) {
+      const i0 = rawIndices[t], i1 = rawIndices[t + 1], i2 = rawIndices[t + 2];
+      if (
+        i0 < 0 || i1 < 0 || i2 < 0 ||
+        i0 >= rawVertexCount || i1 >= rawVertexCount || i2 >= rawVertexCount ||
+        i0 === i1 || i1 === i2 || i2 === i0
+      ) {
+        allValidByIndex = false;
+        break;
+      }
+      if (
+        !Number.isFinite(
+          rawPositions[i0 * 3] + rawPositions[i0 * 3 + 1] + rawPositions[i0 * 3 + 2] +
+          rawPositions[i1 * 3] + rawPositions[i1 * 3 + 1] + rawPositions[i1 * 3 + 2] +
+          rawPositions[i2 * 3] + rawPositions[i2 * 3 + 1] + rawPositions[i2 * 3 + 2],
+        )
+      ) {
+        allValidByIndex = false;
+        break;
+      }
+    }
+    if (allValidByIndex) {
+      const m = Math.floor(rawIndexCount / 3) * 3;
+      const directed = new Float64Array(m);
+      const undirected = new Float64Array(m);
+      for (let k = 0; k < m; k += 3) {
+        const a = rawIndices[k], b = rawIndices[k + 1], c = rawIndices[k + 2];
+        undirected[k] = a < b ? a * rawVertexCount + b : b * rawVertexCount + a;
+        directed[k] = a * rawVertexCount + b;
+        undirected[k + 1] = b < c ? b * rawVertexCount + c : c * rawVertexCount + b;
+        directed[k + 1] = b * rawVertexCount + c;
+        undirected[k + 2] = c < a ? c * rawVertexCount + a : a * rawVertexCount + c;
+        directed[k + 2] = c * rawVertexCount + a;
+      }
+      directed.sort();
+      let closedByIndex = true;
+      for (let i = 1; i < m; i++) {
+        if (directed[i] === directed[i - 1]) { closedByIndex = false; break; }
+      }
+      if (closedByIndex) {
+        undirected.sort();
+        for (let i = 0; i < m; i += 2) {
+          if (i + 1 >= m || undirected[i] !== undirected[i + 1] || (i + 2 < m && undirected[i + 2] === undirected[i])) {
+            closedByIndex = false;
+            break;
+          }
+        }
+      }
+      if (closedByIndex) {
+        const remap = new Int32Array(rawVertexCount).fill(-1);
+        const outPositions: number[] = [];
+        const outIndices: number[] = [];
+        const mapV = (v: number): number => {
+          let idx = remap[v];
+          if (idx === -1) {
+            idx = outPositions.length / 3;
+            remap[v] = idx;
+            outPositions.push(
+              quantizeCoord(rawPositions[v * 3]),
+              quantizeCoord(rawPositions[v * 3 + 1]),
+              quantizeCoord(rawPositions[v * 3 + 2]),
+            );
+          }
+          return idx;
+        };
+        for (let k = 0; k < m; k += 3) {
+          const i0 = rawIndices[k], i1 = rawIndices[k + 1], i2 = rawIndices[k + 2];
+          outIndices.push(mapV(i0), mapV(i1), mapV(i2));
+          onValidTriangle?.(i0, i1, i2);
+        }
+        return { positions: outPositions, indices: outIndices };
+      }
+    }
+  }
 
   const weldedPositions: number[] = [];
   const vertexMap = new Map<string, number>();
@@ -452,39 +544,128 @@ function weldMeshTriangles(
     return idx;
   };
 
-  const indices: number[] = [];
+  interface CandidateTri {
+    w0: number;
+    w1: number;
+    w2: number;
+    i0: number;
+    i1: number;
+    i2: number;
+    zeroArea: boolean;
+  }
+
+  const candidates: CandidateTri[] = [];
+  let hasZeroArea = false;
+  let hadDroppedInvalid = false;
+
   for (let t = 0; t + 2 < rawIndexCount; t += 3) {
     const i0 = rawIndices ? rawIndices[t] : t;
     const i1 = rawIndices ? rawIndices[t + 1] : t + 1;
     const i2 = rawIndices ? rawIndices[t + 2] : t + 2;
-    if (i0 < 0 || i1 < 0 || i2 < 0 || i0 >= rawVertexCount || i1 >= rawVertexCount || i2 >= rawVertexCount) continue;
+    if (i0 < 0 || i1 < 0 || i2 < 0 || i0 >= rawVertexCount || i1 >= rawVertexCount || i2 >= rawVertexCount) {
+      hadDroppedInvalid = true;
+      continue;
+    }
 
-    const x0 = quantizeCoord(rawPositions[i0 * 3]);
-    const y0 = quantizeCoord(rawPositions[i0 * 3 + 1]);
-    const z0 = quantizeCoord(rawPositions[i0 * 3 + 2]);
-    const x1 = quantizeCoord(rawPositions[i1 * 3]);
-    const y1 = quantizeCoord(rawPositions[i1 * 3 + 1]);
-    const z1 = quantizeCoord(rawPositions[i1 * 3 + 2]);
-    const x2 = quantizeCoord(rawPositions[i2 * 3]);
-    const y2 = quantizeCoord(rawPositions[i2 * 3 + 1]);
-    const z2 = quantizeCoord(rawPositions[i2 * 3 + 2]);
-    if (!Number.isFinite(x0 + y0 + z0 + x1 + y1 + z1 + x2 + y2 + z2)) continue;
+    const rx0 = rawPositions[i0 * 3], ry0 = rawPositions[i0 * 3 + 1], rz0 = rawPositions[i0 * 3 + 2];
+    const rx1 = rawPositions[i1 * 3], ry1 = rawPositions[i1 * 3 + 1], rz1 = rawPositions[i1 * 3 + 2];
+    const rx2 = rawPositions[i2 * 3], ry2 = rawPositions[i2 * 3 + 1], rz2 = rawPositions[i2 * 3 + 2];
+    if (!Number.isFinite(rx0 + ry0 + rz0 + rx1 + ry1 + rz1 + rx2 + ry2 + rz2)) {
+      hadDroppedInvalid = true;
+      continue;
+    }
 
-    // Skip zero-area / collinear / duplicate-corner triangles on the 1e-4 grid.
+    const x0 = quantizeCoord(rx0), y0 = quantizeCoord(ry0), z0 = quantizeCoord(rz0);
+    const x1 = quantizeCoord(rx1), y1 = quantizeCoord(ry1), z1 = quantizeCoord(rz1);
+    const x2 = quantizeCoord(rx2), y2 = quantizeCoord(ry2), z2 = quantizeCoord(rz2);
+
+    const w0 = weld(x0, y0, z0);
+    const w1 = weld(x1, y1, z1);
+    const w2 = weld(x2, y2, z2);
+    // Two corners collapsed to the same quantised vertex: its two non-self
+    // half-edges are (a -> b) and (b -> a), which cancel out without opening
+    // any boundary on a closed manifold!
+    if (w0 === w1 || w1 === w2 || w2 === w0) {
+      hadDroppedInvalid = true;
+      continue;
+    }
+
     const ux = x1 - x0, uy = y1 - y0, uz = z1 - z0;
     const vx = x2 - x0, vy = y2 - y0, vz = z2 - z0;
     const nx = uy * vz - uz * vy;
     const ny = uz * vx - ux * vz;
     const nz = ux * vy - uy * vx;
-    if (nx * nx + ny * ny + nz * nz <= 1e-20) continue;
+    const zeroArea = nx * nx + ny * ny + nz * nz <= 1e-20;
+    if (zeroArea) hasZeroArea = true;
 
-    const w0 = weld(x0, y0, z0);
-    const w1 = weld(x1, y1, z1);
-    const w2 = weld(x2, y2, z2);
-    if (w0 === w1 || w1 === w2 || w2 === w0) continue;
+    candidates.push({ w0, w1, w2, i0, i1, i2, zeroArea });
+  }
 
-    indices.push(w0, w1, w2);
-    onValidTriangle?.(i0, i1, i2);
+  let keepZeroArea = false;
+  if (hasZeroArea && candidates.length >= 4) {
+    // Check if keeping `candidates` forms a closed, consistently wound 2-manifold
+    // (every directed half-edge a->b appears once and has its reverse b->a).
+    const vCount = weldedPositions.length / 3;
+    const directed = new Float64Array(candidates.length * 3);
+    const undirected = new Float64Array(candidates.length * 3);
+    let n = 0;
+    for (const c of candidates) {
+      const { w0, w1, w2 } = c;
+      undirected[n] = w0 < w1 ? w0 * vCount + w1 : w1 * vCount + w0;
+      directed[n++] = w0 * vCount + w1;
+      undirected[n] = w1 < w2 ? w1 * vCount + w2 : w2 * vCount + w1;
+      directed[n++] = w1 * vCount + w2;
+      undirected[n] = w2 < w0 ? w2 * vCount + w0 : w0 * vCount + w2;
+      directed[n++] = w2 * vCount + w0;
+    }
+    directed.sort();
+    let closedManifold = true;
+    for (let i = 1; i < n; i++) {
+      if (directed[i] === directed[i - 1]) {
+        closedManifold = false;
+        break;
+      }
+    }
+    if (closedManifold) {
+      undirected.sort();
+      for (let i = 0; i < n; i += 2) {
+        if (i + 1 >= n || undirected[i] !== undirected[i + 1] || (i + 2 < n && undirected[i + 2] === undirected[i])) {
+          closedManifold = false;
+          break;
+        }
+      }
+    }
+    keepZeroArea = closedManifold;
+  }
+
+  const dropZeroArea = hasZeroArea && !keepZeroArea;
+  if (dropZeroArea || hadDroppedInvalid) {
+    // Remap & compact vertices so dropped degenerate/NaN triangles leave no
+    // unreferenced `<vertex>` elements behind.
+    const remap = new Int32Array(weldedPositions.length / 3).fill(-1);
+    const compactPositions: number[] = [];
+    const mapVert = (w: number): number => {
+      let idx = remap[w];
+      if (idx === -1) {
+        idx = compactPositions.length / 3;
+        remap[w] = idx;
+        compactPositions.push(weldedPositions[w * 3], weldedPositions[w * 3 + 1], weldedPositions[w * 3 + 2]);
+      }
+      return idx;
+    };
+    const indices: number[] = [];
+    for (const c of candidates) {
+      if (dropZeroArea && c.zeroArea) continue;
+      indices.push(mapVert(c.w0), mapVert(c.w1), mapVert(c.w2));
+      onValidTriangle?.(c.i0, c.i1, c.i2);
+    }
+    return { positions: compactPositions, indices };
+  }
+
+  const indices: number[] = [];
+  for (const c of candidates) {
+    indices.push(c.w0, c.w1, c.w2);
+    onValidTriangle?.(c.i0, c.i1, c.i2);
   }
   return { positions: weldedPositions, indices };
 }
@@ -859,7 +1040,7 @@ export function exportThreeMfAssemblies(
       // Share Pass-1 quantisation, finite guard, zero-area/collinear filtering,
       // and post-rounding vertex welding so sub-0.1 µm edges never emit
       // zero-area non-manifold triangles or NaN XML attributes.
-      const { positions, indices } = weldMeshTriangles(part.positions, part.indices);
+      const { positions, indices } = weldMeshTriangles(part.positions, part.indices, undefined, false);
       const triangleCount = indices.length / 3;
       if (triangleCount === 0) continue;
 
