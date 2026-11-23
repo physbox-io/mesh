@@ -269,11 +269,7 @@ export function resolveUpdatedGeoms(
           delete base.paint;
         }
         if (g.rgba === undefined && bodyRgba !== undefined) base.rgba = bodyRgba;
-        try {
-          resolved = fillGeomDefaults(base, bodyName, i, moves);
-        } catch (err) {
-          return { ok: false, error: err instanceof Error ? err.message : String(err) };
-        }
+        resolved = fillGeomDefaults(base, bodyName, i, moves);
       }
       resolvedList.push(resolved);
       matchedMap.set(existing, resolved);
@@ -281,11 +277,7 @@ export function resolveUpdatedGeoms(
       allPartialPatches = false;
       const base: RawGeom = { ...g };
       if (base.rgba === undefined && bodyRgba !== undefined) base.rgba = bodyRgba;
-      try {
-        resolvedList.push(fillGeomDefaults(base, bodyName, i, moves));
-      } catch (err) {
-        return { ok: false, error: err instanceof Error ? err.message : String(err) };
-      }
+      resolvedList.push(fillGeomDefaults(base, bodyName, i, moves));
     }
   }
 

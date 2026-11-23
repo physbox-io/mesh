@@ -551,7 +551,7 @@ const buildMechanismCommand: McpHandler = async (msg, { store, toId }) => {
   if (!axisChk.ok) return axisChk;
   const resolvedMsg: MechanismRequest = {
     ...(msg as MechanismRequest),
-    ...(typeof msg.arborId === 'string' ? { arborId: String(toId(msg.arborId)) } : {}),
+    ...(typeof msg.arborId === 'string' ? { arborId: String(toId ? toId(msg.arborId) : msg.arborId) } : {}),
   };
   try {
     // Added to the scene as it is; see utils/buildMechanism.ts.
@@ -665,7 +665,7 @@ export const partBuildCommands: McpCommands = {
     const rawBodyId = typeof msg.bodyId === 'string' ? msg.bodyId : WHOLE_SCENE;
     const body = rawBodyId === WHOLE_SCENE
       ? { id: WHOLE_SCENE, name: 'the scene' }
-      : findNodeInScene(store.sceneGraph.nodes, toId(rawBodyId) as string);
+      : findNodeInScene(store.sceneGraph.nodes, (toId ? toId(rawBodyId) : rawBodyId) as string);
     if (!body) return { ok: false, error: `No body '${rawBodyId}'.` };
     if (msg.pipeStandardId !== undefined && msg.pipeStandardId !== null) {
       if (typeof msg.pipeStandardId !== 'string' || !Object.hasOwn(PIPE_STANDARDS, msg.pipeStandardId)) {

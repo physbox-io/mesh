@@ -278,8 +278,7 @@ describe('H8: normalizeRgba, SET_COLOR, and PAINT validation', () => {
     };
     useStore.setState({ sceneGraph: { nodes: [garmentNode] } });
 
-    const bad = await objectCommands.SET_COLOR({ targetId: 'shirt', rgba: [1, 0, NaN] }, makeCtx()) as { ok: boolean };
-    expect(bad.ok).toBe(false);
+    await expect(objectCommands.SET_COLOR({ targetId: 'shirt', rgba: [1, 0, NaN] }, makeCtx())).rejects.toThrow(/rgba/);
 
     const ok = await objectCommands.SET_COLOR({ targetId: 'shirt', rgba: [0.8, 0.2, 0.1] }, makeCtx()) as { ok: boolean };
     expect(ok.ok).toBe(true);
@@ -466,9 +465,13 @@ describe('H10, H11, M2–M8, L2: scene/object/profile/preset/constraint validati
     const updatedParent = findNodeInScene(useStore.getState().sceneGraph.nodes, 'parent1');
     expect(updatedParent?.joints[0].name).toBe('parent1_joint_0');
 
-    // resolveUpdatedGeoms returns { ok: false, error } instead of throwing on invalid size
-    const badGeom = resolveUpdatedGeoms(parent, [{ type: 'box', size: [-1, 0.1, 0.1] }]);
+    // UPDATE_OBJECT catches resolveUpdatedGeoms size errors and returns { ok: false, error }
+    const badGeom = await objectCommands.UPDATE_OBJECT(
+      { targetId: 'parent1', updates: { geoms: [{ type: 'box', size: [-1, 0.1, 0.1] }] } },
+      makeCtx(),
+    ) as { ok: boolean };
     expect(badGeom.ok).toBe(false);
+    expect(() => resolveUpdatedGeoms(parent, [{ type: 'box', size: [-1, 0.1, 0.1] }])).toThrow(/size\[0\]/);
   });
 
   it('validates IMPORT_PROFILE, RUN_HEADLESS, preset commands, CLEAR_PAINT, VALIDATE_SCAD, and SET_CONSTRAINT', async () => {

@@ -44,7 +44,7 @@ export const slipCommands: McpCommands = {
     if (rawTarget !== undefined && rawTarget !== null && typeof rawTarget !== 'string') {
       return { ok: false, error: 'bodyId/masterId must be a string.' };
     }
-    const subject = mcpMoldSubject(store.sceneGraph, rawTarget, (id) => findNodeInScene(store.sceneGraph.nodes, toId(id) as string));
+    const subject = mcpMoldSubject(store.sceneGraph, rawTarget, (id) => findNodeInScene(store.sceneGraph.nodes, (toId ? toId(id) : id) as string));
     if ('error' in subject) return { ok: false, error: subject.error };
     const options: Partial<SlipMoldOptions> = {};
     if (msg.sides !== undefined && msg.sides !== null && msg.sides !== 'auto') {
@@ -158,7 +158,7 @@ export const slipCommands: McpCommands = {
     if (msg.bodyId !== undefined && msg.bodyId !== null && typeof msg.bodyId !== 'string') {
       return { ok: false, error: 'bodyId must be a string.' };
     }
-    const subject = mcpMoldSubject(store.sceneGraph, msg.bodyId, (id) => findNodeInScene(store.sceneGraph.nodes, toId(id) as string), 'draft');
+    const subject = mcpMoldSubject(store.sceneGraph, msg.bodyId, (id) => findNodeInScene(store.sceneGraph.nodes, (toId ? toId(id) : id) as string), 'draft');
     if ('error' in subject) return { ok: false, error: subject.error };
     let deg: number;
     if (msg.draftDeg === undefined || msg.draftDeg === null) {

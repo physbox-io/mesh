@@ -256,7 +256,12 @@ export const objectCommands: McpCommands = {
       if (!Array.isArray(updates.geoms)) {
         return { ok: false, error: 'geoms must be an array of geom descriptors' };
       }
-      const geomResult = resolveUpdatedGeoms(target, updates.geoms, updates);
+      let geomResult: ReturnType<typeof resolveUpdatedGeoms>;
+      try {
+        geomResult = resolveUpdatedGeoms(target, updates.geoms, updates);
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
       if (!geomResult.ok) return { ok: false, error: geomResult.error };
       updates.geoms = geomResult.geoms;
       if (updates.geoms.some((g: SceneGeom) => g.csg === 'difference' || g.csg === 'intersection' || (g.type === 'cylinder' && (g.thread?.pitch ?? 0) > 0))) {
@@ -430,21 +435,21 @@ export const objectCommands: McpCommands = {
     // The base colour of a body — what "make the imported bracket blue"
     // means. Paint (below) sits on top of this and is not disturbed by it.
     const { targetId, geomName, rgba } = msg as Msg<{ targetId: string; geomName?: string; rgba: unknown }>;
-    if (!targetId) return { ok: false, error: 'Missing targetId' };
+    if (!targetId) throw new Error('Missing targetId');
     const validatedRgba = normalizeRgba(rgba);
     if (!validatedRgba) {
-      return { ok: false, error: 'rgba must be [r, g, b] or [r, g, b, a], each a finite number in 0..1' };
+      throw new Error('rgba must be [r, g, b] or [r, g, b, a], each a finite number in 0..1');
     }
     const rawRgba = rgba as number[];
     const explicitAlpha = rawRgba.length === 4 ? rawRgba[3] : undefined;
     const node = findNodeInScene(store.sceneGraph.nodes, targetId);
-    if (!node) return { ok: false, error: `No object with id '${targetId}'` };
+    if (!node) throw new Error(`No object with id '${targetId}'`);
     if (node.cloth) {
       if (node.cloth.garment) {
         if (geomName) {
           const attached = node.cloth.garment.attached ?? [];
           if (!attached.some((a) => a.name === geomName)) {
-            return { ok: false, error: `Garment '${targetId}' has no attached piece named '${geomName}'` };
+            throw new Error(`Garment '${targetId}' has no attached piece named '${geomName}'`);
           }
           store.updateNode(targetId, {
             cloth: {
@@ -465,7 +470,7 @@ export const objectCommands: McpCommands = {
       }
       const pieces = node.cloth.pieces ?? [];
       if (geomName && !pieces.some((p) => p.name === geomName)) {
-        return { ok: false, error: `Cloth '${targetId}' has no piece named '${geomName}'` };
+        throw new Error(`Cloth '${targetId}' has no piece named '${geomName}'`);
       }
       store.updateNode(targetId, {
         cloth: {
@@ -480,7 +485,7 @@ export const objectCommands: McpCommands = {
       return { ok: true, geomsColored: geomName ? 1 : pieces.length };
     }
     if (geomName && !(node.geoms || []).some((g: SceneGeom) => g.name === geomName)) {
-      return { ok: false, error: `Object '${targetId}' has no geom named '${geomName}'` };
+      throw new Error(`Object '${targetId}' has no geom named '${geomName}'`);
     }
     store.setGeomColor(targetId, geomName, explicitAlpha !== undefined ? validatedRgba : rawRgba.slice(0, 3));
     return { ok: true, geomsColored: geomName ? 1 : (node.geoms || []).length };
@@ -701,11 +706,12 @@ export const objectCommands: McpCommands = {
       kind: unknown; size?: string | number; lengthMm?: unknown; washer?: unknown; into?: unknown; group?: string; at?: unknown;
       fixTo?: unknown; partId?: unknown; between?: unknown;
     }>;
-    const existing = typeof rawExisting === 'string' && rawExisting ? String(toId(rawExisting)) : undefined;
-    const into = typeof rawInto === 'string' && rawInto ? String(toId(rawInto)) : undefined;
-    const fixTo = typeof rawFixTo === 'string' && rawFixTo ? String(toId(rawFixTo)) : undefined;
+    const resolveId = (v: unknown) => (toId ? toId(v) : v);
+    const existing = typeof rawExisting === 'string' && rawExisting ? String(resolveId(rawExisting)) : undefined;
+    const into = typeof rawInto === 'string' && rawInto ? String(resolveId(rawInto)) : undefined;
+    const fixTo = typeof rawFixTo === 'string' && rawFixTo ? String(resolveId(rawFixTo)) : undefined;
     const between = Array.isArray(rawBetween)
-      ? rawBetween.map((v) => (typeof v === 'string' ? String(toId(v)) : v))
+      ? rawBetween.map((v) => (typeof v === 'string' ? String(resolveId(v)) : v))
       : undefined;
 
     // A part already in the scene: only fix a body to its moving piece.
@@ -915,7 +921,7 @@ export const objectCommands: McpCommands = {
   REPAIR_MESH: async (msg, { store, toId }) => {
     return runMcpRepairMesh({
       msg,
-      toId: (s) => toId(s) as string,
+      toId: (s) => (toId ? toId(s) : s) as string,
       nodes: store.sceneGraph.nodes,
       findNodeInScene,
       updateNode: (nodeId, patch) => useStore.getState().updateNode(nodeId, patch),

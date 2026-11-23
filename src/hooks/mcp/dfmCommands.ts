@@ -21,8 +21,9 @@ const PROCESSES: Record<string, DfmProcess> = { print: 'print', fdm: 'print', cn
 const mm = (v: number) => Math.round(v * 10000) / 10;
 
 export const dfmCommands: McpCommands = {
-  CHECK_DFM: async (msg, { toId }) => {
+  CHECK_DFM: async (msg, { store, toId }) => {
     const state = useStore.getState();
+    const resolveId = (v: unknown) => (toId ? toId(v) : v);
     const rawProcess = typeof msg.process === 'string' ? msg.process.toLowerCase() : undefined;
     const asked = rawProcess !== undefined && Object.hasOwn(PROCESSES, rawProcess) ? PROCESSES[rawProcess] : undefined;
     if (msg.process !== undefined && !asked) return { ok: false, error: "process is 'print', 'cnc' or 'cast'." };
@@ -35,7 +36,8 @@ export const dfmCommands: McpCommands = {
     if (msg.masterId !== undefined && msg.masterId !== null && typeof msg.masterId !== 'string') {
       return { ok: false, error: 'master_id must be a body id or name string.' };
     }
-    const subject = mcpMoldSubject(state.sceneGraph, msg.masterId, (id) => findNodeInScene(state.sceneGraph.nodes, toId(id) as string), 'check');
+    const sceneGraph = store?.sceneGraph ?? state.sceneGraph;
+    const subject = mcpMoldSubject(sceneGraph, msg.masterId, (id) => findNodeInScene(sceneGraph.nodes, resolveId(id) as string), 'check');
     if ('error' in subject) return { ok: false, error: subject.error };
     const report = await dfmReportFor(subject.scene, process, {
       material: state.material,

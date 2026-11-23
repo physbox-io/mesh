@@ -64,7 +64,8 @@ export const castCommands: McpCommands = {
       return { ok: false, error: 'bodyId/masterId must be a string.' };
     }
     // The master: body_id, else every body (never the UI selection, which an agent cannot see).
-    const subject = mcpMoldSubject(store.sceneGraph, rawTarget, (id) => findNodeInScene(store.sceneGraph.nodes, toId(id) as string));
+    const resolveId = (v: unknown) => (toId ? toId(v) : v);
+    const subject = mcpMoldSubject(store.sceneGraph, rawTarget, (id) => findNodeInScene(store.sceneGraph.nodes, resolveId(id) as string));
     if ('error' in subject) return { ok: false, error: subject.error };
     const ids = subject.ids;
     const options: Partial<PourBoxOptions> = {};
@@ -169,7 +170,8 @@ export const castCommands: McpCommands = {
       return { ok: false, error: 'masterId must be a string.' };
     }
     // What is cast: master_id, else every body.
-    const subject = mcpMoldSubject(store.sceneGraph, msg.masterId, (id) => findNodeInScene(store.sceneGraph.nodes, toId(id) as string));
+    const resolveId = (v: unknown) => (toId ? toId(v) : v);
+    const subject = mcpMoldSubject(store.sceneGraph, msg.masterId, (id) => findNodeInScene(store.sceneGraph.nodes, resolveId(id) as string));
     if ('error' in subject) return { ok: false, error: subject.error };
     const scene = subject.scene;
     const metal = msg.metalId ?? msg.metal ?? msg.material;
@@ -318,7 +320,7 @@ export const castCommands: McpCommands = {
     if (msg.bodyId !== undefined && msg.bodyId !== null && typeof msg.bodyId !== 'string') {
       return { ok: false, error: 'bodyId must be a string.' };
     }
-    const resolveNode = (id: string) => findNodeInScene(store.sceneGraph.nodes, toId(id) as string);
+    const resolveNode = (id: string) => findNodeInScene(store.sceneGraph.nodes, (toId ? toId(id) : id) as string);
     const bodyId = typeof msg.bodyId === 'string' ? msg.bodyId : store.selectedNodeId;
     const node = bodyId ? resolveNode(bodyId) : null;
     if (!node) return { ok: false, error: bodyId ? `No body called ${bodyId}.` : 'Give bodyId, or select a body first.' };
@@ -453,7 +455,7 @@ export const castCommands: McpCommands = {
       && !(Array.isArray(msg.ids) && msg.ids.every((v) => typeof v === 'string'))) {
       return { ok: false, error: 'ids must be a body ID/name or an array of body IDs/names.' };
     }
-    const resolveNode = (id: string) => findNodeInScene(store.sceneGraph.nodes, toId(id) as string);
+    const resolveNode = (id: string) => findNodeInScene(store.sceneGraph.nodes, (toId ? toId(id) : id) as string);
     const asked = (Array.isArray(msg.ids) ? msg.ids : typeof msg.ids === 'string' ? [msg.ids] : [])
       .filter((v): v is string => typeof v === 'string');
     const unknown = asked.filter((id) => !resolveNode(id));

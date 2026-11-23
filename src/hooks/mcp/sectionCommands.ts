@@ -26,7 +26,7 @@ export const sectionCommands: McpCommands = {
     if (msg.bodyId !== undefined && msg.bodyId !== null && typeof msg.bodyId !== 'string') {
       return { ok: false, error: 'bodyId must be a body id or name string.' };
     }
-    const subject = mcpMoldSubject(store.sceneGraph, msg.bodyId, (id) => findNodeInScene(store.sceneGraph.nodes, toId(id) as string), 'cut', 'body_id');
+    const subject = mcpMoldSubject(store.sceneGraph, msg.bodyId, (id) => findNodeInScene(store.sceneGraph.nodes, (toId ? toId(id) : id) as string), 'cut', 'body_id');
     if ('error' in subject) return { ok: false, error: subject.error };
     const options = { axis, ...(typeof msg.atMm === 'number' ? { atMm: msg.atMm } : {}) };
     let result: SectionResult;

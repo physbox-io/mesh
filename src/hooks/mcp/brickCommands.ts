@@ -13,11 +13,12 @@ const PLACEMENTS = ['beside', 'replace', 'none'] as const;
 
 export const brickCommands: McpCommands = {
   BUILD_BRICKWORK: async (msg, { store, toId }) => {
+    const resolveId = (v: unknown) => (toId ? toId(v) : v);
     if (msg.bodyId !== undefined && msg.bodyId !== null && typeof msg.bodyId !== 'string') {
       return { ok: false, error: 'bodyId must be a string.' };
     }
     const rawBody = typeof msg.bodyId === 'string' && msg.bodyId ? msg.bodyId : null;
-    const found = rawBody ? findNodeInScene(store.sceneGraph.nodes, toId(rawBody) as string) : null;
+    const found = rawBody ? findNodeInScene(store.sceneGraph.nodes, resolveId(rawBody) as string) : null;
     if (rawBody && !found) return { ok: false, error: `No body '${rawBody}'.` };
     const bodyId = found ? found.id : null;
     if (msg.standardId !== undefined && (typeof msg.standardId !== 'string' || !Object.hasOwn(BRICK_STANDARDS, msg.standardId))) {

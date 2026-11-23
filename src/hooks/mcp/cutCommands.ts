@@ -60,7 +60,7 @@ export const cutCommands: McpCommands = {
     if (msg.masterId !== undefined && msg.masterId !== null && typeof msg.masterId !== 'string') {
       return { ok: false, error: 'masterId must be a string.' };
     }
-    const subject = mcpMoldSubject(store.sceneGraph, msg.masterId, (id) => findNodeInScene(store.sceneGraph.nodes, toId(id) as string), 'cut');
+    const subject = mcpMoldSubject(store.sceneGraph, msg.masterId, (id) => findNodeInScene(store.sceneGraph.nodes, (toId ? toId(id) : id) as string), 'cut');
     if ('error' in subject) return { ok: false, error: subject.error };
     const state = useStore.getState();
     const machine: 'laser' | 'cnc' = msg.machine === 'laser'

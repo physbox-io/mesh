@@ -74,7 +74,7 @@ export const machiningCommands: McpCommands = {
      */
   EXPORT_RELIEF: async (msg, { store, toId }) => {
     if (!store.sceneGraph.nodes?.length) return { ok: false, error: 'The scene is empty — there is nothing to carve.' };
-    const subject = exportSubject(msg, store.sceneGraph, 'carve', (s) => toId(s) as string);
+    const subject = exportSubject(msg, store.sceneGraph, 'carve', (s) => (toId ? toId(s) : s) as string);
     if ('error' in subject) return { ok: false, error: subject.error };
     const scene = subject.scene;
     let options: ReturnType<typeof reliefOptionsFor>['options'];
@@ -146,7 +146,7 @@ export const machiningCommands: McpCommands = {
   },
   EXPORT_MACHINING: async (msg, { store, toId }) => {
     if (!store.sceneGraph.nodes?.length) return { ok: false, error: 'The scene is empty — there is nothing to machine.' };
-    const subject = exportSubject(msg, store.sceneGraph, 'machine', (s) => toId(s) as string);
+    const subject = exportSubject(msg, store.sceneGraph, 'machine', (s) => (toId ? toId(s) : s) as string);
     if ('error' in subject) return { ok: false, error: subject.error };
     const scene = subject.scene;
     let options: ReturnType<typeof machiningOptionsFor>;
@@ -256,7 +256,7 @@ export const machiningCommands: McpCommands = {
           msg,
           scene,
           placement,
-          toId: (s) => toId(s) as string,
+          toId: (s) => (toId ? toId(s) : s) as string,
           findNodeInScene,
           describeFiles,
         });
@@ -280,7 +280,7 @@ export const machiningCommands: McpCommands = {
       msg.kind === 'tube'
     ) {
       const subjectMsg = msg.kind === 'sheet' ? { ...msg, masterId: msg.masterId ?? msg.bodyId } : msg;
-      const subject = exportSubject(subjectMsg, scene, 'cut', (s) => toId(s) as string);
+      const subject = exportSubject(subjectMsg, scene, 'cut', (s) => (toId ? toId(s) : s) as string);
       if ('error' in subject) return { ok: false, error: subject.error };
       subjectScene = subject.scene;
     }
@@ -509,9 +509,10 @@ export const machiningCommands: McpCommands = {
           ...(typeof msg.kFactor === 'number' ? { kFactor: msg.kFactor } : {}),
           ...(scale.value !== undefined ? { scaleFactor: scale.value } : {}),
         };
+        const resolveSheetId = (s: string) => (toId ? toId(s) : s) as string;
         const targetIds = Array.isArray(msg.targetIds)
-          ? msg.targetIds.filter((x): x is string => typeof x === 'string').map((id) => toId(id) as string)
-          : typeof msg.targetId === 'string' ? [toId(msg.targetId) as string] : undefined;
+          ? msg.targetIds.filter((x): x is string => typeof x === 'string').map(resolveSheetId)
+          : typeof msg.targetId === 'string' ? [resolveSheetId(msg.targetId)] : undefined;
         const res = exportSheetUnfold(subjectScene, options, targetIds);
         if (!res.success) return { ok: false, error: res.error || 'Nothing in the scene unfolds.', warnings: res.warnings };
         const { fold, request } = sheetFoldSimulationRequest(res, options);

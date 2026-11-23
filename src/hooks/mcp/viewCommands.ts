@@ -434,7 +434,7 @@ export const viewCommands: McpCommands = {
       if (msg.axis !== undefined && msg.axis !== 'x' && msg.axis !== 'y' && msg.axis !== 'z') {
         return { ok: false, error: "axis must be 'x', 'y' or 'z'" };
       }
-      const resolved = toId(msg.body);
+      const resolved = toId ? toId(msg.body) : msg.body;
       const node = typeof resolved === 'string' ? findNodeInScene(store.sceneGraph.nodes, resolved) : null;
       if (!node) return { ok: false, error: `No body with id or name "${msg.body}"` };
       const axis = (msg.axis ?? 'z') as 'x' | 'y' | 'z';
