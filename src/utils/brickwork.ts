@@ -353,6 +353,37 @@ function toyResult(
     throw new Error(`The shape is ${Math.round(span)} mm across and ${Math.round(modelH)} mm tall, too small for toy bricks. Scale it up.`);
   }
   const courses = Math.max(1, Math.round(modelH / TOY_HEIGHT_MM));
+  const nx = Math.max(1, Math.ceil((hi[0] - lo[0]) / TOY_PITCH_MM));
+  const ny = Math.max(1, Math.ceil((hi[1] - lo[1]) / TOY_PITCH_MM));
+  // Pre-flight stud/brick-count estimate before allocating per-course masks:
+  // avoids OOM / multi-minute worker freeze on building-scale models.
+  const MAX_TOY_GRID_CELLS = 5_000_000;
+  const gridCells = nx * ny * courses;
+  const sampleCount = Math.min(courses, 24);
+  let sampledArea = 0;
+  for (let s = 0; s < sampleCount; s++) {
+    const c = sampleCount === courses ? s : Math.floor(((s + 0.5) * courses) / sampleCount);
+    const loops = contoursAtZ(tris, (lo[2] + ((c + 0.5) / courses) * modelH) / 1000, solidIds);
+    sampledArea += Math.abs(loops.reduce((t, l) => t + signedArea2(l) / 2, 0));
+  }
+  const estTotalStuds = (sampledArea * (courses / sampleCount)) / (TOY_PITCH_MM * TOY_PITCH_MM);
+  const maxBrickStuds = Math.max(
+    1,
+    ...Object.entries(inventory)
+      .filter(([, count]) => count === null || count === undefined || count > 0)
+      .map(([sz]) => {
+        const parts = sz.split('x').map(Number);
+        return parts.length === 2 && Number.isFinite(parts[0]) && Number.isFinite(parts[1]) ? parts[0] * parts[1] : 1;
+      }),
+  );
+  const hollow = (o.hollowStuds ?? 0) > 0;
+  const minSolidBricks = estTotalStuds / maxBrickStuds;
+  if ((!hollow && minSolidBricks > MAX_BRICKS * 1.1) || gridCells > MAX_TOY_GRID_CELLS) {
+    const approxBricks = Math.max(MAX_BRICKS + 1, Math.round(estTotalStuds / Math.min(8, maxBrickStuds) / 1000) * 1000);
+    throw new Error(
+      `That is about ${approxBricks.toLocaleString()} toy bricks, more than ${MAX_BRICKS.toLocaleString()}. Build one part at a time (select it first), make it hollow, or scale it down.`,
+    );
+  }
   const { bricks, parts, short } = layToyBricks({
     lo: [lo[0], lo[1]], hi: [hi[0], hi[1]], courses, zBase: lo[2], inventory, hollowStuds: o.hollowStuds, maxBricks: MAX_BRICKS,
     solidAt: (c) => {
@@ -626,7 +657,9 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
           const ahead = runAt(run, Math.min(endAt, s + piece + j + 1)), after = runAt(run, Math.min(endAt, s + piece + j + 1 + L / 2));
           const t0 = sub(after, ahead), tl = len(t0) || 1;
           const turn = Math.atan2(u.x * t0.y / tl - u.y * t0.x / tl, u.x * t0.x / tl + u.y * t0.y / tl);
-          const wedge = turn > 0.01 ? depth * Math.tan(turn) : 0;
+          const wedge = turn > 0.01 && turn < Math.PI / 2 - 0.15
+            ? Math.max(0, Math.min(depth * 2, depth * Math.tan(turn)))
+            : 0;
           if (wedge > 0) widestWedge = Math.max(widestWedge, j + wedge);
           s += piece + j + wedge;
         }

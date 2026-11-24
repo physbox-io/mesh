@@ -1009,6 +1009,11 @@ export function synthesizeTimberJoinery(
 
         // Size the tenon / dado tongue and mortise / dado housing:
         const minCutter = Math.max(4, options.cutterDiaMm);
+        // Never allow tenon/tongue thickness or width to exceed the rail or host face
+        // (which previously happened when cutterDiaMm was larger than thin stock,
+        // producing negative cheek shoulders and protruding tenons).
+        const maxTenonThk = Math.min(thkA, Math.max(2, Math.min(thkA - 2, hostSpanV - 4)));
+        const maxTenonWid = Math.min(widA, Math.max(4, Math.min(widA - 2, hostSpanU - 4)));
         let nominalTenonThk: number;
         let nominalTenonWid: number;
         let maxSafeDepth: number;
@@ -1016,13 +1021,19 @@ export function synthesizeTimberJoinery(
         if (options.jointMode === 'dado') {
           const dadoStopMm = mA.role === 'panel' ? Math.max(8, options.shoulderMm) : options.shoulderMm;
           const cheekShoulderMm = Math.max(2, Math.min(options.shoulderMm * 0.5, thkA * 0.15));
-          nominalTenonThk = Math.max(
-            Math.min(minCutter, thkA - 2),
-            Math.min(thkA - 2 * cheekShoulderMm, hostSpanV - 6),
+          nominalTenonThk = Math.min(
+            maxTenonThk,
+            Math.max(
+              Math.min(minCutter, maxTenonThk),
+              Math.min(thkA - 2 * cheekShoulderMm, hostSpanV - 6),
+            ),
           );
-          nominalTenonWid = Math.max(
-            minCutter + 2,
-            Math.min(widA - 2 * dadoStopMm, hostSpanU - 2 * dadoStopMm),
+          nominalTenonWid = Math.min(
+            maxTenonWid,
+            Math.max(
+              Math.min(minCutter + 2, maxTenonWid),
+              Math.min(widA - 2 * dadoStopMm, hostSpanU - 2 * dadoStopMm),
+            ),
           );
           maxSafeDepth =
             chosenHost.depthAvail <= 26
@@ -1037,8 +1048,16 @@ export function synthesizeTimberJoinery(
             ),
           );
           const rawWid = Math.max(minCutter + 2, widA - 2 * options.shoulderMm);
-          nominalTenonThk = Math.min(rawThk, Math.max(minCutter, hostSpanV - 2 * Math.max(2.5, options.shoulderMm * 0.5)));
-          nominalTenonWid = Math.min(rawWid, Math.max(minCutter, hostSpanU - 2 * Math.max(3, options.shoulderMm)));
+          nominalTenonThk = Math.min(
+            maxTenonThk,
+            rawThk,
+            Math.max(Math.min(minCutter, maxTenonThk), hostSpanV - 2 * Math.max(2.5, options.shoulderMm * 0.5)),
+          );
+          nominalTenonWid = Math.min(
+            maxTenonWid,
+            rawWid,
+            Math.max(Math.min(minCutter, maxTenonWid), hostSpanU - 2 * Math.max(3, options.shoulderMm)),
+          );
           maxSafeDepth =
             chosenHost.depthAvail <= 24
               ? Math.max(5, +(chosenHost.depthAvail * 0.5 - options.glueReliefMm).toFixed(2))
@@ -1166,8 +1185,8 @@ export function synthesizeTimberJoinery(
           widthMm: +nominalTenonWid.toFixed(2),
           thicknessMm: +nominalTenonThk.toFixed(2),
           lengthMm: +nominalTenonLen.toFixed(2),
-          shoulderTopBotMm: +((widA - nominalTenonWid) * 0.5).toFixed(2),
-          shoulderCheekMm: +((thkA - nominalTenonThk) * 0.5).toFixed(2),
+          shoulderTopBotMm: +Math.max(0, (widA - nominalTenonWid) * 0.5).toFixed(2),
+          shoulderCheekMm: +Math.max(0, (thkA - nominalTenonThk) * 0.5).toFixed(2),
           shoulderAngleDeg,
           miteredTip: false,
           miterPlanes: [],
@@ -1177,6 +1196,17 @@ export function synthesizeTimberJoinery(
         mortisesByMember[bestHostIdx].push(mortiseSpec);
         tenonsByMember[i].push(tenonSpec);
         explodeByMember[i] = add3(explodeByMember[i], hostFaceNormal);
+
+        const jointNotes: string[] =
+          options.tenonCornerFit === 'chisel_square'
+            ? [`Square the 4 mortise corners in ${mB.id} with a bench chisel after CNC milling.`]
+            : [];
+        if (options.cutterDiaMm > mortiseSpec.thicknessMm + 1e-6 || options.cutterDiaMm > mortiseSpec.widthMm + 1e-6) {
+          const minPocketMm = Math.min(mortiseSpec.thicknessMm, mortiseSpec.widthMm);
+          const bitWarning = `CNC bit Ø${options.cutterDiaMm} mm is wider than ${options.jointMode === 'dado' ? 'dado' : 'mortise'} ${mortiseSpec.id} (${minPocketMm} mm) — switch to a ≤${Math.max(1, Math.floor(minPocketMm * 2) / 2)} mm bit or cut by hand.`;
+          warnings.push(bitWarning);
+          jointNotes.push(bitWarning);
+        }
 
         joints.push({
           id: jointId,
@@ -1189,10 +1219,7 @@ export function synthesizeTimberJoinery(
           normalAToB: inwardNormal,
           mortise: mortiseSpec,
           tenon: tenonSpec,
-          notes:
-            options.tenonCornerFit === 'chisel_square'
-              ? [`Square the 4 mortise corners in ${mB.id} with a bench chisel after CNC milling.`]
-              : [],
+          notes: jointNotes,
         });
         void groupIdx;
       }

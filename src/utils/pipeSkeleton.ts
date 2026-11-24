@@ -33,7 +33,7 @@ import type { SceneGraph, SceneNode } from '../types/scene';
 import { collectSceneTriangles } from './contourSliceExporter';
 import { getNodeWorldTransform } from './laserCutExporter';
 import { clusterTrianglesToPolyFaces } from './sheetUnfoldExporter';
-import { GLUED_BELOW_OD_MM, PIPE_STANDARDS, makeStrutNode, pipeColour, pipeFittings, type PipeStandardId, type PipeStandardSpec } from './tubeAndWireExporter';
+import { GLUED_BELOW_OD_MM, PIPE_STANDARDS, makeStrutNode, pipeColour, pipeFittings, type PipeFrameOptions, type PipeHubFitStyle, type PipeStandardId, type PipeStandardSpec } from './tubeAndWireExporter';
 import { gluedFrame } from './gluedFrame';
 
 type V3 = [number, number, number];
@@ -82,6 +82,11 @@ export interface SkeletonOptions {
   /** Where the floor is, mm. Default 0. */
   floorMm?: number;
   pipeStandardId?: PipeStandardId;
+  /** 3D-printed hub options forwarded to pipeFittings. */
+  hubFitStyle?: PipeHubFitStyle;
+  hubWallMm?: number;
+  fitClearanceMm?: number;
+  crossBoltHoleMm?: number;
   /**
    * Manifold, to join a shape made of several overlapping parts into one solid
    * before its edges are framed. Without it each part is framed on its own,
@@ -449,6 +454,7 @@ function splitAtJoints(g: Graph, tolMm: number) {
     const a = g.nodes[m.a], b = g.nodes[m.b];
     const ab = sub(b, a);
     const L = len(ab);
+    if (L < 1e-6) continue;
     const on: { t: number; i: number }[] = [];
     g.nodes.forEach((p, i) => {
       if (i === m.a || i === m.b) return;
@@ -710,10 +716,16 @@ function fromCentrelines(g: Graph, path: SceneNode[]) {
         g.link(g.node(q), g.node(onPlane), 'line');
       }
     }
+    const uniqueUnder: V3[] = [];
+    for (const pt of under) {
+      if (!uniqueUnder.some((uPt) => len(sub(uPt, pt)) <= 1)) {
+        uniqueUnder.push(pt);
+      }
+    }
     let ring: V3[];
-    if (under.length >= 2) {
+    if (uniqueUnder.length >= 2) {
       // Their outline in the panel's plane (gift wrapping; two points are a line).
-      const flat = under.map((q) => [dot(sub(q, p.centre), u), dot(sub(q, p.centre), v)] as [number, number]);
+      const flat = uniqueUnder.map((q) => [dot(sub(q, p.centre), u), dot(sub(q, p.centre), v)] as [number, number]);
       const hull: number[] = [];
       let start = 0;
       flat.forEach((f, i) => { if (f[0] < flat[start][0] || (f[0] === flat[start][0] && f[1] < flat[start][1])) start = i; });
@@ -727,7 +739,7 @@ function fromCentrelines(g: Graph, path: SceneNode[]) {
         }
         at = next;
       } while (at !== start && hull.length <= flat.length);
-      ring = hull.map((i) => under[i]);
+      ring = hull.map((i) => uniqueUnder[i]);
     } else {
       ring = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([i, j]) => add(p.centre, add(scale(u, (i * lu) / 2), scale(v, (j * lv) / 2))));
     }
@@ -818,7 +830,13 @@ const KIND_NAMES: Record<MemberKind, string> = {
  * The skeleton as struts and their fittings, ready for the scene: what the
  * cut list, the hubs and Add Simulation all read. `shift` moves it, mm.
  */
-export function skeletonToNodes(sk: Skeleton, pipeStandardId: PipeStandardId, idPrefix: string, shift: V3 = [0, 0, 0]): SceneNode[] {
+export function skeletonToNodes(
+  sk: Skeleton,
+  pipeStandardId: PipeStandardId,
+  idPrefix: string,
+  shift: V3 = [0, 0, 0],
+  hubOptions?: Partial<PipeFrameOptions>,
+): SceneNode[] {
   const spec = PIPE_STANDARDS[pipeStandardId] ?? PIPE_STANDARDS.pvc_sch40_3_4;
   const rgba = pipeColour(spec);
   const count: Partial<Record<MemberKind, number>> = {};
@@ -833,7 +851,7 @@ export function skeletonToNodes(sk: Skeleton, pipeStandardId: PipeStandardId, id
     const used = new Set(sk.members.flatMap((m) => [m.a, m.b]));
     return gluedFrame(struts, spec, [...used].map((i) => add(sk.nodes[i], shift)), idPrefix);
   }
-  return [...struts, ...pipeFittings(struts, { pipeStandardId }, idPrefix)];
+  return [...struts, ...pipeFittings(struts, { ...hubOptions, pipeStandardId }, idPrefix)];
 }
 
 export type FramePlacement = 'replace' | 'beside';
@@ -851,7 +869,13 @@ export function frameBodyInScene(
   const xs = sk.nodes.map((p) => p[0]);
   const shift: V3 = opts.placement === 'beside' ? [maxOf(xs) - minOf(xs) + 300, 0, 0] : [0, 0, 0];
   const prefix = `frame_${Math.random().toString(36).slice(2, 7)}`;
-  const frame = skeletonToNodes(sk, sk.pipeStandardId, prefix, shift);
+  const hubOptions: Partial<PipeFrameOptions> = {
+    ...(opts.hubFitStyle !== undefined ? { hubFitStyle: opts.hubFitStyle } : {}),
+    ...(opts.hubWallMm !== undefined ? { hubWallMm: opts.hubWallMm } : {}),
+    ...(opts.fitClearanceMm !== undefined ? { fitClearanceMm: opts.fitClearanceMm } : {}),
+    ...(opts.crossBoltHoleMm !== undefined ? { crossBoltHoleMm: opts.crossBoltHoleMm } : {}),
+  };
+  const frame = skeletonToNodes(sk, sk.pipeStandardId, prefix, shift, hubOptions);
   const without = (list: SceneNode[]): SceneNode[] =>
     list.filter((n) => n.id !== bodyId && !(bodyId === WHOLE_SCENE && !n.simulation)).map((n) => (n.children?.length ? { ...n, children: without(n.children) } : n));
   const kept = opts.placement === 'beside' ? scene.nodes : without(scene.nodes);

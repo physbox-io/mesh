@@ -615,6 +615,19 @@ function buildCncSetupsForPart(
     };
   }
 
+  // Flag CNC incompatible if the selected end mill is wider than any mortise/dado pocket.
+  const narrowMortise = part.mortises.find(
+    (m) => cutterDiaMm > m.thicknessMm + 1e-6 || cutterDiaMm > m.widthMm + 1e-6,
+  );
+  if (narrowMortise) {
+    const minPocketMm = Math.min(narrowMortise.thicknessMm, narrowMortise.widthMm);
+    return {
+      setups: [],
+      cncAttachment: 'exceeds_cnc',
+      cncFitNote: `CNC bit Ø${cutterDiaMm} mm is wider than pocket ${narrowMortise.id} (${minPocketMm} mm). Use a smaller bit or cut by hand.`,
+    };
+  }
+
   const { topTipCoord } = partShoulderBoundsAlongAxis(part);
 
   for (const [, group] of faceGroups) {
@@ -671,6 +684,17 @@ function buildCncSetupsForPart(
     const sortedMortises = [...group.mortises]
       .map((m) => ({ m, proj: projectMortise(m) }))
       .sort((a, b) => a.proj.distY - b.proj.distY);
+
+    // A single mortise or dado longer along Y than the CNC bed cannot be cut in one window.
+    const oversizedY = sortedMortises.find((item) => 2 * item.proj.halfSpanY > cncBedMm[1]);
+    if (oversizedY) {
+      const spanYMm = +(2 * oversizedY.proj.halfSpanY).toFixed(1);
+      return {
+        setups: [],
+        cncAttachment: 'exceeds_cnc',
+        cncFitNote: `Pocket ${oversizedY.m.id} Y-span (${spanYMm} mm) exceeds CNC Y travel (${cncBedMm[1]} mm). Cut this pocket with a hand router or table saw.`,
+      };
+    }
 
     // Partition mortises along the member's length into windows of span <= maxWindowLenMm
     const windows: {

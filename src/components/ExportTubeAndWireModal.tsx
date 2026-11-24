@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react';
 import {
     X,
     Wrench,
@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import type { SceneGraph, SceneNode } from '../types/scene';
 import { useStore } from '../store/useStore';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import {
     PIPE_STANDARDS,
     DEFAULT_PIPE_FRAME_OPTIONS,
@@ -16,10 +17,11 @@ import {
     type PipeHubFitStyle,
     type PipeFrameOptions,
     breakdownPipeFrame,
+    withoutHubsAt,
 } from '../utils/tubeAndWireExporter';
 import { simulatePipeFrame } from '../utils/tubeSimulation';
 import { defaultMaxSpanMm, WHOLE_SCENE, type FramePlacement, type FrameStyle } from '../utils/pipeSkeleton';
-import { frameBodyOffThread, prewarmPipeFrame } from '../utils/pipeFrameClient';
+import { buildHubsOffThread, frameBodyOffThread, prewarmPipeFrame } from '../utils/pipeFrameClient';
 import { ExportSubjectLine } from './ExportSubjectLine';
 
 /**
@@ -44,6 +46,7 @@ export function ExportTubeAndWireModal({
     /** What it works on: the selection, or the whole scene (shown under the title). */
     subjectLabel?: string;
 }) {
+    useEscapeToClose(isOpen, onClose);
     const storeScene = useStore(s => s.sceneGraph);
     const scene = propScene || storeScene;
 
@@ -81,6 +84,24 @@ export function ExportTubeAndWireModal({
     const [framePlacement, setFramePlacement] = useState<FramePlacement>('replace');
     const [frameMessage, setFrameMessage] = useState<string | null>(null);
     const [framing, setFraming] = useState(false);
+    const [addingHubs, setAddingHubs] = useState(false);
+    const mountedRef = useRef(true);
+    const messageTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    useEffect(() => {
+        mountedRef.current = true;
+        return () => {
+            mountedRef.current = false;
+            if (messageTimerRef.current) clearTimeout(messageTimerRef.current);
+        };
+    }, []);
+    const showFrameMessage = (msg: string) => {
+        if (messageTimerRef.current) clearTimeout(messageTimerRef.current);
+        setFrameMessage(msg);
+        messageTimerRef.current = setTimeout(() => {
+            messageTimerRef.current = null;
+            if (mountedRef.current) setFrameMessage(null);
+        }, 5000);
+    };
     // Manifold loads in the worker while the dialog is read.
     useEffect(() => { if (isOpen) prewarmPipeFrame(); }, [isOpen]);
 
@@ -93,41 +114,75 @@ export function ExportTubeAndWireModal({
     };
 
     const handleFrameShape = async () => {
-        if (!hasShapes || framing) return;
+        if (!hasShapes || framing || addingHubs) return;
         const name = selectedBody?.name ?? 'the scene';
+        const startScene = useStore.getState().sceneGraph;
+        const startNodes = startScene.nodes;
         setFraming(true);
         try {
-            const { nodes, skeleton } = await frameBodyOffThread(useStore.getState().sceneGraph, selectedBody?.id ?? WHOLE_SCENE, {
-                maxSpanMm: frameSpanMm ?? pipeDefaultSpanMm,
+            const { nodes, skeleton } = await frameBodyOffThread(startScene, selectedBody?.id ?? WHOLE_SCENE, {
+                maxSpanMm: Math.max(50, frameSpanMm ?? pipeDefaultSpanMm),
                 diagonals: frameDiagonals,
                 posts: framePosts,
                 placement: framePlacement,
                 style: frameStyle,
                 pipeStandardId,
+                hubFitStyle: fitStyle,
+                hubWallMm,
+                fitClearanceMm,
+                crossBoltHoleMm,
             });
-            // Read again: the scene may have moved on while the worker ran.
+            if (!mountedRef.current) return;
             const state = useStore.getState();
-            state.prepareForDiscreteChange();
+            if (state.sceneGraph.nodes !== startNodes) {
+                showFrameMessage('The scene changed while framing — cancelled.');
+                setFraming(false);
+                return;
+            }
             const nextScene: SceneGraph = { ...state.sceneGraph, nodes };
             state.updateScene(nextScene);
-            void state.recompile(nextScene);
             // Too small for the pipe chosen: framed in tube that suits it, and the cut list follows.
             if (skeleton.resizedFrom) choosePipe(skeleton.pipeStandardId);
-            setFrameMessage(
+            showFrameMessage(
                 `Framed ${name} ${skeleton.style === 'centrelines' ? 'down the middle of each part' : 'along its edges'}: ${skeleton.members.length} pipes, none over ${Math.round(skeleton.maxSpanMm)} mm between joints` +
                 (skeleton.resizedFrom
                     ? `. In ${PIPE_STANDARDS[skeleton.pipeStandardId].label}: ${PIPE_STANDARDS[skeleton.resizedFrom].label} is too big for it.`
                     : '')
             );
         } catch (e) {
-            setFrameMessage((e as Error).message);
+            if (mountedRef.current) showFrameMessage((e as Error).message);
         }
-        setFraming(false);
-        setTimeout(() => setFrameMessage(null), 5000);
+        if (mountedRef.current) setFraming(false);
     };
 
+    const handleAddHubs = async () => {
+        if (addingHubs || framing) return;
+        const multiPortHubs = breakdown.hubs.filter((h) => h.ports.length >= 2);
+        if (multiPortHubs.length === 0) return;
+        const startNodes = useStore.getState().sceneGraph.nodes;
+        setAddingHubs(true);
+        try {
+            const hubNodes = await buildHubsOffThread(breakdown);
+            if (!mountedRef.current) return;
+            const state = useStore.getState();
+            if (state.sceneGraph.nodes !== startNodes) {
+                showFrameMessage('The scene changed while building hubs — cancelled.');
+                setAddingHubs(false);
+                return;
+            }
+            const nextNodes = [...withoutHubsAt(state.sceneGraph.nodes, hubNodes), ...hubNodes];
+            state.updateScene({ ...state.sceneGraph, nodes: nextNodes });
+            showFrameMessage(`Added ${hubNodes.length} 3D-printed hub${hubNodes.length === 1 ? '' : 's'} to the scene.`);
+        } catch (e) {
+            if (mountedRef.current) showFrameMessage((e as Error).message);
+        }
+        if (mountedRef.current) setAddingHubs(false);
+    };
+
+    const hasMultiPortHubs = breakdown.hubs.some((h) => h.ports.length >= 2);
+
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+        <div role="dialog" aria-modal="true" aria-label="Pipe Frame" className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
             <div className="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl shadow-2xl w-full max-w-5xl max-h-[90vh] flex flex-col overflow-hidden text-slate-800 dark:text-slate-100">
                 {/* Header */}
                 <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60">
@@ -174,10 +229,14 @@ export function ExportTubeAndWireModal({
                                         <span className="text-[11px] text-slate-500 dark:text-slate-400" title="How far this pipe may run between joints: where it sags L/140 full of water, as PVC makers' support tables">Max span (mm)</span>
                                         <input
                                             type="number"
-                                            min={200}
+                                            min={50}
+                                            max={10000}
                                             step={50}
                                             value={frameSpanMm ?? pipeDefaultSpanMm}
-                                            onChange={e => setFrameSpanMm(Number(e.target.value) > 0 ? Number(e.target.value) : null)}
+                                            onChange={e => {
+                                                const v = Number(e.target.value);
+                                                setFrameSpanMm(Number.isFinite(v) && v > 0 ? Math.max(50, Math.min(10000, v)) : null);
+                                            }}
                                             className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1 text-xs text-slate-900 dark:text-white"
                                         />
                                     </label>
@@ -284,7 +343,10 @@ export function ExportTubeAndWireModal({
                                                 min="2"
                                                 max="12"
                                                 value={hubWallMm}
-                                                onChange={e => setHubWallMm(Number(e.target.value))}
+                                                onChange={e => {
+                                                    const v = Number(e.target.value);
+                                                    if (Number.isFinite(v)) setHubWallMm(Math.max(2, Math.min(12, v)));
+                                                }}
                                                 className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1 text-xs text-slate-900 dark:text-white"
                                             />
                                         </div>
@@ -296,7 +358,10 @@ export function ExportTubeAndWireModal({
                                                 min="0"
                                                 max="2"
                                                 value={fitClearanceMm}
-                                                onChange={e => setFitClearanceMm(Number(e.target.value))}
+                                                onChange={e => {
+                                                    const v = Number(e.target.value);
+                                                    if (Number.isFinite(v)) setFitClearanceMm(Math.max(0, Math.min(2, v)));
+                                                }}
                                                 className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1 text-xs text-slate-900 dark:text-white"
                                             />
                                         </div>
@@ -308,11 +373,22 @@ export function ExportTubeAndWireModal({
                                                 min="0"
                                                 max="12"
                                                 value={crossBoltHoleMm}
-                                                onChange={e => setCrossBoltHoleMm(Number(e.target.value))}
+                                                onChange={e => {
+                                                    const v = Number(e.target.value);
+                                                    if (Number.isFinite(v)) setCrossBoltHoleMm(Math.max(0, Math.min(12, v)));
+                                                }}
                                                 className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1 text-xs text-slate-900 dark:text-white"
                                             />
                                         </div>
                                     </div>
+                                    <button
+                                        onClick={() => void handleAddHubs()}
+                                        disabled={!hasMultiPortHubs || addingHubs || framing}
+                                        className="w-full py-1.5 px-3 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:text-slate-400 dark:disabled:text-slate-500 text-xs font-semibold text-white flex items-center justify-center gap-2 transition-colors"
+                                    >
+                                        <Wrench className={`w-3.5 h-3.5 ${addingHubs ? 'animate-pulse' : ''}`} />
+                                        {addingHubs ? 'Building Hubs…' : 'Add 3D-Printed Hubs'}
+                                    </button>
                                 </div>
 
                                 {/* Store Shopping List Card */}

@@ -120,6 +120,12 @@ function layToyBricksOnce(args: ToyArgs, hoard: boolean, bridgeComponents = fals
   const nx = Math.max(1, Math.ceil((args.hi[0] - args.lo[0]) / P));
   const ny = Math.max(1, Math.ceil((args.hi[1] - args.lo[1]) / P));
   const N = nx * ny;
+  const MAX_TOY_GRID_CELLS = 5_000_000;
+  if (N * args.courses > MAX_TOY_GRID_CELLS) {
+    throw new Error(
+      `That is more than ${args.maxBricks.toLocaleString()} toy bricks (grid ${nx}×${ny}×${args.courses} exceeds limit). Build one part at a time (select it first), make it hollow, or scale it down.`,
+    );
+  }
 
   // Which cells are the shape's in every course: a quarter of 4 × 4 samples.
   const masks: (Uint8Array | null)[] = [];

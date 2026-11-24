@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { getNodeWorldTransform } from './laserCutExporter';
+import { getGeomFrame, getNodeWorldTransform } from './laserCutExporter';
 import { mm } from './hardwareGeometry';
 import type { SceneGraph, SceneNode, SceneGeom } from '../types/scene';
 
@@ -643,20 +643,11 @@ function extractRawStrutsFromScene(scene: SceneGraph): RawStrutSegment[] {
     for (let gIdx = 0; gIdx < geoms.length; gIdx++) {
       const g: SceneGeom = geoms[gIdx];
       if (g.csg === 'difference') continue;
-      const gPos: Vec3 = [g.pos?.[0] ?? 0, g.pos?.[1] ?? 0, g.pos?.[2] ?? 0];
 
       if (g.type === 'cylinder' || g.type === 'capsule') {
         if (g.fromto && g.fromto.length === 6) {
-          const p1Local: Vec3 = [
-            gPos[0] + g.fromto[0],
-            gPos[1] + g.fromto[1],
-            gPos[2] + g.fromto[2],
-          ];
-          const p2Local: Vec3 = [
-            gPos[0] + g.fromto[3],
-            gPos[1] + g.fromto[4],
-            gPos[2] + g.fromto[5],
-          ];
+          const p1Local: Vec3 = [g.fromto[0], g.fromto[1], g.fromto[2]];
+          const p2Local: Vec3 = [g.fromto[3], g.fromto[4], g.fromto[5]];
           const p1Mm = transformPointMm(p1Local, worldPos, worldRotMat, scale);
           const p2Mm = transformPointMm(p2Local, worldPos, worldRotMat, scale);
           if (vDist(p1Mm, p2Mm) > 20) {
@@ -668,8 +659,11 @@ function extractRawStrutsFromScene(scene: SceneGraph): RawStrutSegment[] {
           }
         } else {
           const halfLenM = g.size?.[1] ?? 0.25;
-          const p1Local: Vec3 = [gPos[0], gPos[1], gPos[2] - halfLenM];
-          const p2Local: Vec3 = [gPos[0], gPos[1], gPos[2] + halfLenM];
+          const gMat = getGeomFrame(g).matrix;
+          const v1 = new THREE.Vector3(0, 0, -halfLenM).applyMatrix4(gMat);
+          const v2 = new THREE.Vector3(0, 0, halfLenM).applyMatrix4(gMat);
+          const p1Local: Vec3 = [v1.x, v1.y, v1.z];
+          const p2Local: Vec3 = [v2.x, v2.y, v2.z];
           const p1Mm = transformPointMm(p1Local, worldPos, worldRotMat, scale);
           const p2Mm = transformPointMm(p2Local, worldPos, worldRotMat, scale);
           if (vDist(p1Mm, p2Mm) > 20) {
@@ -775,7 +769,8 @@ export function breakdownPipeFrame(
     ...options,
   };
   const pipeSpec = PIPE_STANDARDS[opts.pipeStandardId] ?? PIPE_STANDARDS.pvc_sch40_3_4;
-  const stockLengthMm = opts.stockLengthMm ?? pipeSpec.stockLengthMm;
+  const rawStockLengthMm = opts.stockLengthMm ?? pipeSpec.stockLengthMm;
+  const stockLengthMm = Number.isFinite(rawStockLengthMm) ? Math.max(50, rawStockLengthMm) : pipeSpec.stockLengthMm;
   const rawSegments = extractRawStrutsFromScene(scene);
   const warnings: string[] = [];
 
@@ -1074,7 +1069,9 @@ export function buildPipeHubNode(
   const positiveRgba: [number, number, number, number] = [0.2, 0.58, 0.92, 1.0];
   const negativeRgba: [number, number, number, number] = [0.9, 0.25, 0.25, 1.0];
 
-  if (opts.hubFitStyle === 'socket') {
+  const effectiveFitStyle: PipeHubFitStyle = opts.hubFitStyle === 'spigot' && spec.idMm > 0 ? 'spigot' : 'socket';
+
+  if (effectiveFitStyle === 'socket') {
     const outerRadiusMm = spec.odMm / 2 + opts.hubWallMm;
     const boreRadiusMm = spec.odMm / 2 + opts.fitClearanceMm;
 
@@ -1145,7 +1142,7 @@ export function buildPipeHubNode(
   } else {
     // Spigot (internal plug) fit style
     const coreRadiusMm = spec.odMm / 2;
-    const plugRadiusMm = Math.max(2.0, spec.idMm / 2 - opts.fitClearanceMm);
+    const plugRadiusMm = Math.max(0.5, spec.idMm / 2 - opts.fitClearanceMm);
 
     geoms.push({
       name: 'hub_core',

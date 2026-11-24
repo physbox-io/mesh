@@ -53,8 +53,23 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
   const [hollowStuds, setHollowStuds] = useState<number>(saved?.hollowStuds ?? 0);
   const [subjectName, setSubjectName] = useState<string | null>(() => piece?.name ?? null);
   const laidNodesRef = useRef<SceneNode[] | null>(null);
+  const laidPieceIdRef = useRef<string | null>(null);
   const laidOptionsRef = useRef<unknown>(null);
   const sourceSceneRef = useRef<{ scene: SceneGraph; pieceId: string | null }>({ scene, pieceId: piece?.id ?? null });
+  const messageTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (messageTimerRef.current) clearTimeout(messageTimerRef.current);
+  }, []);
+
+  const showMessage = (msg: string) => {
+    if (messageTimerRef.current) clearTimeout(messageTimerRef.current);
+    setMessage(msg);
+    messageTimerRef.current = setTimeout(() => {
+      messageTimerRef.current = null;
+      setMessage(null);
+    }, 5000);
+  };
 
   useEffect(() => {
     rememberedPlacement = placement;
@@ -68,8 +83,14 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
   // Counted as the settings change, in the worker.
   useEffect(() => {
     if (!isOpen) return;
-    if (scene.nodes !== laidNodesRef.current) {
-      sourceSceneRef.current = { scene: { nodes: scene.nodes }, pieceId: piece?.id ?? null };
+    const currentPieceId = piece?.id ?? null;
+    const selectionChangedAfterLay =
+      scene.nodes === laidNodesRef.current &&
+      currentPieceId !== laidPieceIdRef.current;
+    if (scene.nodes !== laidNodesRef.current || selectionChangedAfterLay) {
+      laidNodesRef.current = null;
+      laidPieceIdRef.current = null;
+      sourceSceneRef.current = { scene: { nodes: scene.nodes }, pieceId: currentPieceId };
     } else if (options === laidOptionsRef.current) {
       return;
     }
@@ -105,11 +126,15 @@ export function BrickworkModal({ isOpen, onClose }: { isOpen: boolean; onClose: 
     state.updateScene(next);
     laidNodesRef.current = useStore.getState().sceneGraph.nodes;
     const targetPieceId = sourceSceneRef.current.pieceId;
-    if (placement === 'replace' && targetPieceId && !next.nodes.some((n) => n.id === targetPieceId)) {
+    const deselectedAfterReplace =
+      placement === 'replace' &&
+      Boolean(targetPieceId) &&
+      !next.nodes.some((n) => n.id === targetPieceId);
+    laidPieceIdRef.current = deselectedAfterReplace ? null : (piece?.id ?? null);
+    if (deselectedAfterReplace) {
       state.setSelectedNodeId(null);
     }
-    setMessage(`Laid ${outcome.result.bricks.length.toLocaleString()} bricks in ${outcome.result.courses} courses.`);
-    setTimeout(() => setMessage(null), 5000);
+    showMessage(`Laid ${outcome.result.bricks.length.toLocaleString()} bricks in ${outcome.result.courses} courses.`);
   };
 
   const r = outcome?.result;

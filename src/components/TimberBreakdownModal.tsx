@@ -277,10 +277,13 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
   );
 
   const workerMode = modeSetting === 'auto' ? undefined : modeSetting;
-  const machineLimits = useMemo(() => {
-    const motion = webSerialManager.getState().motion;
-    return { spindle: motion.spindle, maxFeedMmMin: Math.min(motion.maxRate.x, motion.maxRate.y) };
-  }, []);
+  const machineLimits = useMemo(
+    () => ({
+      spindle: machineState.motion.spindle,
+      maxFeedMmMin: Math.min(machineState.motion.maxRate.x, machineState.motion.maxRate.y),
+    }),
+    [machineState.motion.spindle, machineState.motion.maxRate.x, machineState.motion.maxRate.y],
+  );
 
   const { result: timberJob, busy, failure } = useExportJob(
     isOpen,

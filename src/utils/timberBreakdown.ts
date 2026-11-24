@@ -2318,7 +2318,7 @@ export function decomposeSolidIntoPlanks(
       `- **Joint Style:** ${options.jointType.toUpperCase()}${options.jointType === 'finger' ? ` (${options.fingerWidthMm} mm fingers)` : ''}`,
       `- **Construction:** ${canHollow ? `Hollow 6-Wall Shell (${options.wallThicknessMm} mm walls)` : `Solid Laminated Planks (${options.boardThicknessMm} mm layers)`}`,
       `- **Max Board Stock:** ${options.maxBoardLengthMm} × ${options.maxBoardWidthMm} × ${options.boardThicknessMm} mm`,
-      `- **Alignment Dowels:** ${options.dowelDiaMm > 0 ? `${totalDowelPins}× Ø${options.dowelDiaMm}×${options.dowelLengthMm} mm fluted beech/birch dowels` : 'None'}`,
+      `- **Alignment Dowels:** ${options.jointType !== 'glue' && options.dowelDiaMm > 0 && totalDowelPins > 0 ? `${totalDowelPins}× Ø${options.dowelDiaMm}×${options.dowelLengthMm} mm fluted beech/birch dowels` : 'None'}`,
       `- **Total Planks:** ${planks.length} (${(totalVolumeMm3 / 1000).toFixed(1)} cm³ timber)`,
       ``,
       `## Per-Plank Cut List`,
