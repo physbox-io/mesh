@@ -3,8 +3,13 @@ import { callLlm, keyFor } from '../src/utils/llmCall';
 
 const img = { mediaType: 'image/jpeg' as const, data: 'AAAA' };
 
-function mockFetch(reply: unknown) {
-  const f = vi.fn(async () => ({ json: async () => reply }));
+function mockFetch(reply: unknown, ok = true, status = ok ? 200 : 500) {
+  const f = vi.fn(async () => ({
+    ok,
+    status,
+    text: async () => (typeof reply === 'string' ? reply : JSON.stringify(reply)),
+    json: async () => reply,
+  }));
   vi.stubGlobal('fetch', f);
   return f;
 }
@@ -39,13 +44,17 @@ describe('callLlm', () => {
     expect(body.messages[0].content).toBe('u');
   });
 
-  it('sends Gemini the pictures as inline_data parts', async () => {
+  it('sends Gemini the pictures as inline_data parts, systemInstruction, and x-goog-api-key header', async () => {
     const f = mockFetch({ candidates: [{ content: { parts: [{ text: 'a' }, { text: 'b' }] }, finishReason: 'STOP' }] });
     const r = await callLlm({ system: 's', user: 'u', images: [img], model: 'gemini-x', geminiKey: 'g' });
     expect(r.text).toBe('a\nb');
-    const body = JSON.parse((f.mock.calls[0] as unknown as [string, { body: string }])[1].body);
+    const [url, init] = f.mock.calls[0] as unknown as [string, { body: string; headers: Record<string, string> }];
+    expect(url).not.toContain('key=');
+    expect(init.headers['x-goog-api-key']).toBe('g');
+    const body = JSON.parse(init.body);
+    expect(body.systemInstruction).toEqual({ parts: [{ text: 's' }] });
     expect(body.contents[0].parts[0]).toEqual({ inline_data: { mime_type: 'image/jpeg', data: 'AAAA' } });
-    expect(body.contents[0].parts[1].text).toContain('User Request: u');
+    expect(body.contents[0].parts[1].text).toBe('u');
   });
 
   it('throws the provider error and refuses without a key', async () => {

@@ -259,7 +259,7 @@ export function mergeAndNormalizeNodes(
   existingNodes: RawNode[] = [],
   isFullReplacement: boolean = false
 ): SceneNode[] {
-  const normalizedRaw = sanitizeAndNormalizeNodes(rawNodes, existingNodes);
+  const normalizedRaw = sanitizeAndNormalizeNodes(rawNodes, isFullReplacement ? [] : existingNodes);
 
   if (isFullReplacement || !existingNodes || existingNodes.length === 0) {
     return normalizedRaw;
@@ -339,4 +339,111 @@ export function mergeAndNormalizeNodes(
   }
 
   return finalNodes as SceneNode[];
+}
+
+const BULKY_GEOM_KEYS = new Set([
+  'vertices',
+  'faces',
+  'renderVertices',
+  'baseVertices',
+  'baseRenderVertices',
+  'baseColliderVertices',
+  'colliderVertices',
+  'colliders',
+  'paint',
+  'paintLayer',
+  'bakedMesh',
+  'cachedMesh',
+  'meshCache',
+]);
+
+const BULKY_NODE_KEYS = new Set([
+  'colliders',
+  'colliderVertices',
+  'bakedMesh',
+  'cachedMesh',
+  'meshCache',
+  'csgHash',
+]);
+
+const roundNum = (n: number) => Math.round(n * 1000) / 1000;
+
+/**
+ * Produces a compact, LLM-friendly snapshot of the scene graph by stripping
+ * bulky mesh/collider/cache arrays via a denylist while preserving all
+ * structural, physics, material, acoustic, CSG, cloth, and feature metadata.
+ */
+export function serializeNodesCompact(nodes: SceneNode[]): RawNode[] {
+  const serializeNode = (node: SceneNode): RawNode => {
+    const compactNode: RawNode = {};
+
+    for (const [key, value] of Object.entries(node)) {
+      if (value === undefined || BULKY_NODE_KEYS.has(key)) continue;
+      if (key === 'geoms' || key === 'joints' || key === 'children') continue;
+      if (key === 'pos' && Array.isArray(value)) {
+        compactNode.pos = (value as number[]).map(roundNum) as [number, number, number];
+      } else if (key === 'euler' && Array.isArray(value)) {
+        if ((value as number[]).some((e) => e !== 0)) {
+          compactNode.euler = (value as number[]).map(roundNum) as [number, number, number];
+        }
+      } else {
+        compactNode[key] = value;
+      }
+    }
+
+    if (Array.isArray(node.geoms) && node.geoms.length > 0) {
+      compactNode.geoms = node.geoms.map((g: SceneGeom) => {
+        const geomObj: RawGeom = {};
+        for (const [key, value] of Object.entries(g)) {
+          if (value === undefined || BULKY_GEOM_KEYS.has(key)) continue;
+          if (key === 'size' && Array.isArray(value)) {
+            geomObj.size = (value as number[]).map(roundNum);
+          } else if (key === 'pos' && Array.isArray(value)) {
+            if ((value as number[]).some((p) => p !== 0)) {
+              geomObj.pos = (value as number[]).map(roundNum) as [number, number, number];
+            }
+          } else if (key === 'fromto' && Array.isArray(value)) {
+            geomObj.fromto = (value as number[]).map(roundNum) as [number, number, number, number, number, number];
+          } else if (key === 'rgba' && Array.isArray(value)) {
+            geomObj.rgba = (value as number[]).map((c) => Math.round(c * 100) / 100);
+          } else if (key === 'mass' && typeof value === 'number') {
+            geomObj.mass = roundNum(value);
+          } else {
+            geomObj[key] = value;
+          }
+        }
+        return geomObj;
+      });
+    }
+
+    if (Array.isArray(node.joints) && node.joints.length > 0) {
+      compactNode.joints = node.joints.map((j: SceneJoint) => {
+        const jointObj: RawJoint = {};
+        for (const [key, value] of Object.entries(j)) {
+          if (value === undefined) continue;
+          if ((key === 'damping' || key === 'stiffness' || key === 'frictionloss') && typeof value === 'number') {
+            if (value !== 0) (jointObj as Record<string, unknown>)[key] = roundNum(value);
+          } else if (key === 'springref' && typeof value === 'number') {
+            if (value !== 0) jointObj.springref = roundNum(value);
+          } else if (key === 'range' && Array.isArray(value)) {
+            jointObj.range = (value as number[]).map(roundNum) as [number, number];
+          } else {
+            (jointObj as Record<string, unknown>)[key] = value;
+          }
+        }
+        return jointObj;
+      });
+    }
+
+    const filteredChildren = node.children
+      ?.filter((child: SceneNode) => !child.name?.includes('tooth') && !child.id?.includes('cog_'))
+      .map(serializeNode);
+    if (filteredChildren && filteredChildren.length > 0) {
+      compactNode.children = filteredChildren;
+    }
+
+    return compactNode;
+  };
+
+  return (nodes || []).map(serializeNode);
 }

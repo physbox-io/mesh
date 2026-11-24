@@ -18,6 +18,42 @@ export const clampMaxTokens = (value: number): number => {
   return Math.min(MAX_MAX_TOKENS, Math.max(MIN_MAX_TOKENS, Math.round(value)));
 };
 
+/** Known per-model output token ceilings so requests never fail on model caps. */
+export const modelMaxOutputTokens = (model: string): number => {
+  const m = (model || '').toLowerCase();
+  if (/^claude-3-5-/.test(m)) return 8192;
+  if (/^claude-3-(opus|sonnet|haiku)/.test(m)) return 4096;
+  if (/^claude-3-7-/.test(m)) return 64000;
+  if (/^claude-/.test(m)) return 64000;
+  if (/^gemini-(1\.5|2\.0)-/.test(m)) return 8192;
+  return MAX_MAX_TOKENS;
+};
+
+/** Clamps `value` to both the global budget range and the target model's ceiling. */
+export const clampMaxTokensForModel = (value: number, model: string): number => {
+  const base = clampMaxTokens(value);
+  return Math.min(base, modelMaxOutputTokens(model));
+};
+
+/** Safe localStorage read that returns `fallback` in sandboxed/private contexts. */
+export const readStorageString = (key: string, fallback = ''): string => {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw !== null ? raw : fallback;
+  } catch {
+    return fallback;
+  }
+};
+
+/** Safe localStorage write that ignores storage errors in sandboxed/private contexts. */
+export const writeStorageString = (key: string, value: string): void => {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Non-fatal: the setting just won't persist across reloads.
+  }
+};
+
 /** Reads the configured budget, falling back to the default on absent/garbage values. */
 export const readMaxTokens = (): number => {
   try {

@@ -15,6 +15,9 @@ function canvasToImage(canvas: HTMLCanvasElement, quality = 0.88): LlmImage {
 
 /** The picture drawn on white at most `maxPx` on its long side. */
 export function drawableToLlmImage(src: CanvasImageSource, width: number, height: number, maxPx = LLM_IMAGE_MAX_PX): LlmImage {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    throw new Error('The picture has invalid (0×0) dimensions.');
+  }
   const k = Math.min(1, maxPx / Math.max(width, height));
   const canvas = document.createElement('canvas');
   canvas.width = Math.max(1, Math.round(width * k));
@@ -37,6 +40,9 @@ export async function fileToLlmImage(file: Blob, maxPx = LLM_IMAGE_MAX_PX): Prom
       img.onerror = () => reject(new Error('The browser could not decode this picture.'));
       img.src = url;
     });
+    if (img.naturalWidth === 0 || img.naturalHeight === 0) {
+      throw new Error('The browser decoded an empty (0×0) picture.');
+    }
     return drawableToLlmImage(img, img.naturalWidth, img.naturalHeight, maxPx);
   } finally {
     URL.revokeObjectURL(url);

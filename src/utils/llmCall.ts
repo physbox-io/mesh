@@ -6,7 +6,14 @@
 // message; the caller decides how to show them.
 
 import { anthropicUrl, geminiUrl } from './llmEndpoints';
-import { readMaxTokens, ANTHROPIC_KEY, GEMINI_KEY, MODEL_KEY } from './llmSettings';
+import {
+  readMaxTokens,
+  clampMaxTokensForModel,
+  readStorageString,
+  ANTHROPIC_KEY,
+  GEMINI_KEY,
+  MODEL_KEY,
+} from './llmSettings';
 
 /** A picture for the model: base64 bytes and their media type. */
 export interface LlmImage {
@@ -35,12 +42,40 @@ export interface LlmRequest {
 
 export const DEFAULT_MODEL = 'gemini-3.6-flash';
 
-const stored = (key: string): string => {
-  try {
-    return localStorage.getItem(key)?.trim() || '';
-  } catch {
-    return '';
+const stored = (key: string): string => readStorageString(key).trim();
+
+const parseResponseJson = async (
+  response: Response,
+  providerLabel: string,
+): Promise<Record<string, unknown>> => {
+  const rawText = await response.text();
+  let json: Record<string, unknown> | null = null;
+  if (rawText) {
+    try {
+      const parsed: unknown = JSON.parse(rawText);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        json = parsed as Record<string, unknown>;
+      }
+    } catch {
+      json = null;
+    }
   }
+  const apiError = json?.error as { message?: string; type?: string } | undefined;
+  if (apiError) {
+    throw new Error(apiError.message || apiError.type || `${providerLabel} API Error`);
+  }
+  if (!response.ok) {
+    const snippet = rawText.trim().slice(0, 200);
+    throw new Error(
+      snippet
+        ? `${providerLabel} API HTTP ${response.status}: ${snippet}`
+        : `${providerLabel} API HTTP ${response.status}`,
+    );
+  }
+  if (!json) {
+    throw new Error(`${providerLabel} API returned an invalid JSON response.`);
+  }
+  return json;
 };
 
 export const savedModel = (): string => stored(MODEL_KEY) || DEFAULT_MODEL;
@@ -60,7 +95,7 @@ export async function callLlm(req: LlmRequest): Promise<LlmResult> {
   const model = req.model || savedModel();
   const found = keyFor(model, req.geminiKey, req.claudeKey);
   if ('missing' in found) throw new Error(found.missing);
-  const maxTokens = req.maxTokens ?? readMaxTokens();
+  const maxTokens = clampMaxTokensForModel(req.maxTokens ?? readMaxTokens(), model);
   const images = req.images ?? [];
 
   if (isClaudeModel(model)) {
@@ -81,8 +116,7 @@ export async function callLlm(req: LlmRequest): Promise<LlmResult> {
       },
       body: JSON.stringify({ model, max_tokens: maxTokens, system: req.system, messages: [{ role: 'user', content }] }),
     });
-    const json = await response.json();
-    if (json.error) throw new Error(json.error.message || json.error.type || 'Claude API Error');
+    const json = await parseResponseJson(response, 'Claude');
     const text = Array.isArray(json.content)
       ? (json.content as { type: string; text?: string }[]).filter((b) => b.type === 'text' && !!b.text).map((b) => b.text).join('\n')
       : '';
@@ -94,25 +128,37 @@ export async function callLlm(req: LlmRequest): Promise<LlmResult> {
 
   const parts = [
     ...images.map((im) => ({ inline_data: { mime_type: im.mediaType, data: im.data } })),
-    { text: `${req.system}\n\nUser Request: ${req.user}` },
+    { text: req.user },
   ];
-  const response = await fetch(geminiUrl(`/v1beta/models/${model}:generateContent?key=${found.key}`), {
+  const response = await fetch(geminiUrl(`/v1beta/models/${encodeURIComponent(model)}:generateContent`), {
     method: 'POST',
     signal: req.signal,
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { maxOutputTokens: maxTokens } }),
+    headers: {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': found.key,
+    },
+    body: JSON.stringify({
+      ...(req.system ? { systemInstruction: { parts: [{ text: req.system }] } } : {}),
+      contents: [{ role: 'user', parts }],
+      generationConfig: { maxOutputTokens: maxTokens },
+    }),
   });
-  const json = await response.json();
-  if (json.error) throw new Error(json.error.message);
-  const candidate = json.candidates?.[0];
-  // Every text part, not just parts[0]: thinking models routinely split a
-  // reply across parts, and taking only the first one dropped whatever
-  // followed - usually the trailing JSON block the scene update needs.
-  const text = Array.isArray(candidate?.content?.parts)
-    ? (candidate.content.parts as { text?: string }[]).filter((pt) => typeof pt?.text === 'string' && !!pt.text).map((pt) => pt.text).join('\n')
-    : '';
+  const json = await parseResponseJson(response, 'Gemini');
+  const candidates = json.candidates as
+    | { content?: { parts?: { text?: string; thought?: boolean }[] }; finishReason?: string }[]
+    | undefined;
+  const candidate = candidates?.[0];
+  // Every non-thought text part, not just parts[0]: thinking models split
+  // reasoning (`thought: true`) and answer parts across multiple entries. Fall
+  // back to all text parts only if no non-thought text part exists.
+  const rawParts = Array.isArray(candidate?.content?.parts) ? candidate.content.parts : [];
+  const allTextParts = rawParts.filter((pt) => typeof pt?.text === 'string' && pt.text.length > 0);
+  const nonThoughtParts = allTextParts.filter((pt) => pt.thought !== true);
+  const chosenParts = nonThoughtParts.length > 0 ? nonThoughtParts : allTextParts;
+  const text = chosenParts.map((pt) => pt.text!).join('\n');
   if (!text.trim()) {
-    const blockReason = json.promptFeedback?.blockReason || candidate?.finishReason;
+    const promptFeedback = json.promptFeedback as { blockReason?: string } | undefined;
+    const blockReason = promptFeedback?.blockReason || candidate?.finishReason;
     throw new Error(blockReason ? `The model returned no content (${blockReason}).` : 'The model returned an empty response.');
   }
   return { text, truncated: candidate?.finishReason === 'MAX_TOKENS' };

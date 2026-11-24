@@ -16,7 +16,7 @@ import { promotePosedStaticMeshes } from './meshGeomTransforms';
 
 export interface GeomActions {
   updateNodeGeom: (id: string, updates: Partial<SceneGeom>, geomIndex?: number) => void;
-  updateNodeScad: (id: string, scadCode: string, compiledData: { vertices: number[], faces: number[], renderVertices: number[] }, skipRecompile?: boolean) => void;
+  updateNodeScad: (id: string, scadCode: string, compiledData: { vertices: number[], faces: number[], renderVertices: number[] }, skipRecompile?: boolean, skipHistory?: boolean) => void;
   // --- CSG (boolean modifiers) ---
   deleteNodeGeom: (nodeId: string, geomIndex: number) => void;
   /**
@@ -159,8 +159,10 @@ export function geomActions({ set, get }: SliceDeps): GeomActions {
       get().recompile(newScene, undefined, structural, undefined, structural);
     },
 
-    updateNodeScad: (id, scad, compiledData, skipRecompile) => {
-      get().recordInteraction('node-scad');
+    updateNodeScad: (id, scad, compiledData, skipRecompile, skipHistory) => {
+      if (!skipHistory) {
+        get().recordInteraction('node-scad');
+      }
       const newScene = cloneSceneGraph(get().sceneGraph);
       const traverse = (nodes: SceneNode[]) => {
         if (!nodes) return false;

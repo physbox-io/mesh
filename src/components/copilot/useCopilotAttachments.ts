@@ -3,7 +3,7 @@
 // chat box each have their own). The tray that shows them is CopilotAttachments.tsx.
 
 import type React from 'react';
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import type { LlmImage } from '../../utils/llmCall';
 import { fileToLlmImage } from '../../utils/llmImageInput';
 
@@ -12,22 +12,58 @@ export const MAX_COPILOT_IMAGES = 4;
 
 export function useCopilotAttachments() {
   const [images, setImages] = useState<LlmImage[]>([]);
+  const imagesCountRef = useRef(0);
   const [attachError, setAttachError] = useState<string | null>(null);
 
   const addFiles = useCallback(async (files: Iterable<File>) => {
-    // Only as many as there is room for, before decoding any: ten phone photos are a lot of pixels.
-    const pictures = Array.from(files).filter((f) => f.type.startsWith('image/')).slice(0, MAX_COPILOT_IMAGES);
-    if (!pictures.length) return false;
+    const allPictures = Array.from(files).filter((f) => f.type.startsWith('image/'));
+    if (!allPictures.length) return false;
+
+    const remaining = Math.max(0, MAX_COPILOT_IMAGES - imagesCountRef.current);
+    if (remaining === 0) {
+      setAttachError(`Up to ${MAX_COPILOT_IMAGES} pictures per request; remove one before adding more.`);
+      return true;
+    }
+
+    const overflow = allPictures.length > remaining;
+    const toDecode = allPictures.slice(0, remaining);
     setAttachError(null);
-    try {
-      const decoded = await Promise.all(pictures.map((f) => fileToLlmImage(f)));
+
+    const results = await Promise.allSettled(toDecode.map((f) => fileToLlmImage(f)));
+    const decoded: LlmImage[] = [];
+    const errors: string[] = [];
+    for (const r of results) {
+      if (r.status === 'fulfilled') {
+        decoded.push(r.value);
+      } else {
+        errors.push((r.reason as Error)?.message || String(r.reason));
+      }
+    }
+
+    let clippedByState = false;
+    if (decoded.length > 0) {
       setImages((prev) => {
         const next = [...prev, ...decoded];
-        if (next.length > MAX_COPILOT_IMAGES) setAttachError(`Up to ${MAX_COPILOT_IMAGES} pictures per request; the rest were left off.`);
-        return next.slice(0, MAX_COPILOT_IMAGES);
+        if (next.length > MAX_COPILOT_IMAGES) clippedByState = true;
+        const clamped = next.slice(0, MAX_COPILOT_IMAGES);
+        imagesCountRef.current = clamped.length;
+        return clamped;
       });
-    } catch (e) {
-      setAttachError((e as Error)?.message || String(e));
+    }
+
+    const notices: string[] = [];
+    if (overflow || clippedByState) {
+      notices.push(`Up to ${MAX_COPILOT_IMAGES} pictures per request; the rest were left off.`);
+    }
+    if (errors.length > 0) {
+      notices.push(
+        errors.length === 1
+          ? errors[0]
+          : `${errors.length} pictures could not be decoded (${errors[0]}).`,
+      );
+    }
+    if (notices.length > 0) {
+      setAttachError(notices.join(' '));
     }
     return true;
   }, []);
@@ -61,10 +97,15 @@ export function useCopilotAttachments() {
     },
   };
 
-  const remove = (i: number) => setImages((prev) => prev.filter((_, k) => k !== i));
+  const remove = (i: number) => setImages((prev) => {
+    const next = prev.filter((_, k) => k !== i);
+    imagesCountRef.current = next.length;
+    return next;
+  });
   /** Hands the pictures to a request and empties the tray. */
   const take = (): LlmImage[] => {
     const out = images;
+    imagesCountRef.current = 0;
     setImages([]);
     setAttachError(null);
     return out;

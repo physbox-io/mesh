@@ -3,11 +3,18 @@ import { X, Brain, Wand2, Loader2, AlertCircle, HelpCircle, Activity, Printer, S
 import { useStore } from '../store/useStore';
 import { compileSCAD } from '../utils/openscad';
 import { updateOrCreateNotecard } from '../utils/noteCards';
-import { mergeAndNormalizeNodes, type RawGeom, type RawJoint, type RawNode } from '../utils/sceneNodes';
-import type { SceneGeom, SceneJoint, SceneNode } from '../types/scene';
-import { readMaxTokens } from '../utils/llmSettings';
+import { mergeAndNormalizeNodes, serializeNodesCompact, type RawNode } from '../utils/sceneNodes';
+import type { SceneNode } from '../types/scene';
+import {
+  readMaxTokens,
+  pushGlobalParameter,
+  readStorageString,
+  writeStorageString,
+  GEMINI_KEY,
+  ANTHROPIC_KEY,
+  MODEL_KEY,
+} from '../utils/llmSettings';
 import SYSTEM_INSTRUCTIONS from './systemInstructions.txt?raw';
-import { pushGlobalParameter } from '../utils/llmSettings';
 import { anthropicUrl, geminiUrl } from '../utils/llmEndpoints';
 import { callLlm, keyFor, isClaudeModel, DEFAULT_MODEL, type LlmImage } from '../utils/llmCall';
 import { llmImageThumb } from '../utils/llmImageInput';
@@ -16,6 +23,9 @@ import { useCopilotAttachments } from './copilot/useCopilotAttachments';
 import { usePictureToPart } from './copilot/usePictureToPart';
 import { formatLoopReport, DEFAULT_LOOP_ROUNDS } from '../utils/pictureToPart';
 import { parseAIResponse, cleanLaTeXMath, type DiagnosticQuestion, type ProposedModification } from '../utils/copilotReply';
+import { resolveLoadStrength } from '../utils/deformMaterials';
+import { parseTuneTo, applyTuneTo, type PendingDeclarativeOps, type TuneToSpec } from '../hooks/mcp/bodyDefaults';
+import { applyDeclarativePreCsgFeatures, applyDeclarativePostCsgFeatures } from '../hooks/mcp/bodyFeatures';
 
 interface AICopilotPanelProps {
   onClose: () => void;
@@ -40,6 +50,9 @@ interface ChatMessage {
   isImplemented?: boolean;
   hasError?: boolean;
   errorMsg?: string;
+  /** Retry metadata for failed generate/mutate/followup turns. */
+  retryPrompt?: string;
+  retryMode?: 'generate' | 'mutate' | 'followup' | 'implement';
   /**
    * When it was said. Absent on a message restored from a saved preset,
    * which keeps only id, role and content (see SavedCopilotMessage); nothing
@@ -49,7 +62,136 @@ interface ChatMessage {
 }
 
 const getTimestamp = () => Date.now();
-const makeId = (prefix: string) => `${prefix}_${Date.now()}`;
+let idCounter = 0;
+const makeId = (prefix: string) => `${prefix}_${Date.now()}_${++idCounter}`;
+
+const isAbortError = (e: unknown): boolean =>
+  e instanceof DOMException
+    ? e.name === 'AbortError'
+    : typeof e === 'object' && e !== null && (e as { name?: string }).name === 'AbortError';
+
+const hasScadNodes = (nodes: RawNode[]): boolean => {
+  for (const node of nodes) {
+    if (node.scad) return true;
+    if (node.children && hasScadNodes(node.children)) return true;
+  }
+  return false;
+};
+
+const findStoreNodeRecursive = (nodes: SceneNode[], target: RawNode): SceneNode | undefined => {
+  for (const sn of nodes) {
+    if (
+      (target.id && (sn.id === target.id || sn.name === target.id)) ||
+      (target.name && (sn.name === target.name || sn.id === target.name))
+    ) {
+      return sn;
+    }
+    if (sn.children && sn.children.length > 0) {
+      const found = findStoreNodeRecursive(sn.children, target);
+      if (found) return found;
+    }
+  }
+  return undefined;
+};
+
+/**
+ * Normalizes declarative body fields (`loadStrength` string/boolean shorthands,
+ * `tuneTo`, `cuts`, `roundEdges`, `patterns`, `paint`) on LLM-returned nodes so
+ * in-app Copilot doesn't silently drop them. Returns cleaned nodes plus any
+ * post-insert declarative ops to apply once the nodes are in the store.
+ */
+function prepareDeclarativeNodes(nodes: SceneNode[]): {
+  nodes: SceneNode[];
+  opsMap: Map<string, PendingDeclarativeOps>;
+} {
+  const opsMap = new Map<string, PendingDeclarativeOps>();
+  const tuneSpecs = new Map<string, TuneToSpec>();
+
+  const walkClean = (list: SceneNode[]): SceneNode[] =>
+    list.map((node) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const copy: Record<string, any> = { ...node };
+
+      if (typeof copy.loadStrength === 'string' || typeof copy.loadStrength === 'boolean') {
+        const resolved = resolveLoadStrength(copy.loadStrength, copy.deformMaterial);
+        if ('value' in resolved) {
+          if (resolved.value === undefined) delete copy.loadStrength;
+          else copy.loadStrength = resolved.value;
+        }
+      }
+
+      if (copy.tuneTo !== undefined) {
+        try {
+          tuneSpecs.set(node.id, parseTuneTo(copy.tuneTo, copy.drillNodalHole));
+        } catch (err) {
+          console.warn(`Ignoring invalid tuneTo on '${node.name || node.id}':`, err);
+        }
+        delete copy.tuneTo;
+        delete copy.drillNodalHole;
+      }
+
+      const rawCuts = Array.isArray(copy.cuts) ? copy.cuts : undefined;
+      const rawRoundEdges = copy.roundEdges !== undefined ? copy.roundEdges : copy.roundings;
+      const normRoundEdges = Array.isArray(rawRoundEdges)
+        ? rawRoundEdges
+        : rawRoundEdges && typeof rawRoundEdges === 'object'
+          ? [rawRoundEdges]
+          : undefined;
+      const rawPatterns = Array.isArray(copy.patterns)
+        ? copy.patterns
+        : copy.pattern && typeof copy.pattern === 'object'
+          ? [copy.pattern]
+          : undefined;
+      const rawPaint = Array.isArray(copy.paint)
+        ? copy.paint
+        : copy.paint && typeof copy.paint === 'object'
+          ? [copy.paint]
+          : undefined;
+
+      if (rawCuts || normRoundEdges || rawPatterns || rawPaint) {
+        opsMap.set(node.id, {
+          ...(rawCuts ? { cuts: rawCuts } : {}),
+          ...(normRoundEdges ? { roundEdges: normRoundEdges } : {}),
+          ...(rawPatterns ? { patterns: rawPatterns } : {}),
+          ...(rawPaint ? { paint: rawPaint } : {}),
+        });
+      }
+      delete copy.cuts;
+      delete copy.roundEdges;
+      delete copy.roundings;
+      delete copy.patterns;
+      delete copy.pattern;
+      delete copy.paint;
+
+      if (Array.isArray(copy.children) && copy.children.length > 0) {
+        copy.children = walkClean(copy.children as SceneNode[]);
+      }
+
+      return copy as SceneNode;
+    });
+
+  let cleaned = walkClean(nodes);
+
+  if (tuneSpecs.size > 0) {
+    const walkTune = (list: SceneNode[]): SceneNode[] =>
+      list.map((n) => {
+        const children = n.children?.length ? walkTune(n.children) : n.children;
+        let next = children === n.children ? n : { ...n, children };
+        const spec = tuneSpecs.get(n.id);
+        if (spec) {
+          try {
+            next = applyTuneTo(next, spec, cleaned);
+          } catch (err) {
+            console.warn(`Failed to apply tuneTo on '${n.name || n.id}':`, err);
+          }
+        }
+        return next;
+      });
+    cleaned = walkTune(cleaned);
+  }
+
+  return { nodes: cleaned, opsMap };
+}
 
 interface PhysicsWindow extends Window {
   _physics_setNoteCards?: (cards: unknown[]) => void;
@@ -69,7 +211,6 @@ interface ClaudeModelItem {
 }
 
 export default function AICopilotPanel({ onClose, messages: propsMessages, setMessages: propsSetMessages }: AICopilotPanelProps) {
-  const sceneGraph = useStore(state => state.sceneGraph);
   const att = useCopilotAttachments();
   // The chat box at the bottom has its own pictures, so a photo can go with any turn.
   const followAtt = useCopilotAttachments();
@@ -78,11 +219,27 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
   const [refineAgainstPicture, setRefineAgainstPicture] = useState(true);
   const updateScene = useStore(state => state.updateScene);
 
-  const [geminiApiKey, setGeminiApiKey] = useState(() => localStorage.getItem('gemini_api_key') || '');
-  const [claudeApiKey, setClaudeApiKey] = useState(() => localStorage.getItem('anthropic_api_key') || '');
-  const [selectedModel, setSelectedModel] = useState<string>(() => localStorage.getItem('gemini_model') || 'gemini-3.6-flash');
+  const [geminiApiKey, setGeminiApiKey] = useState(() => readStorageString(GEMINI_KEY));
+  const [claudeApiKey, setClaudeApiKey] = useState(() => readStorageString(ANTHROPIC_KEY));
+  const [selectedModel, setSelectedModel] = useState<string>(() => readStorageString(MODEL_KEY, DEFAULT_MODEL) || DEFAULT_MODEL);
   const [availableModels, setAvailableModels] = useState<{ id: string; name: string }[]>([]);
   const [availableClaudeModels, setAvailableClaudeModels] = useState<{ id: string; name: string }[]>([]);
+
+  // Local draft & open state for the API key setup drawer so typing doesn't
+  // unmount the drawer mid-entry or fire un-debounced model fetches.
+  const [showKeyDrawer, setShowKeyDrawer] = useState(() => !readStorageString(GEMINI_KEY) && !readStorageString(ANTHROPIC_KEY));
+  const [draftGeminiKey, setDraftGeminiKey] = useState(() => readStorageString(GEMINI_KEY));
+  const [draftClaudeKey, setDraftClaudeKey] = useState(() => readStorageString(ANTHROPIC_KEY));
+
+  const activeAbortRef = useRef<AbortController | null>(null);
+  const requestEpochRef = useRef(0);
+  const inFlightRef = useRef(false);
+  const lastFetchedGeminiKeyRef = useRef('');
+  const lastFetchedClaudeKeyRef = useRef('');
+  const pictureLoopStopRef = useRef(pictureLoop.stop);
+  useEffect(() => {
+    pictureLoopStopRef.current = pictureLoop.stop;
+  }, [pictureLoop.stop]);
 
   const [prompt, setPrompt] = useState('');
   const [followupInput, setFollowupInput] = useState('');
@@ -155,10 +312,43 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
 
   const responseContainerRef = useRef<HTMLDivElement>(null);
 
-  const fetchAvailableModels = async (key: string) => {
-    if (!key.trim()) return;
+  const cancelActiveRequest = () => {
+    requestEpochRef.current += 1;
+    activeAbortRef.current?.abort();
+    activeAbortRef.current = null;
+    pictureLoopStopRef.current();
+    inFlightRef.current = false;
+    setLoading(false);
+  };
+
+  const beginRequest = (): { epoch: number; signal: AbortSignal } => {
+    activeAbortRef.current?.abort();
+    const controller = new AbortController();
+    activeAbortRef.current = controller;
+    requestEpochRef.current += 1;
+    return { epoch: requestEpochRef.current, signal: controller.signal };
+  };
+
+  const isCurrentEpoch = (epoch: number) => requestEpochRef.current === epoch;
+
+  useEffect(() => {
+    return () => {
+      requestEpochRef.current += 1;
+      activeAbortRef.current?.abort();
+      activeAbortRef.current = null;
+      inFlightRef.current = false;
+      pictureLoopStopRef.current();
+    };
+  }, []);
+
+  const fetchAvailableModels = async (key: string, signal?: AbortSignal) => {
+    if (!key.trim()) return null;
     try {
-      const res = await fetch(geminiUrl(`/v1beta/models?key=${key.trim()}`));
+      const res = await fetch(geminiUrl('/v1beta/models'), {
+        headers: { 'x-goog-api-key': key.trim() },
+        signal,
+      });
+      if (!res.ok) return null;
       const data = await res.json();
       if (data.models && Array.isArray(data.models)) {
         const validModels = (data.models as GeminiModelItem[])
@@ -169,15 +359,21 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
           }));
 
         if (validModels.length > 0) {
-          setAvailableModels(validModels);
+          if (!signal?.aborted) {
+            setAvailableModels(validModels);
+          }
+          return validModels;
         }
       }
     } catch (e) {
-      console.warn("Failed to dynamically fetch Gemini models", e);
+      if (!isAbortError(e)) {
+        console.warn("Failed to dynamically fetch Gemini models", e);
+      }
     }
+    return null;
   };
 
-  const fetchAvailableClaudeModels = async (key: string) => {
+  const fetchAvailableClaudeModels = async (key: string, signal?: AbortSignal) => {
     if (!key.trim()) return null;
     const headers = {
       'x-api-key': key.trim(),
@@ -185,7 +381,7 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
       'anthropic-dangerous-direct-browser-access': 'true',
     };
     try {
-      const res = await fetch(anthropicUrl('/v1/models'), { headers });
+      const res = await fetch(anthropicUrl('/v1/models'), { headers, signal });
       if (res.ok) {
         const data = await res.json();
         const rawModels = (data.data || data.models || []) as ClaudeModelItem[];
@@ -194,40 +390,78 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
             id: m.id,
             name: m.display_name || m.name || m.id
           }));
-          setAvailableClaudeModels(formatted);
+          if (!signal?.aborted) {
+            setAvailableClaudeModels(formatted);
+          }
           return formatted;
         }
       }
     } catch (e) {
-      console.warn("Failed to dynamically fetch Claude models", e);
+      if (!isAbortError(e)) {
+        console.warn("Failed to dynamically fetch Claude models", e);
+      }
     }
     return null;
   };
 
   useEffect(() => {
     const handleStorageChange = () => {
-      const storedGeminiKey = localStorage.getItem('gemini_api_key') || '';
-      const storedClaudeKey = localStorage.getItem('anthropic_api_key') || '';
-      const storedModel = localStorage.getItem('gemini_model') || 'gemini-3.6-flash';
+      const storedGeminiKey = readStorageString(GEMINI_KEY);
+      const storedClaudeKey = readStorageString(ANTHROPIC_KEY);
+      const storedModel = readStorageString(MODEL_KEY, DEFAULT_MODEL) || DEFAULT_MODEL;
       setGeminiApiKey(storedGeminiKey);
       setClaudeApiKey(storedClaudeKey);
       setSelectedModel(storedModel);
+      if (storedGeminiKey || storedClaudeKey) {
+        setDraftGeminiKey(storedGeminiKey);
+        setDraftClaudeKey(storedClaudeKey);
+      }
     };
     window.addEventListener('storage', handleStorageChange);
     return () => window.removeEventListener('storage', handleStorageChange);
   }, []);
 
   useEffect(() => {
+    const trimmed = geminiApiKey.trim();
+    if (!trimmed) {
+      lastFetchedGeminiKeyRef.current = '';
+      return;
+    }
+    if (trimmed === lastFetchedGeminiKeyRef.current) return;
+    const controller = new AbortController();
     const timer = setTimeout(() => {
-      if (geminiApiKey) {
-        void fetchAvailableModels(geminiApiKey);
-      }
-      if (claudeApiKey) {
-        void fetchAvailableClaudeModels(claudeApiKey);
-      }
+      void fetchAvailableModels(trimmed, controller.signal).then((live) => {
+        if (!controller.signal.aborted && live && live.length > 0) {
+          lastFetchedGeminiKeyRef.current = trimmed;
+        }
+      });
     }, 400);
-    return () => clearTimeout(timer);
-  }, [geminiApiKey, claudeApiKey]);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [geminiApiKey]);
+
+  useEffect(() => {
+    const trimmed = claudeApiKey.trim();
+    if (!trimmed) {
+      lastFetchedClaudeKeyRef.current = '';
+      return;
+    }
+    if (trimmed === lastFetchedClaudeKeyRef.current) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      void fetchAvailableClaudeModels(trimmed, controller.signal).then((live) => {
+        if (!controller.signal.aborted && live && live.length > 0) {
+          lastFetchedClaudeKeyRef.current = trimmed;
+        }
+      });
+    }, 400);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [claudeApiKey]);
 
   useEffect(() => {
     const handlePresetLoaded = (e: Event) => {
@@ -235,6 +469,7 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
       if (detail && typeof detail === 'object') {
         const { name, prev } = detail;
         if (name && name !== prev) {
+          cancelActiveRequest();
           setMessages([]);
           setError('');
           setPrompt('');
@@ -255,32 +490,28 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
     }
   }, [messages, loading]);
 
-  const saveGeminiApiKey = (key: string) => {
-    setGeminiApiKey(key);
-    localStorage.setItem('gemini_api_key', key);
-    pushGlobalParameter('gemini_api_key', key);
+  const commitKeyDrawer = () => {
+    const gKey = draftGeminiKey.trim();
+    const cKey = draftClaudeKey.trim();
+    setGeminiApiKey(gKey);
+    writeStorageString(GEMINI_KEY, gKey);
+    pushGlobalParameter(GEMINI_KEY, gKey);
+    setClaudeApiKey(cKey);
+    writeStorageString(ANTHROPIC_KEY, cKey);
+    pushGlobalParameter(ANTHROPIC_KEY, cKey);
+    if (cKey && !gKey && !selectedModel.startsWith('claude')) {
+      saveSelectedModel('claude-opus-5');
+    }
     window.dispatchEvent(new Event('storage'));
-  };
-
-  const saveClaudeApiKey = async (key: string) => {
-    setClaudeApiKey(key);
-    localStorage.setItem('anthropic_api_key', key);
-    pushGlobalParameter('anthropic_api_key', key);
-    window.dispatchEvent(new Event('storage'));
-    if (key.trim()) {
-      const liveModels = await fetchAvailableClaudeModels(key.trim());
-      if (liveModels && liveModels.length > 0) {
-        saveSelectedModel(liveModels[0].id);
-      } else if (!selectedModel.startsWith('claude')) {
-        saveSelectedModel('claude-opus-5');
-      }
+    if (gKey || cKey) {
+      setShowKeyDrawer(false);
     }
   };
 
   const saveSelectedModel = (modelId: string) => {
     setSelectedModel(modelId);
-    localStorage.setItem('gemini_model', modelId);
-    pushGlobalParameter('gemini_model', modelId);
+    writeStorageString(MODEL_KEY, modelId);
+    pushGlobalParameter(MODEL_KEY, modelId);
     window.dispatchEvent(new Event('storage'));
   };
 
@@ -290,8 +521,13 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
   // check `truncated` and refuse to report success.
   type LLMResult = { text: string; truncated: boolean };
 
-  const callGemini = async (systemInstructions: string, userQuery: string, images?: LlmImage[]): Promise<LLMResult | null> => {
-    const currentModel = selectedModel || localStorage.getItem('gemini_model') || DEFAULT_MODEL;
+  const callGemini = async (
+    systemInstructions: string,
+    userQuery: string,
+    images?: LlmImage[],
+    signal?: AbortSignal,
+  ): Promise<LLMResult | null> => {
+    const currentModel = selectedModel || readStorageString(MODEL_KEY, DEFAULT_MODEL) || DEFAULT_MODEL;
     const found = keyFor(currentModel, geminiApiKey, claudeApiKey);
     if ('missing' in found) {
       setError(found.missing);
@@ -300,8 +536,19 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
     setError('');
     setLoading(true);
     try {
-      return await callLlm({ system: systemInstructions, user: userQuery, images, model: currentModel, geminiKey: geminiApiKey, claudeKey: claudeApiKey });
+      return await callLlm({
+        system: systemInstructions,
+        user: userQuery,
+        images,
+        model: currentModel,
+        geminiKey: geminiApiKey,
+        claudeKey: claudeApiKey,
+        signal,
+      });
     } catch (e: unknown) {
+      if (signal?.aborted || isAbortError(e)) {
+        return null;
+      }
       const message = e instanceof Error ? e.message : String(e);
       setError(`${isClaudeModel(currentModel) ? 'Claude' : 'Gemini'} API Error (${currentModel}): ${message}`);
       setLoading(false);
@@ -318,75 +565,14 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
     ? `The response hit the ${readMaxTokens().toLocaleString()}-token limit and was cut off before the scene JSON was complete, so nothing was applied. Raise "Copilot Max Response Tokens" in Global Settings, or ask for a smaller change.`
     : 'The response did not contain a usable scene graph, so nothing was applied.';
 
-  const roundNum = (n: number) => Math.round(n * 1000) / 1000;
-
-  const getSerializedNodesCompact = () => {
-    const serializeNode = (node: SceneNode): RawNode => {
-      const filteredChildren = node.children
-        ?.filter((child: SceneNode) => !child.name?.includes('tooth') && !child.id?.includes('cog_'))
-        .map(serializeNode);
-
-      const compactNode: RawNode = {
-        id: node.id,
-        name: node.name,
-        pos: node.pos?.map(roundNum),
-      };
-
-      if (node.euler && node.euler.some((e: number) => e !== 0)) compactNode.euler = node.euler.map(roundNum);
-      if (node.allowCoupling) compactNode.allowCoupling = true;
-      if (node.coupleTargetId) compactNode.coupleTargetId = node.coupleTargetId;
-      if (node.weldTargetId) compactNode.weldTargetId = node.weldTargetId;
-      if (node.scad) compactNode.scad = node.scad;
-      if (node.script) compactNode.script = node.script;
-
-      if (node.geoms && node.geoms.length > 0) {
-        compactNode.geoms = node.geoms.map((g: SceneGeom) => {
-          const geomObj: RawGeom = {
-            name: g.name,
-            type: g.type,
-            size: g.size?.map(roundNum),
-          };
-          if (g.pos && g.pos.some((p: number) => p !== 0)) geomObj.pos = g.pos.map(roundNum);
-          if (g.mass) geomObj.mass = roundNum(g.mass);
-          if (g.rgba) geomObj.rgba = g.rgba.map((c: number) => Math.round(c * 100) / 100);
-          return geomObj;
-        });
-      }
-
-      if (node.joints && node.joints.length > 0) {
-        compactNode.joints = node.joints.map((j: SceneJoint) => {
-          const jointObj: RawJoint = {
-            name: j.name,
-            type: j.type,
-          };
-          if (j.axis) jointObj.axis = j.axis;
-          if (j.damping) jointObj.damping = roundNum(j.damping);
-          if (j.stiffness) jointObj.stiffness = roundNum(j.stiffness);
-          if (j.springref !== undefined && j.springref !== 0) jointObj.springref = roundNum(j.springref);
-          if (j.frictionloss) jointObj.frictionloss = roundNum(j.frictionloss);
-          if (j.limited !== undefined) jointObj.limited = j.limited;
-          if (j.range) jointObj.range = j.range.map(roundNum);
-          if (j.actuator) jointObj.actuator = j.actuator;
-          return jointObj;
-        });
-      }
-
-      if (filteredChildren && filteredChildren.length > 0) {
-        compactNode.children = filteredChildren;
-      }
-
-      return compactNode;
-    };
-
-    return sceneGraph.nodes.map(serializeNode);
-  };
+  const getSerializedNodesCompact = () => serializeNodesCompact(useStore.getState().sceneGraph.nodes);
 
   // Returns the names of any bodies whose SCAD failed to compile. Callers must
   // surface these: updateScene has already committed the new scad source by the
   // time this runs, so a failure here leaves the stored source and the rendered
   // mesh disagreeing - the body keeps its OLD geometry while the chat reports
   // the change as applied. This used to be a console.warn and nothing else.
-  const triggerScadAutoCompile = async (nodesToProcess: RawNode[]): Promise<string[]> => {
+  const triggerScadAutoCompile = async (nodesToProcess: RawNode[], epoch?: number): Promise<string[]> => {
     const scadNodes: RawNode[] = [];
     const collectScad = (list: RawNode[]) => {
       if (!Array.isArray(list)) return;
@@ -402,10 +588,12 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
     const failedNodes: string[] = [];
 
     for (const node of scadNodes) {
+      if (epoch !== undefined && !isCurrentEpoch(epoch)) return failedNodes;
       let compiled: { vertices: number[]; faces: number[]; renderVertices: number[] } | null = null;
       let lastErr: unknown = null;
 
       for (let attempt = 0; attempt < 3 && !compiled; attempt++) {
+        if (epoch !== undefined && !isCurrentEpoch(epoch)) return failedNodes;
         if (attempt > 0) await new Promise(r => setTimeout(r, 120));
         try {
           // scadNodes only ever collects a node that has one.
@@ -420,39 +608,62 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
         }
       }
 
+      if (epoch !== undefined && !isCurrentEpoch(epoch)) return failedNodes;
+
       if (compiled) {
         const storeNodes = useStore.getState().sceneGraph.nodes;
-        const targetStoreNode = storeNodes.find(sn => sn.id === node.id || sn.name === node.name || sn.name === node.id || sn.id === node.name);
-        // A raw node carrying no id of its own matches nothing in the store
-        // either way, so the empty string stands in for the absence.
+        const targetStoreNode = findStoreNodeRecursive(storeNodes, node);
         const targetId = targetStoreNode ? targetStoreNode.id : (node.id ?? '');
 
-        useStore.getState().updateNodeScad(targetId, node.scad!, compiled, true);
+        // skipRecompile = true (single recompile at end), skipHistory = true (avoid duplicate undo entry)
+        useStore.getState().updateNodeScad(targetId, node.scad!, compiled, true, true);
       } else {
         console.warn(`Failed to auto-compile SCAD for node ${node.id || node.name} after 3 attempts:`, lastErr);
         failedNodes.push(node.name || node.id || 'unnamed body');
       }
     }
 
-    useStore.getState().recompile(useStore.getState().sceneGraph);
+    if (epoch === undefined || isCurrentEpoch(epoch)) {
+      useStore.getState().recompile(useStore.getState().sceneGraph);
+    }
     return failedNodes;
   };
 
+  const applyDeclarativeOpsIfCurrent = async (
+    merged: SceneNode[],
+    opsMap: Map<string, PendingDeclarativeOps>,
+    epoch: number,
+  ): Promise<void> => {
+    if (opsMap.size === 0 || !isCurrentEpoch(epoch)) return;
+    try {
+      await applyDeclarativePreCsgFeatures(merged, opsMap);
+      if (!isCurrentEpoch(epoch)) return;
+      await applyDeclarativePostCsgFeatures(merged, opsMap);
+    } catch (err) {
+      console.warn('Failed to apply declarative features from copilot nodes:', err);
+    }
+  };
+
   const handlePhysicsDiagnostics = async () => {
-    setMode('explain');
-    setLoadingStatus('Analyzing physics scene & asking clarifying questions...');
-    const compactNodes = getSerializedNodesCompact();
+    if (inFlightRef.current || loading) return;
+    if (!hasKey()) return;
+    inFlightRef.current = true;
+    const { epoch, signal } = beginRequest();
+    try {
+      setMode('explain');
+      setLoadingStatus('Analyzing physics scene & asking clarifying questions...');
+      const compactNodes = getSerializedNodesCompact();
 
-    const userMsg: ChatMessage = {
-      id: makeId('user'),
-      role: 'user',
-      mode: 'explain',
-      content: '⚡ Perform Physics Diagnostics',
-      timestamp: getTimestamp()
-    };
-    setMessages(prev => [...prev, userMsg]);
+      const userMsg: ChatMessage = {
+        id: makeId('user'),
+        role: 'user',
+        mode: 'explain',
+        content: '⚡ Perform Physics Diagnostics',
+        timestamp: getTimestamp()
+      };
+      setMessages(prev => [...prev, userMsg]);
 
-    const systemInstructions = `You are "PhysBox: Mesh Copilot", an expert systems engineer and 3D physics analyst.
+      const systemInstructions = `You are "PhysBox: Mesh Copilot", an expert systems engineer and 3D physics analyst.
 Analyze the active visual physics scene graph schematic in Markdown.
 
 Your report must include:
@@ -466,45 +677,56 @@ CRITICAL: Do NOT output "proposedModifications" or scene "nodes" yet. The user w
 Current scene graph topology:
 Nodes: ${JSON.stringify(compactNodes)}${getModeHistoryStr('explain')}${getExistingCardContextStr()}`;
 
-    const response = await callGemini(systemInstructions, `Perform a full system diagnostic of the active physics scene.`);
-    setLoading(false);
-    if (response) {
-      const { markdown, questions, noteCardMarkdown } = parseAIResponse(response.text);
-      const assistantMsg: ChatMessage = {
-        id: makeId('ast'),
-        role: 'assistant',
-        mode: 'explain',
-        content: markdown,
-        questions: questions.length > 0 ? questions : [
-          { id: 'q1', question: 'What is the primary function or load expectation of this object?' }
-        ],
-        userAnswers: {},
-        userAnswersSubmitted: false,
-        proposedModifications: [],
-        nodes: null,
-        isImplemented: false,
-        timestamp: getTimestamp()
-      };
-      setMessages(prev => [...prev, assistantMsg]);
-      handleNotecardUpdate('explain', 'Physics Diagnostics', markdown, noteCardMarkdown);
+      const response = await callGemini(systemInstructions, `Perform a full system diagnostic of the active physics scene.`, undefined, signal);
+      if (!isCurrentEpoch(epoch)) return;
+      if (response) {
+        const { markdown, questions, noteCardMarkdown } = parseAIResponse(response.text);
+        const assistantMsg: ChatMessage = {
+          id: makeId('ast'),
+          role: 'assistant',
+          mode: 'explain',
+          content: markdown,
+          questions: questions.length > 0 ? questions : [
+            { id: 'q1', question: 'What is the primary function or load expectation of this object?' }
+          ],
+          userAnswers: {},
+          userAnswersSubmitted: false,
+          proposedModifications: [],
+          nodes: null,
+          isImplemented: false,
+          timestamp: getTimestamp()
+        };
+        setMessages(prev => [...prev, assistantMsg]);
+        handleNotecardUpdate('explain', 'Physics Diagnostics', markdown, noteCardMarkdown);
+      }
+    } finally {
+      if (isCurrentEpoch(epoch)) {
+        inFlightRef.current = false;
+        setLoading(false);
+      }
     }
   };
 
   const handle3DPrintDiagnostics = async () => {
-    setMode('explain');
-    setLoadingStatus('Analyzing 3D printability & asking clarifying questions...');
-    const compactNodes = getSerializedNodesCompact();
+    if (inFlightRef.current || loading) return;
+    if (!hasKey()) return;
+    inFlightRef.current = true;
+    const { epoch, signal } = beginRequest();
+    try {
+      setMode('explain');
+      setLoadingStatus('Analyzing 3D printability & asking clarifying questions...');
+      const compactNodes = getSerializedNodesCompact();
 
-    const userMsg: ChatMessage = {
-      id: makeId('user'),
-      role: 'user',
-      mode: 'explain',
-      content: '🖨️ Perform 3D Printing Diagnostics',
-      timestamp: getTimestamp()
-    };
-    setMessages(prev => [...prev, userMsg]);
+      const userMsg: ChatMessage = {
+        id: makeId('user'),
+        role: 'user',
+        mode: 'explain',
+        content: '🖨️ Perform 3D Printing Diagnostics',
+        timestamp: getTimestamp()
+      };
+      setMessages(prev => [...prev, userMsg]);
 
-    const systemInstructions = `You are "PhysBox: 3D Printing Specialist", an expert in additive manufacturing and physical structural mechanics.
+      const systemInstructions = `You are "PhysBox: 3D Printing Specialist", an expert in additive manufacturing and physical structural mechanics.
 Analyze the active 3D scene graph topology for real-world 3D printing feasibility, physical weak points, and potential defects in Markdown.
 
 Your report must analyze:
@@ -518,183 +740,233 @@ CRITICAL: Do NOT output "proposedModifications" or scene "nodes" yet. The user w
 Current scene graph topology:
 Nodes: ${JSON.stringify(compactNodes)}${getModeHistoryStr('explain')}${getExistingCardContextStr()}`;
 
-    const response = await callGemini(systemInstructions, `Perform a full 3D printing physical defect diagnostic of the active scene graph topology.`);
-    setLoading(false);
-    if (response) {
-      const { markdown, questions, noteCardMarkdown } = parseAIResponse(response.text);
-      const assistantMsg: ChatMessage = {
-        id: makeId('ast'),
-        role: 'assistant',
-        mode: 'explain',
-        content: markdown,
-        questions: questions.length > 0 ? questions : [
-          { id: 'q1', question: 'What is the primary function of this 3D model?' }
-        ],
-        userAnswers: {},
-        userAnswersSubmitted: false,
-        proposedModifications: [],
-        nodes: null,
-        isImplemented: false,
-        timestamp: getTimestamp()
-      };
-      setMessages(prev => [...prev, assistantMsg]);
-      handleNotecardUpdate('explain', '3D Printing Diagnostics', markdown, noteCardMarkdown);
+      const response = await callGemini(systemInstructions, `Perform a full 3D printing physical defect diagnostic of the active scene graph topology.`, undefined, signal);
+      if (!isCurrentEpoch(epoch)) return;
+      if (response) {
+        const { markdown, questions, noteCardMarkdown } = parseAIResponse(response.text);
+        const assistantMsg: ChatMessage = {
+          id: makeId('ast'),
+          role: 'assistant',
+          mode: 'explain',
+          content: markdown,
+          questions: questions.length > 0 ? questions : [
+            { id: 'q1', question: 'What is the primary function of this 3D model?' }
+          ],
+          userAnswers: {},
+          userAnswersSubmitted: false,
+          proposedModifications: [],
+          nodes: null,
+          isImplemented: false,
+          timestamp: getTimestamp()
+        };
+        setMessages(prev => [...prev, assistantMsg]);
+        handleNotecardUpdate('explain', '3D Printing Diagnostics', markdown, noteCardMarkdown);
+      }
+    } finally {
+      if (isCurrentEpoch(epoch)) {
+        inFlightRef.current = false;
+        setLoading(false);
+      }
     }
   };
 
   const handleSendQuestionAnswers = async (msgId: string) => {
+    if (inFlightRef.current || loading) return;
     const targetMsg = messages.find(m => m.id === msgId);
     if (!targetMsg) return;
+    if (!hasKey()) return;
 
-    setError('');
-    setLoadingStatus('Processing functional answers & generating proposed modifications...');
+    const targetMode: 'explain' | 'generate' | 'mutate' =
+      targetMsg.mode === 'implement' ? 'mutate' : (targetMsg.mode ?? mode);
 
-    setMessages(prev => prev.map(m => m.id === msgId ? { ...m, userAnswersSubmitted: true } : m));
+    inFlightRef.current = true;
+    const { epoch, signal } = beginRequest();
+    try {
+      setError('');
+      setLoadingStatus('Processing functional answers & generating proposed modifications...');
 
-    const userAnswersSummary = targetMsg.userAnswers ? Object.entries(targetMsg.userAnswers)
-      .map(([qId, ans]) => {
-        const q = targetMsg.questions?.find(item => item.id === qId);
-        return `- Question: "${q?.question}" -> User Answer: "${ans}"`;
-      })
-      .filter(line => !line.endsWith('""'))
-      .join('\n') : '';
+      const userAnswersSummary = targetMsg.userAnswers ? Object.entries(targetMsg.userAnswers)
+        .map(([qId, ans]) => {
+          const q = targetMsg.questions?.find(item => item.id === qId);
+          return `- Question: "${q?.question}" -> User Answer: "${ans}"`;
+        })
+        .filter(line => !line.endsWith('""'))
+        .join('\n') : '';
 
-    const userMsg: ChatMessage = {
-      id: makeId('user_ans'),
-      role: 'user',
-      content: `📝 Functional Intent Answers:\n${userAnswersSummary || 'General functional enhancement requested.'}`,
-      timestamp: getTimestamp()
-    };
-    setMessages(prev => [...prev, userMsg]);
+      const userMsg: ChatMessage = {
+        id: makeId('user_ans'),
+        role: 'user',
+        mode: targetMode,
+        content: `📝 Functional Intent Answers:\n${userAnswersSummary || 'General functional enhancement requested.'}`,
+        timestamp: getTimestamp()
+      };
+      setMessages(prev => [...prev, userMsg]);
 
-    const compactNodes = getSerializedNodesCompact();
+      const compactNodes = getSerializedNodesCompact();
 
-    const promptWithContext = `The user has answered your clarifying questions regarding object function and loading intent.
+      const promptWithContext = `The user has answered your clarifying questions regarding object function and loading intent.
 
 USER FUNCTIONAL ANSWERS & CLARIFICATIONS:
 ${userAnswersSummary || 'General functional enhancement requested.'}
 
 CURRENT SCENEGRAPH DEFINITION:
-${JSON.stringify(compactNodes)}${getModeHistoryStr('explain')}${getExistingCardContextStr()}
+${JSON.stringify(compactNodes)}${getModeHistoryStr(targetMode)}${getExistingCardContextStr()}
 
 Based on these functional clarifications and your physical analysis:
 1. Provide a clear Markdown summary of recommended physical & structural modifications.
 2. At the bottom, include a "proposedModifications" JSON block inside \`\`\`json \`\`\` code fences.`;
 
-    const response = await callGemini(SYSTEM_INSTRUCTIONS, promptWithContext);
-    setLoading(false);
+      const response = await callGemini(SYSTEM_INSTRUCTIONS, promptWithContext, undefined, signal);
+      if (!isCurrentEpoch(epoch)) return;
 
-    if (response) {
-      const { markdown, proposedModifications, noteCardMarkdown } = parseAIResponse(response.text);
-      const assistantMsg: ChatMessage = {
-        id: makeId('ast_props'),
-        role: 'assistant',
-        mode: 'explain',
-        content: markdown || '### 🛠️ Proposed Physical Modifications\nSelect the proposed modifications you would like to apply to the active 3D schematic:',
-        questions: [],
-        userAnswersSubmitted: true,
-        proposedModifications: proposedModifications.length > 0 ? proposedModifications : [
-          { id: 'm1', text: 'Increase wall thickness to 3.0mm', selected: true },
-          { id: 'm2', text: 'Add M3 heat-set insert pilot holes', selected: true }
-        ],
-        nodes: null,
-        isImplemented: false,
-        timestamp: getTimestamp()
-      };
-      setMessages(prev => [...prev, assistantMsg]);
-      handleNotecardUpdate('explain', 'Functional Intent Answers', markdown, noteCardMarkdown);
+      if (response) {
+        const { markdown, proposedModifications, noteCardMarkdown } = parseAIResponse(response.text, {
+          extractBulletModifications: true,
+        });
+        const assistantMsg: ChatMessage = {
+          id: makeId('ast_props'),
+          role: 'assistant',
+          mode: targetMode,
+          content: markdown || '### 🛠️ Proposed Physical Modifications\nSelect the proposed modifications you would like to apply to the active 3D schematic:',
+          questions: [],
+          userAnswersSubmitted: true,
+          proposedModifications: proposedModifications.length > 0 ? proposedModifications : [
+            { id: 'm1', text: 'Increase wall thickness to 3.0mm', selected: true },
+            { id: 'm2', text: 'Add M3 heat-set insert pilot holes', selected: true }
+          ],
+          nodes: null,
+          isImplemented: false,
+          timestamp: getTimestamp()
+        };
+        setMessages(prev => [
+          ...prev.map(m => m.id === msgId ? { ...m, userAnswersSubmitted: true } : m),
+          assistantMsg,
+        ]);
+        handleNotecardUpdate(targetMode, 'Functional Intent Answers', markdown, noteCardMarkdown);
+      }
+    } finally {
+      if (isCurrentEpoch(epoch)) {
+        inFlightRef.current = false;
+        setLoading(false);
+      }
     }
   };
 
-  const handleGenerate = async () => {
-    if (!prompt.trim() && !att.images.length) {
+  const handleGenerate = async (overridePrompt?: string) => {
+    const isRetry = overridePrompt !== undefined;
+    const rawPrompt = isRetry ? overridePrompt : prompt;
+    const hasAttachedImages = !isRetry && att.images.length > 0;
+    if (!rawPrompt.trim() && !hasAttachedImages) {
       setError('Please enter a description of the scene you want to generate, or attach a picture of it.');
       return;
     }
+    if (inFlightRef.current || loading) return;
     if (!hasKey()) return;
-    const images = att.take();
-    const thumbs = await Promise.all(images.map((im) => llmImageThumb(im)));
-    const currentPrompt = prompt.trim() || 'Build the part shown in the picture.';
-    setPrompt('');
-    setMode('generate');
-    setLoadingStatus('Generating 3D scene schematic...');
 
-    const userMsg: ChatMessage = {
-      id: makeId('user'),
-      role: 'user',
-      mode: 'generate',
-      content: `🪄 Generate Scene: ${currentPrompt}`,
-      ...(thumbs.length ? { images: thumbs } : {}),
-      timestamp: getTimestamp()
-    };
-    setMessages(prev => [...prev, userMsg]);
+    inFlightRef.current = true;
+    const { epoch, signal } = beginRequest();
+    try {
+      const images = isRetry ? [] : att.take();
+      const thumbs = await Promise.all(images.map((im) => llmImageThumb(im)));
+      if (!isCurrentEpoch(epoch)) return;
+      const currentPrompt = rawPrompt.trim() || 'Build the part shown in the picture.';
+      if (!isRetry) setPrompt('');
+      setMode('generate');
+      setLoadingStatus('Generating 3D scene schematic...');
 
-    if (images.length && refineAgainstPicture) {
-      await runPictureLoop(currentPrompt, images, thumbs[0]);
-      return;
-    }
-
-    const systemPromptWithQuestions = `${SYSTEM_INSTRUCTIONS}${getModeHistoryStr('generate')}${getExistingCardContextStr()}\n\nIn addition to the "nodes" JSON block, if there are optional design choices or follow-up options for the user, include a "questions" array JSON block at the bottom with 1-3 questions having 2-4 options each.`;
-
-    const response = await callGemini(systemPromptWithQuestions, currentPrompt, images);
-    setLoading(false);
-    if (response) {
-      const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response.text);
-      let applied = false;
-      let scadFailures: string[] = [];
-      let mergedNodes: RawNode[] | null = null;
-      if (nodes && Array.isArray(nodes)) {
-        const merged = mergeAndNormalizeNodes(nodes, sceneGraph.nodes, true);
-        if (merged.length > 0) {
-          updateScene({ ...useStore.getState().sceneGraph, nodes: merged });
-          scadFailures = await triggerScadAutoCompile(merged);
-          applied = true;
-          mergedNodes = merged;
-        }
-      }
-
-      const assistantMsg: ChatMessage = {
-        id: makeId('ast'),
-        role: 'assistant',
+      const userMsg: ChatMessage = {
+        id: makeId('user'),
+        role: 'user',
         mode: 'generate',
-        // Only claim success when a scene actually reached the store. The
-        // fallback used to assert 'Scene Generated Successfully!' regardless,
-        // which is how a request that produced no usable nodes still read as a
-        // win.
-        content: markdown || (applied
-          ? '### ✨ Scene Generated Successfully!\nI have created your 3D physics schematic.'
-          : '### ⚠️ Nothing was applied\nThe response did not include a scene graph.'),
-        questions,
-        proposedModifications,
-        userAnswers: {},
-        nodes,
-        isImplemented: applied,
-        hasError: !applied || scadFailures.length > 0,
-        errorMsg: !applied
-          ? describeApplyFailure(response.truncated)
-          : (scadFailures.length > 0 ? describeScadFailure(scadFailures) : undefined),
+        content: `🪄 Generate Scene: ${currentPrompt}`,
+        ...(thumbs.length ? { images: thumbs } : {}),
         timestamp: getTimestamp()
       };
-      setMessages(prev => [...prev, assistantMsg]);
-      handleNotecardUpdate('generate', currentPrompt, markdown, noteCardMarkdown, mergedNodes || nodes || undefined);
+      setMessages(prev => [...prev, userMsg]);
+
+      if (images.length && refineAgainstPicture) {
+        await runPictureLoop(currentPrompt, images, thumbs[0], epoch);
+        return;
+      }
+
+      const systemPromptWithQuestions = `${SYSTEM_INSTRUCTIONS}${getModeHistoryStr('generate')}${getExistingCardContextStr()}\n\nIn addition to the "nodes" JSON block, if there are optional design choices or follow-up options for the user, include a "questions" array JSON block at the bottom with 1-3 questions having 2-4 options each.`;
+
+      const response = await callGemini(systemPromptWithQuestions, currentPrompt, images, signal);
+      if (!isCurrentEpoch(epoch)) return;
+      if (response) {
+        const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response.text);
+        let applied = false;
+        let scadFailures: string[] = [];
+        let mergedNodes: RawNode[] | null = null;
+        if (nodes && Array.isArray(nodes)) {
+          const latestNodes = useStore.getState().sceneGraph.nodes;
+          const rawMerged = mergeAndNormalizeNodes(nodes, latestNodes, true);
+          if (rawMerged.length > 0) {
+            const { nodes: prepared, opsMap } = prepareDeclarativeNodes(rawMerged);
+            const hasScad = hasScadNodes(prepared);
+            // Full-scene generate writes a clean sceneGraph so stale castPrep / referenceImages don't leak.
+            updateScene({ nodes: prepared }, hasScad);
+            scadFailures = await triggerScadAutoCompile(prepared, epoch);
+            if (!isCurrentEpoch(epoch)) return;
+            await applyDeclarativeOpsIfCurrent(prepared, opsMap, epoch);
+            if (!isCurrentEpoch(epoch)) return;
+            applied = true;
+            mergedNodes = prepared;
+          }
+        }
+
+        const hasError = !applied || scadFailures.length > 0;
+        const assistantMsg: ChatMessage = {
+          id: makeId('ast'),
+          role: 'assistant',
+          mode: 'generate',
+          // Only claim success when a scene actually reached the store. The
+          // fallback used to assert 'Scene Generated Successfully!' regardless,
+          // which is how a request that produced no usable nodes still read as a
+          // win.
+          content: markdown || (applied
+            ? '### ✨ Scene Generated Successfully!\nI have created your 3D physics schematic.'
+            : '### ⚠️ Nothing was applied\nThe response did not include a scene graph.'),
+          questions,
+          proposedModifications,
+          userAnswers: {},
+          nodes,
+          isImplemented: applied,
+          hasError,
+          errorMsg: !applied
+            ? describeApplyFailure(response.truncated)
+            : (scadFailures.length > 0 ? describeScadFailure(scadFailures) : undefined),
+          ...(hasError ? { retryPrompt: currentPrompt, retryMode: 'generate' as const } : {}),
+          timestamp: getTimestamp()
+        };
+        setMessages(prev => [...prev, assistantMsg]);
+        handleNotecardUpdate('generate', currentPrompt, markdown, noteCardMarkdown, mergedNodes || nodes || undefined);
+      }
+    } finally {
+      if (isCurrentEpoch(epoch)) {
+        inFlightRef.current = false;
+        setLoading(false);
+      }
     }
   };
 
   /** The copilot needs its model's key before anything leaves the prompt box. */
   const hasKey = (): boolean => {
-    const found = keyFor(selectedModel || localStorage.getItem('gemini_model') || DEFAULT_MODEL, geminiApiKey, claudeApiKey);
+    const found = keyFor(selectedModel || readStorageString(MODEL_KEY, DEFAULT_MODEL) || DEFAULT_MODEL, geminiApiKey, claudeApiKey);
     if ('missing' in found) { setError(found.missing); return false; }
     return true;
   };
 
-  const runPictureLoop = async (request: string, images: LlmImage[], photoThumb: string) => {
+  const runPictureLoop = async (request: string, images: LlmImage[], photoThumb: string, epoch: number) => {
     setError('');
     setLoading(true);
     setLoadingStatus('Building from the picture…');
     try {
       const report = await pictureLoop.run(request, images);
+      if (!isCurrentEpoch(epoch)) return;
       const kept = report.rounds.find((r) => r.round === report.bestRound && !r.rolledBack && !r.failed);
       const partThumb = kept?.render ? await llmImageThumb(kept.render, 384) : '';
+      if (!isCurrentEpoch(epoch)) return;
       const built = report.bestRound > 0 || !!report.unchecked;
       setMessages(prev => [...prev, {
         id: makeId('ast'),
@@ -715,101 +987,132 @@ Based on these functional clarifications and your physical analysis:
         handleNotecardUpdate('generate', request, report.builderNotes, report.noteCardMarkdown ?? null, useStore.getState().sceneGraph.nodes as RawNode[]);
       }
     } finally {
-      setLoading(false);
+      if (isCurrentEpoch(epoch)) {
+        inFlightRef.current = false;
+        setLoading(false);
+      }
     }
   };
 
-  const handleMutate = async () => {
-    if (!prompt.trim() && !att.images.length) {
+  const handleMutate = async (overridePrompt?: string) => {
+    const isRetry = overridePrompt !== undefined;
+    const rawPrompt = isRetry ? overridePrompt : prompt;
+    const hasAttachedImages = !isRetry && att.images.length > 0;
+    if (!rawPrompt.trim() && !hasAttachedImages) {
       setError('Please enter what changes you want to apply to the scene.');
       return;
     }
+    if (inFlightRef.current || loading) return;
     if (!hasKey()) return;
-    const images = att.take();
-    const thumbs = await Promise.all(images.map((im) => llmImageThumb(im)));
-    const currentPrompt = prompt.trim() || 'Make the scene match the picture.';
-    setPrompt('');
-    setMode('mutate');
-    setLoadingStatus('Mutating active 3D scene...');
 
-    const userMsg: ChatMessage = {
-      id: makeId('user'),
-      role: 'user',
-      mode: 'mutate',
-      content: `🛠️ Mutate Scene: ${currentPrompt}`,
-      ...(thumbs.length ? { images: thumbs } : {}),
-      timestamp: getTimestamp()
-    };
-    setMessages(prev => [...prev, userMsg]);
+    inFlightRef.current = true;
+    const { epoch, signal } = beginRequest();
+    try {
+      const images = isRetry ? [] : att.take();
+      const thumbs = await Promise.all(images.map((im) => llmImageThumb(im)));
+      if (!isCurrentEpoch(epoch)) return;
+      const currentPrompt = rawPrompt.trim() || 'Make the scene match the picture.';
+      if (!isRetry) setPrompt('');
+      setMode('mutate');
+      setLoadingStatus('Mutating active 3D scene...');
 
-    const compactNodes = getSerializedNodesCompact();
-    const promptWithContext = `The user wants to modify the active physics scene graph.\n\nActive SceneGraph Nodes:\n${JSON.stringify(compactNodes)}${getModeHistoryStr('mutate')}${getExistingCardContextStr()}\n\nUser Request: ${currentPrompt}\n\nIf there are follow-up clarifying choices, append a "questions" JSON block at the bottom. Return the mutated "nodes" array in \`\`\`json \`\`\` code fences.`;
-
-    const response = await callGemini(SYSTEM_INSTRUCTIONS, promptWithContext, images);
-    setLoading(false);
-    if (response) {
-      const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response.text);
-      let applied = false;
-      let scadFailures: string[] = [];
-      let mergedNodes: RawNode[] | null = null;
-      if (nodes && Array.isArray(nodes)) {
-        const merged = mergeAndNormalizeNodes(nodes, sceneGraph.nodes, false);
-        if (merged.length > 0) {
-          updateScene({ ...useStore.getState().sceneGraph, nodes: merged });
-          scadFailures = await triggerScadAutoCompile(merged);
-          applied = true;
-          mergedNodes = merged;
-        }
-      }
-
-      const assistantMsg: ChatMessage = {
-        id: makeId('ast'),
-        role: 'assistant',
+      const userMsg: ChatMessage = {
+        id: makeId('user'),
+        role: 'user',
         mode: 'mutate',
-        content: markdown || (applied
-          ? '### 🛠️ Scene Mutated Successfully!\nYour requested modifications have been merged into the active 3D physics schematic.'
-          : '### ⚠️ Nothing was applied\nThe response did not include a mutated scene graph.'),
-        questions,
-        proposedModifications,
-        userAnswers: {},
-        nodes,
-        isImplemented: applied,
-        hasError: !applied || scadFailures.length > 0,
-        errorMsg: !applied
-          ? describeApplyFailure(response.truncated)
-          : (scadFailures.length > 0 ? describeScadFailure(scadFailures) : undefined),
+        content: `🛠️ Mutate Scene: ${currentPrompt}`,
+        ...(thumbs.length ? { images: thumbs } : {}),
         timestamp: getTimestamp()
       };
-      setMessages(prev => [...prev, assistantMsg]);
-      handleNotecardUpdate('mutate', currentPrompt, markdown, noteCardMarkdown, mergedNodes || nodes || undefined);
+      setMessages(prev => [...prev, userMsg]);
+
+      const compactNodes = getSerializedNodesCompact();
+      const promptWithContext = `The user wants to modify the active physics scene graph.\n\nActive SceneGraph Nodes:\n${JSON.stringify(compactNodes)}${getModeHistoryStr('mutate')}${getExistingCardContextStr()}\n\nUser Request: ${currentPrompt}\n\nIf there are follow-up clarifying choices, append a "questions" JSON block at the bottom. Return the mutated "nodes" array in \`\`\`json \`\`\` code fences.`;
+
+      const response = await callGemini(SYSTEM_INSTRUCTIONS, promptWithContext, images, signal);
+      if (!isCurrentEpoch(epoch)) return;
+      if (response) {
+        const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response.text);
+        let applied = false;
+        let scadFailures: string[] = [];
+        let mergedNodes: RawNode[] | null = null;
+        if (nodes && Array.isArray(nodes)) {
+          const latestNodes = useStore.getState().sceneGraph.nodes;
+          const rawMerged = mergeAndNormalizeNodes(nodes, latestNodes, false);
+          if (rawMerged.length > 0) {
+            const { nodes: prepared, opsMap } = prepareDeclarativeNodes(rawMerged);
+            const hasScad = hasScadNodes(prepared);
+            updateScene({ ...useStore.getState().sceneGraph, nodes: prepared }, hasScad);
+            scadFailures = await triggerScadAutoCompile(prepared, epoch);
+            if (!isCurrentEpoch(epoch)) return;
+            await applyDeclarativeOpsIfCurrent(prepared, opsMap, epoch);
+            if (!isCurrentEpoch(epoch)) return;
+            applied = true;
+            mergedNodes = prepared;
+          }
+        }
+
+        const hasError = !applied || scadFailures.length > 0;
+        const assistantMsg: ChatMessage = {
+          id: makeId('ast'),
+          role: 'assistant',
+          mode: 'mutate',
+          content: markdown || (applied
+            ? '### 🛠️ Scene Mutated Successfully!\nYour requested modifications have been merged into the active 3D physics schematic.'
+            : '### ⚠️ Nothing was applied\nThe response did not include a mutated scene graph.'),
+          questions,
+          proposedModifications,
+          userAnswers: {},
+          nodes,
+          isImplemented: applied,
+          hasError,
+          errorMsg: !applied
+            ? describeApplyFailure(response.truncated)
+            : (scadFailures.length > 0 ? describeScadFailure(scadFailures) : undefined),
+          ...(hasError ? { retryPrompt: currentPrompt, retryMode: 'mutate' as const } : {}),
+          timestamp: getTimestamp()
+        };
+        setMessages(prev => [...prev, assistantMsg]);
+        handleNotecardUpdate('mutate', currentPrompt, markdown, noteCardMarkdown, mergedNodes || nodes || undefined);
+      }
+    } finally {
+      if (isCurrentEpoch(epoch)) {
+        inFlightRef.current = false;
+        setLoading(false);
+      }
     }
   };
 
   const handleImplementMessage = async (msgId: string) => {
+    if (inFlightRef.current || loading) return;
     const targetMsg = messages.find(m => m.id === msgId);
     if (!targetMsg) return;
+    if (!hasKey()) return;
 
-    setError('');
-    setLoadingStatus('Generating updated 3D scene from selected proposed modifications...');
+    inFlightRef.current = true;
+    const { epoch, signal } = beginRequest();
+    try {
+      setError('');
+      setLoadingStatus('Generating updated 3D scene from selected proposed modifications...');
 
-    const userAnswersSummary = targetMsg.userAnswers ? Object.entries(targetMsg.userAnswers)
-      .map(([qId, ans]) => {
-        const q = targetMsg.questions?.find(item => item.id === qId);
-        return `- Question: "${q?.question}" -> User Answer: "${ans}"`;
-      })
-      .filter(line => !line.endsWith('""'))
-      .join('\n') : '';
+      const userAnswersSummary = targetMsg.userAnswers ? Object.entries(targetMsg.userAnswers)
+        .map(([qId, ans]) => {
+          const q = targetMsg.questions?.find(item => item.id === qId);
+          return `- Question: "${q?.question}" -> User Answer: "${ans}"`;
+        })
+        .filter(line => !line.endsWith('""'))
+        .join('\n') : '';
 
-    const selectedModsSummary = targetMsg.proposedModifications
-      ? targetMsg.proposedModifications
-          .filter(m => m.selected)
-          .map(m => `- ${m.text}`)
-          .join('\n')
-      : '';
+      const selectedModsSummary = targetMsg.proposedModifications
+        ? targetMsg.proposedModifications
+            .filter(m => m.selected)
+            .map(m => `- ${m.text}`)
+            .join('\n')
+        : '';
 
-    const compactNodes = getSerializedNodesCompact();
+      const compactNodes = getSerializedNodesCompact();
 
-    const promptWithContext = `You are an automated 3D scene graph mutator.
+      const promptWithContext = `You are an automated 3D scene graph mutator.
 Apply the user's selected proposed physical modifications and functional answers directly into the active scene graph.
 
 USER CLARIFICATIONS & FUNCTIONAL INTENT:
@@ -826,127 +1129,180 @@ CRITICAL INSTRUCTIONS:
 2. MANDATORY: Output ALL top-level scene nodes (preserving all existing objects such as enclosure_box and enclosure_lid) in the "nodes" array inside \`\`\`json \`\`\` code fences at the bottom.
 3. For any node with OpenSCAD script, ensure the valid "scad" script string is included.`;
 
-    const response = await callGemini(SYSTEM_INSTRUCTIONS, promptWithContext);
-    setLoading(false);
+      const response = await callGemini(SYSTEM_INSTRUCTIONS, promptWithContext, undefined, signal);
+      if (!isCurrentEpoch(epoch)) return;
 
-    if (response) {
-      const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response.text);
-      if (nodes && Array.isArray(nodes) && nodes.length > 0) {
-        const merged = mergeAndNormalizeNodes(nodes, sceneGraph.nodes, false);
-        if (merged.length > 0) {
-          updateScene({ ...useStore.getState().sceneGraph, nodes: merged });
-          const scadFailures = await triggerScadAutoCompile(merged);
-          setMessages(prev => prev.map(m => m.id === msgId
-            ? { ...m, isImplemented: true, hasError: scadFailures.length > 0, errorMsg: scadFailures.length > 0 ? describeScadFailure(scadFailures) : undefined }
-            : m));
+      if (response) {
+        const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response.text);
+        if (nodes && Array.isArray(nodes) && nodes.length > 0) {
+          const latestNodes = useStore.getState().sceneGraph.nodes;
+          const rawMerged = mergeAndNormalizeNodes(nodes, latestNodes, false);
+          if (rawMerged.length > 0) {
+            const { nodes: prepared, opsMap } = prepareDeclarativeNodes(rawMerged);
+            const hasScad = hasScadNodes(prepared);
+            updateScene({ ...useStore.getState().sceneGraph, nodes: prepared }, hasScad);
+            const scadFailures = await triggerScadAutoCompile(prepared, epoch);
+            if (!isCurrentEpoch(epoch)) return;
+            await applyDeclarativeOpsIfCurrent(prepared, opsMap, epoch);
+            if (!isCurrentEpoch(epoch)) return;
 
-          const summaryHeader = '### ✨ Selected Improvements Applied Successfully!\n\n';
-          const summaryContent = markdown
-            ? `${summaryHeader}${markdown}`
-            : `${summaryHeader}- Applied physical design modifications, 3D printability updates, and parameter changes to the active scene graph.`;
+            setMessages(prev => prev.map(m => m.id === msgId
+              ? { ...m, isImplemented: true, hasError: scadFailures.length > 0, errorMsg: scadFailures.length > 0 ? describeScadFailure(scadFailures) : undefined }
+              : m));
 
-          const confirmationMsg: ChatMessage = {
-            id: makeId('ast_conf'),
-            role: 'assistant',
-            mode: 'implement',
-            content: summaryContent,
-            questions,
-            proposedModifications,
-            nodes: merged,
-            isImplemented: true,
-            hasError: scadFailures.length > 0,
-            errorMsg: scadFailures.length > 0 ? describeScadFailure(scadFailures) : undefined,
-            timestamp: getTimestamp()
-          };
-          setMessages(prev => [...prev, confirmationMsg]);
-          handleNotecardUpdate('mutate', 'Implemented Improvements', markdown, noteCardMarkdown, merged);
-          return;
+            const summaryHeader = '### ✨ Selected Improvements Applied Successfully!\n\n';
+            const summaryContent = markdown
+              ? `${summaryHeader}${markdown}`
+              : `${summaryHeader}- Applied physical design modifications, 3D printability updates, and parameter changes to the active scene graph.`;
+
+            const confirmationMsg: ChatMessage = {
+              id: makeId('ast_conf'),
+              role: 'assistant',
+              mode: 'implement',
+              content: summaryContent,
+              questions,
+              proposedModifications,
+              nodes: prepared,
+              isImplemented: true,
+              hasError: scadFailures.length > 0,
+              errorMsg: scadFailures.length > 0 ? describeScadFailure(scadFailures) : undefined,
+              timestamp: getTimestamp()
+            };
+            setMessages(prev => [...prev, confirmationMsg]);
+            handleNotecardUpdate('mutate', 'Implemented Improvements', markdown, noteCardMarkdown, prepared);
+            return;
+          }
         }
+        setMessages(prev => prev.map(m => m.id === msgId ? { ...m, hasError: true, errorMsg: describeApplyFailure(response.truncated) } : m));
       }
-      setMessages(prev => prev.map(m => m.id === msgId ? { ...m, hasError: true, errorMsg: describeApplyFailure(response.truncated) } : m));
+    } finally {
+      if (isCurrentEpoch(epoch)) {
+        inFlightRef.current = false;
+        setLoading(false);
+      }
     }
   };
 
-  const handleSendFollowup = async () => {
-    if ((!followupInput.trim() && !followAtt.images.length) || loading) return;
+  const handleSendFollowup = async (overrideInput?: string) => {
+    const isRetry = overrideInput !== undefined;
+    const rawInput = isRetry ? overrideInput : followupInput;
+    const hasAttachedImages = !isRetry && followAtt.images.length > 0;
+    if ((!rawInput.trim() && !hasAttachedImages) || inFlightRef.current || loading) return;
     if (!hasKey()) return;
-    // A picture sent from this box in Generate, with checking on, is the same
-    // request as one sent from the box above.
-    if (mode === 'generate' && followAtt.images.length && refineAgainstPicture) {
-      const loopImages = followAtt.take();
-      const thumbs = await Promise.all(loopImages.map((im) => llmImageThumb(im)));
-      const request = followupInput.trim() || 'Build the part shown in the picture.';
-      setFollowupInput('');
-      setMessages(prev => [...prev, { id: makeId('user'), role: 'user', mode: 'generate', content: `🪄 Generate Scene: ${request}`, images: thumbs, timestamp: getTimestamp() }]);
-      await runPictureLoop(request, loopImages, thumbs[0]);
-      return;
-    }
-    const images = followAtt.take();
-    const thumbs = await Promise.all(images.map((im) => llmImageThumb(im)));
-    const currentInput = followupInput.trim() || 'Here is a picture.';
-    setFollowupInput('');
-    setLoadingStatus('Processing follow-up request...');
 
-    const userMsg: ChatMessage = {
-      id: makeId('user'),
-      role: 'user',
-      content: currentInput,
-      ...(thumbs.length ? { images: thumbs } : {}),
-      timestamp: getTimestamp()
-    };
-    setMessages(prev => [...prev, userMsg]);
+    const activeMode = mode;
+    inFlightRef.current = true;
+    const { epoch, signal } = beginRequest();
+    try {
+      // A picture sent from this box in Generate, with checking on, is the same
+      // request as one sent from the box above.
+      if (activeMode === 'generate' && hasAttachedImages && refineAgainstPicture) {
+        const loopImages = followAtt.take();
+        const thumbs = await Promise.all(loopImages.map((im) => llmImageThumb(im)));
+        if (!isCurrentEpoch(epoch)) return;
+        const request = rawInput.trim() || 'Build the part shown in the picture.';
+        setFollowupInput('');
+        setMessages(prev => [...prev, { id: makeId('user'), role: 'user', mode: 'generate', content: `🪄 Generate Scene: ${request}`, images: thumbs, timestamp: getTimestamp() }]);
+        await runPictureLoop(request, loopImages, thumbs[0], epoch);
+        return;
+      }
+      const images = isRetry ? [] : followAtt.take();
+      const thumbs = await Promise.all(images.map((im) => llmImageThumb(im)));
+      if (!isCurrentEpoch(epoch)) return;
+      const currentInput = rawInput.trim() || 'Here is a picture.';
+      if (!isRetry) setFollowupInput('');
+      setLoadingStatus('Processing follow-up request...');
 
-    const compactNodes = getSerializedNodesCompact();
-    const promptWithContext = `The user is having an open-ended copilot conversation to modify or analyze the active 3D scene graph.
+      const userMsg: ChatMessage = {
+        id: makeId('user'),
+        role: 'user',
+        mode: activeMode,
+        content: currentInput,
+        ...(thumbs.length ? { images: thumbs } : {}),
+        timestamp: getTimestamp()
+      };
+      setMessages(prev => [...prev, userMsg]);
+
+      const compactNodes = getSerializedNodesCompact();
+      const promptWithContext = `The user is having an open-ended copilot conversation to modify or analyze the active 3D scene graph.
 
 ACTIVE SCENEGRAPH NODES:
-${JSON.stringify(compactNodes)}${getModeHistoryStr(mode)}${getExistingCardContextStr()}
+${JSON.stringify(compactNodes)}${getModeHistoryStr(activeMode)}${getExistingCardContextStr()}
 
 USER FOLLOWUP REQUEST:
 ${currentInput}
 
 If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json \`\`\` code fences. If proposing optional questions/choices, include a "questions" JSON block at the bottom.`;
 
-    const response = await callGemini(SYSTEM_INSTRUCTIONS, promptWithContext, images);
-    setLoading(false);
+      const response = await callGemini(SYSTEM_INSTRUCTIONS, promptWithContext, images, signal);
+      if (!isCurrentEpoch(epoch)) return;
 
-    if (response) {
-      const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response.text);
-      let applied = false;
-      let scadFailures: string[] = [];
-      let mergedNodes: RawNode[] | null = null;
-      if (nodes && Array.isArray(nodes)) {
-        const merged = mergeAndNormalizeNodes(nodes, sceneGraph.nodes, false);
-        if (merged.length > 0) {
-          updateScene({ ...useStore.getState().sceneGraph, nodes: merged });
-          scadFailures = await triggerScadAutoCompile(merged);
-          applied = true;
-          mergedNodes = merged;
+      if (response) {
+        const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response.text);
+        let applied = false;
+        let scadFailures: string[] = [];
+        let mergedNodes: RawNode[] | null = null;
+        if (nodes && Array.isArray(nodes)) {
+          const latestNodes = useStore.getState().sceneGraph.nodes;
+          const rawMerged = mergeAndNormalizeNodes(nodes, latestNodes, false);
+          if (rawMerged.length > 0) {
+            const { nodes: prepared, opsMap } = prepareDeclarativeNodes(rawMerged);
+            const hasScad = hasScadNodes(prepared);
+            updateScene({ ...useStore.getState().sceneGraph, nodes: prepared }, hasScad);
+            scadFailures = await triggerScadAutoCompile(prepared, epoch);
+            if (!isCurrentEpoch(epoch)) return;
+            await applyDeclarativeOpsIfCurrent(prepared, opsMap, epoch);
+            if (!isCurrentEpoch(epoch)) return;
+            applied = true;
+            mergedNodes = prepared;
+          }
         }
-      }
 
-      const assistantMsg: ChatMessage = {
-        id: makeId('ast'),
-        role: 'assistant',
-        content: markdown || (applied
-          ? '### 🛠️ Scene Updated\nYour requested modifications have been applied to the active physics schematic.'
-          : '### ⚠️ Nothing was applied\nThe response did not include an updated scene graph.'),
-        questions,
-        proposedModifications,
-        userAnswers: {},
-        nodes,
-        isImplemented: applied,
-        // A follow-up is often just conversation ("why is it wobbling?"), so an
-        // absent scene graph is only an error when the model was asked to change
-        // something - i.e. when this turn is running in generate/mutate mode.
-        hasError: (!applied && (mode === 'generate' || mode === 'mutate')) || scadFailures.length > 0,
-        errorMsg: !applied
-          ? describeApplyFailure(response.truncated)
-          : (scadFailures.length > 0 ? describeScadFailure(scadFailures) : undefined),
-        timestamp: getTimestamp()
-      };
-      setMessages(prev => [...prev, assistantMsg]);
-      handleNotecardUpdate(mode || 'explain', currentInput, markdown, noteCardMarkdown, mergedNodes || undefined);
+        const hasError = (!applied && (activeMode === 'generate' || activeMode === 'mutate')) || scadFailures.length > 0;
+        const assistantMsg: ChatMessage = {
+          id: makeId('ast'),
+          role: 'assistant',
+          mode: activeMode,
+          content: markdown || (applied
+            ? '### 🛠️ Scene Updated\nYour requested modifications have been applied to the active physics schematic.'
+            : '### ⚠️ Nothing was applied\nThe response did not include an updated scene graph.'),
+          questions,
+          proposedModifications,
+          userAnswers: {},
+          nodes,
+          isImplemented: applied,
+          // A follow-up is often just conversation ("why is it wobbling?"), so an
+          // absent scene graph is only an error when the model was asked to change
+          // something - i.e. when this turn is running in generate/mutate mode.
+          hasError,
+          errorMsg: !applied
+            ? describeApplyFailure(response.truncated)
+            : (scadFailures.length > 0 ? describeScadFailure(scadFailures) : undefined),
+          ...(hasError ? { retryPrompt: currentInput, retryMode: 'followup' as const } : {}),
+          timestamp: getTimestamp()
+        };
+        setMessages(prev => [...prev, assistantMsg]);
+        handleNotecardUpdate(activeMode || 'explain', currentInput, markdown, noteCardMarkdown, mergedNodes || undefined);
+      }
+    } finally {
+      if (isCurrentEpoch(epoch)) {
+        inFlightRef.current = false;
+        setLoading(false);
+      }
+    }
+  };
+
+  const handleRetryMessage = (msgId: string) => {
+    const targetMsg = messages.find(m => m.id === msgId);
+    if (!targetMsg) return;
+    if (targetMsg.retryMode === 'generate' && targetMsg.retryPrompt) {
+      void handleGenerate(targetMsg.retryPrompt);
+    } else if (targetMsg.retryMode === 'mutate' && targetMsg.retryPrompt) {
+      void handleMutate(targetMsg.retryPrompt);
+    } else if (targetMsg.retryMode === 'followup' && targetMsg.retryPrompt) {
+      void handleSendFollowup(targetMsg.retryPrompt);
+    } else {
+      void handleImplementMessage(msgId);
     }
   };
 
@@ -1108,7 +1464,7 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
               </label>
             )}
             <button
-              onClick={mode === 'generate' ? handleGenerate : handleMutate}
+              onClick={() => (mode === 'generate' ? handleGenerate() : handleMutate())}
               disabled={loading}
               className="py-2.5 px-4 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold shadow-md flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
             >
@@ -1138,7 +1494,7 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
         )}
 
         {/* API key & Model drawer */}
-        {(!geminiApiKey && !claudeApiKey) && (
+        {(showKeyDrawer || (!geminiApiKey && !claudeApiKey)) && (
           <div className="bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/60 p-3.5 rounded-xl shrink-0 flex flex-col gap-2.5 shadow-inner">
             <div className="flex gap-2 items-start">
               <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
@@ -1150,21 +1506,21 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
             <div className="flex flex-col gap-2">
               <div className="flex flex-col gap-1">
                 <label className="text-[10px] font-bold text-amber-900 dark:text-amber-300">🔑 Gemini API Key:</label>
-                <input 
-                  type="password" 
-                  placeholder="Paste AIzaSy... key here" 
-                  value={geminiApiKey}
-                  onChange={(e) => saveGeminiApiKey(e.target.value)}
+                <input
+                  type="password"
+                  placeholder="Paste AIzaSy... key here"
+                  value={draftGeminiKey}
+                  onChange={(e) => setDraftGeminiKey(e.target.value)}
                   className="w-full px-2.5 py-1.5 text-xs border border-amber-200 dark:border-amber-900/40 rounded-lg shadow-sm focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200"
                 />
               </div>
               <div className="flex flex-col gap-1">
                 <label className="text-[10px] font-bold text-amber-900 dark:text-amber-300">🔑 Claude API Key:</label>
-                <input 
-                  type="password" 
-                  placeholder="Paste sk-ant-... key here" 
-                  value={claudeApiKey}
-                  onChange={(e) => saveClaudeApiKey(e.target.value)}
+                <input
+                  type="password"
+                  placeholder="Paste sk-ant-... key here"
+                  value={draftClaudeKey}
+                  onChange={(e) => setDraftClaudeKey(e.target.value)}
                   className="w-full px-2.5 py-1.5 text-xs border border-amber-200 dark:border-amber-900/40 rounded-lg shadow-sm focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200"
                 />
               </div>
@@ -1205,6 +1561,14 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
                   </optgroup>
                 </select>
               </div>
+              <button
+                type="button"
+                onClick={commitKeyDrawer}
+                disabled={!draftGeminiKey.trim() && !draftClaudeKey.trim()}
+                className="mt-1 py-1.5 px-3 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-xs font-bold rounded-lg shadow-sm transition-colors cursor-pointer"
+              >
+                Save Keys
+              </button>
             </div>
           </div>
         )}
@@ -1419,7 +1783,7 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
                           <span>{msg.errorMsg || 'Failed to parse updated 3D scene nodes.'}</span>
                         </div>
                         <button
-                          onClick={() => handleImplementMessage(msg.id)}
+                          onClick={() => handleRetryMessage(msg.id)}
                           disabled={loading}
                           className="py-1.5 px-3 bg-red-600 hover:bg-red-700 active:bg-red-800 text-white text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center gap-1 shrink-0 shadow-sm"
                         >
@@ -1446,11 +1810,13 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
                         : ''}`
                   : loadingStatus}
               </span>
-              {pictureLoop.progress && (
-                <button onClick={pictureLoop.stop} className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-white dark:bg-slate-800 border border-blue-200 dark:border-slate-700 hover:bg-red-50 hover:text-red-600 cursor-pointer">
-                  Stop
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={cancelActiveRequest}
+                className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-white dark:bg-slate-800 border border-blue-200 dark:border-slate-700 hover:bg-red-50 hover:text-red-600 cursor-pointer"
+              >
+                {pictureLoop.progress ? 'Stop' : 'Cancel'}
+              </button>
             </div>
           )}
 
@@ -1466,13 +1832,13 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
-                    handleSendFollowup();
+                    void handleSendFollowup();
                   }
                 }}
                 className="flex-1 px-3 py-2 border border-slate-200 dark:border-slate-800 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-slate-955 text-slate-800 dark:text-slate-200 resize-none min-h-[44px] placeholder-slate-400 dark:placeholder-slate-500"
               />
               <button
-                onClick={handleSendFollowup}
+                onClick={() => void handleSendFollowup()}
                 disabled={loading || (!followupInput.trim() && !followAtt.images.length)}
                 className="p-2.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 disabled:opacity-50 text-white rounded-xl transition-all cursor-pointer flex items-center justify-center shrink-0 shadow-sm"
                 title="Send Request"

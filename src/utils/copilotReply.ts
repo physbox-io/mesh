@@ -105,7 +105,16 @@ const isLikelyNodeArray = (arr: unknown[]): boolean =>
        obj.pos !== undefined || obj.euler !== undefined || obj.type === 'body');
   });
 
-export const parseAIResponse = (text: string): {
+export interface ParseAIResponseOptions {
+  /**
+   * When true, fall back to scraping bullet lists under proposal/recommendation
+   * headings if no structured `proposedModifications` JSON block was returned.
+   * Only enable for turns that explicitly ask for proposed modifications.
+   */
+  extractBulletModifications?: boolean;
+}
+
+export const parseAIResponse = (text: string, options?: ParseAIResponseOptions): {
   markdown: string;
   questions: DiagnosticQuestion[];
   proposedModifications: ProposedModification[];
@@ -116,29 +125,37 @@ export const parseAIResponse = (text: string): {
   let proposedModifications: ProposedModification[] = [];
   let nodes: RawNode[] | null = null;
   let noteCardMarkdown: string | null = null;
-  let markdown = cleanLaTeXMath(text);
 
-  // Scan code blocks for questions, proposedModifications, or nodes
-  const codeBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/gi;
-  let match;
-  const blocksToRemove: string[] = [];
-  const jsonMatches: RegExpExecArray[] = [];
+  // Scan fenced code blocks. Only attempt JSON parsing on unlabeled or `json`
+  // fences so non-JSON fences (e.g. ```scad) are preserved verbatim.
+  const codeBlockRegex = /```([a-zA-Z0-9_-]*)[ \t]*\r?\n?([\s\S]*?)```/g;
+  let match: RegExpExecArray | null;
+  const rangesToRemove: Array<[number, number]> = [];
 
   while ((match = codeBlockRegex.exec(text)) !== null) {
-    jsonMatches.push(match);
-  }
-
-  for (const match of jsonMatches) {
-    const fullMatch = match[0];
-    const code = match[1].trim();
+    const lang = (match[1] || '').toLowerCase();
+    if (lang !== '' && lang !== 'json') continue;
+    const code = (match[2] || '').trim();
+    if (!code) continue;
+    const start = match.index;
+    const end = match.index + match[0].length;
     try {
       const parsed = extractJSON(code);
       if (parsed && typeof parsed === 'object') {
         const p = parsed as Record<string, unknown>;
+        let matchedStructuredBlock = false;
+
         if (!noteCardMarkdown) {
-          if (typeof p.noteCardMarkdown === 'string') noteCardMarkdown = p.noteCardMarkdown;
-          else if (typeof p.noteCard === 'string') noteCardMarkdown = p.noteCard;
-          else if (typeof p.notecard === 'string') noteCardMarkdown = p.notecard;
+          if (typeof p.noteCardMarkdown === 'string') {
+            noteCardMarkdown = p.noteCardMarkdown;
+            matchedStructuredBlock = true;
+          } else if (typeof p.noteCard === 'string') {
+            noteCardMarkdown = p.noteCard;
+            matchedStructuredBlock = true;
+          } else if (typeof p.notecard === 'string') {
+            noteCardMarkdown = p.notecard;
+            matchedStructuredBlock = true;
+          }
         }
 
         if (questions.length === 0 && Array.isArray(p.questions)) {
@@ -149,7 +166,7 @@ export const parseAIResponse = (text: string): {
               ? q.options.map((o: unknown) => cleanLaTeXMath(String(o)))
               : undefined
           })).filter((q) => q.question.trim().length > 0);
-          blocksToRemove.push(fullMatch);
+          matchedStructuredBlock = true;
         }
 
         if (proposedModifications.length === 0 && Array.isArray(p.proposedModifications)) {
@@ -158,13 +175,13 @@ export const parseAIResponse = (text: string): {
             text: typeof m === 'string' ? cleanLaTeXMath(m) : cleanLaTeXMath(String(m.text || m.description || m)),
             selected: true
           })).filter((m: ProposedModification) => m.text.trim().length > 0);
-          blocksToRemove.push(fullMatch);
+          matchedStructuredBlock = true;
         }
 
         if (nodes === null) {
           if (Array.isArray(p.nodes)) {
             nodes = p.nodes as RawNode[];
-            blocksToRemove.push(fullMatch);
+            matchedStructuredBlock = true;
           // A bare array is nodes if it isn't one of the other two shapes we
           // accept (questions / proposedModifications). The old test demanded
           // geoms|joints|scad|type on the first element, which threw away the
@@ -173,8 +190,12 @@ export const parseAIResponse = (text: string): {
           // reported the change as applied.
           } else if (Array.isArray(parsed) && parsed.length > 0 && isLikelyNodeArray(parsed)) {
             nodes = parsed as RawNode[];
-            blocksToRemove.push(fullMatch);
+            matchedStructuredBlock = true;
           }
+        }
+
+        if (matchedStructuredBlock) {
+          rangesToRemove.push([start, end]);
         }
       }
     } catch {
@@ -182,18 +203,23 @@ export const parseAIResponse = (text: string): {
     }
   }
 
-  for (const block of blocksToRemove) {
-    markdown = markdown.replace(block, '').trim();
+  // Remove only structured JSON blocks that were consumed, from back to front,
+  // before running cleanLaTeXMath (so non-JSON blocks like ```scad survive and
+  // LaTeX cleanup never alters indices).
+  let stripped = text;
+  for (let i = rangesToRemove.length - 1; i >= 0; i--) {
+    const [start, end] = rangesToRemove[i];
+    stripped = stripped.slice(0, start) + stripped.slice(end);
   }
 
-  // Fallback logic
-  if (proposedModifications.length === 0) {
-    const lines = text.split('\n');
+  // Fallback logic: only run when caller explicitly expects proposed modifications.
+  if (options?.extractBulletModifications && proposedModifications.length === 0) {
+    const lines = stripped.split('\n');
     let inPropsSection = false;
 
     lines.forEach((line, lineIdx) => {
       const trimmed = line.trim();
-      if (trimmed.match(/^(?:#+|\*\*|\b)(propos|recommend|suggest|plan|next steps|improvement|analys|diagnos|finding|issue|stability|fix|modificat)/i)) {
+      if (trimmed.match(/^(?:#+\s*|\*\*\s*|\b)(propos|recommend|suggest|plan|next steps|improvement|analys|diagnos|finding|issue|stability|fix|modificat)/i)) {
         inPropsSection = true;
       } else if (trimmed.match(/^#+\s/) && !trimmed.match(/(propos|recommend|suggest|plan|next steps|improvement|analys|diagnos|finding|issue|stability|fix|modificat)/i)) {
         inPropsSection = false;
@@ -210,8 +236,7 @@ export const parseAIResponse = (text: string): {
     });
   }
 
-  let cleanMarkdown = text.replace(/```(?:json)?\s*[\s\S]*?\s*```/gi, '').trim();
-  cleanMarkdown = cleanLaTeXMath(cleanMarkdown);
+  const cleanMarkdown = cleanLaTeXMath(stripped.trim());
 
   return { markdown: cleanMarkdown, questions, proposedModifications, nodes, noteCardMarkdown };
 };
