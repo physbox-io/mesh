@@ -77,16 +77,41 @@ export interface GearBody {
 
 interface MeshExtent { lo: number; hi: number; r: number; teeth?: number }
 
+const IDENTITY_QUAT: QuatWXYZ = [1, 0, 0, 0];
+
+function geomLocalQuat(g: SceneGeom): QuatWXYZ {
+  if (g.quat && g.quat.length === 4) {
+    const [w, x, y, z] = g.quat;
+    const len = Math.hypot(w, x, y, z);
+    return len > 1e-12 ? [w / len, x / len, y / len, z / len] : IDENTITY_QUAT;
+  }
+  if (g.euler && (g.euler[0] !== 0 || g.euler[1] !== 0 || g.euler[2] !== 0)) {
+    const hx = ((g.euler[0] || 0) * Math.PI) / 360;
+    const hy = ((g.euler[1] || 0) * Math.PI) / 360;
+    const hz = ((g.euler[2] || 0) * Math.PI) / 360;
+    const cx = Math.cos(hx), sx = Math.sin(hx);
+    const cy = Math.cos(hy), sy = Math.sin(hy);
+    const cz = Math.cos(hz), sz = Math.sin(hz);
+    return [
+      cx * cy * cz - sx * sy * sz,
+      sx * cy * cz + cx * sy * sz,
+      cx * sy * cz - sx * cy * sz,
+      cx * cy * sz + sx * sy * cz,
+    ];
+  }
+  return IDENTITY_QUAT;
+}
+
 /**
  * A mesh's span along a hinge and its widest radius from it, with its teeth:
  * in the body frame, so the same whatever the pose, and kept per vertex array.
  * Every hinged body is weighed as a possible pinion on every compile.
  */
 const meshExtents = new WeakMap<number[], Map<string, MeshExtent>>();
-function meshExtent(v: number[], gp: number[], j: SceneJoint): MeshExtent {
+function meshExtent(v: number[], gp: number[], gq: QuatWXYZ, j: SceneJoint): MeshExtent {
   const axis = unit(j.axis ?? [0, 0, 1]);
   const jp = j.pos ?? [0, 0, 0];
-  const key = [...gp, ...jp, ...axis].join(',');
+  const key = [...gp, ...gq, ...jp, ...axis].join(',');
   let byKey = meshExtents.get(v);
   const hit = byKey?.get(key);
   if (hit) return hit;
@@ -96,7 +121,8 @@ function meshExtent(v: number[], gp: number[], j: SceneJoint): MeshExtent {
   let lo = Infinity, hi = -Infinity, r = 0;
   const outline: { angle: number; r: number }[] = [];
   for (let i = 0; i < v.length; i += 3) {
-    const d = [v[i] + gp[0] - jp[0], v[i + 1] + gp[1] - jp[1], v[i + 2] + gp[2] - jp[2]];
+    const rv = quatRotateVec(gq, [v[i], v[i + 1], v[i + 2]]);
+    const d = [rv[0] + gp[0] - jp[0], rv[1] + gp[1] - jp[1], rv[2] + gp[2] - jp[2]];
     const a = dot(d, axis);
     if (a < lo) lo = a;
     if (a > hi) hi = a;
@@ -122,7 +148,7 @@ export function gearBody(node: SceneNode, j: SceneJoint, world: { pos: number[];
   const along = (p: number[]) => dot(sub(add(world.pos, quatRotateVec(world.quat, p)), origin), axis);
   const extent = (g: SceneGeom): MeshExtent | null => {
     const gp = g.pos ?? [0, 0, 0];
-    if (g.type === 'mesh') return g.renderVertices?.length ? meshExtent(g.renderVertices, gp, j) : null;
+    if (g.type === 'mesh') return g.renderVertices?.length ? meshExtent(g.renderVertices, gp, geomLocalQuat(g), j) : null;
     if (g.type === 'cylinder' || g.type === 'capsule') {
       const c = along(gp), h = g.size?.[1] ?? g.size?.[0] ?? 0;
       return { lo: c - h, hi: c + h, r: g.size?.[0] ?? 0 };

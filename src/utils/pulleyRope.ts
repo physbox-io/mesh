@@ -215,3 +215,26 @@ export function ropePolylines(left: LiveEnd, right: LiveEnd, wheel: { centre: V3
   }
   return lines;
 }
+
+/** Collects visible pulley rope nodes along with their rest-pose world positions. */
+export function visiblePulleyRopeMarkers(
+  nodes: SceneNode[],
+  hiddenNodeIds: readonly string[],
+  poses: Record<string, { pos: V3 }>,
+): { rope: SceneNode; worldPos: V3 }[] {
+  const hidden = new Set(hiddenNodeIds);
+  const ropes: SceneNode[] = [];
+  const traverse = (list: SceneNode[], ancestorHidden: boolean) => {
+    if (!list) return;
+    for (const n of list) {
+      const isHidden = ancestorHidden || hidden.has(n.id);
+      if (n.isPulleyRope && !isHidden) ropes.push(n);
+      traverse(n.children, isHidden);
+    }
+  };
+  traverse(nodes, false);
+  return ropes.map((rope) => ({
+    rope,
+    worldPos: poses[rope.id]?.pos ?? rope.pos,
+  }));
+}

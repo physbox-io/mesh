@@ -319,7 +319,8 @@ export const MechanismBuilderModal: React.FC<{ isOpen?: boolean; onClose: () => 
     }
 
     if (family === 'leadscrew') {
-      const starts = Math.max(1, Math.round(screwLeadMm / screwPitchMm));
+      const safePitchMm = Math.max(1, screwPitchMm || 1);
+      const starts = Math.max(1, Math.round(screwLeadMm / safePitchMm));
       const coupleRatio = (screwLeadMm / 1000) / (2 * Math.PI);
       const halfL = screwLengthMm / 2;
       return {
@@ -338,7 +339,7 @@ export const MechanismBuilderModal: React.FC<{ isOpen?: boolean; onClose: () => 
         ],
         pitchCircles: [],
         readouts: [
-          ['Screw Spec', `T8 × ${screwLeadMm} mm (${starts}-start, ${screwPitchMm} mm pitch)`],
+          ['Screw Spec', `T8 × ${screwLeadMm} mm (${starts}-start, ${safePitchMm} mm pitch)`],
           ['Linear Advance', `${screwLeadMm.toFixed(1)} mm / rev`],
           ['Usable Stroke', `${Math.max(10, screwLengthMm - 25).toFixed(0)} mm`],
           ['Mechanical Advantage', `${((2 * Math.PI * 1000) / screwLeadMm).toFixed(0)} N per N·m`],
@@ -431,6 +432,7 @@ export const MechanismBuilderModal: React.FC<{ isOpen?: boolean; onClose: () => 
         ['Loop Closure', `MuJoCo <connect> at Pin C`],
       ],
       statusOk: fb.validAssembly && fb.transmissionAngleMinDeg >= 30,
+      blocked: !fb.validAssembly,
       statusText: !fb.validAssembly
         ? 'Link lengths violate triangle inequality and cannot close a loop.'
         : fb.classification === 'crank_rocker'
@@ -469,7 +471,8 @@ export const MechanismBuilderModal: React.FC<{ isOpen?: boolean; onClose: () => 
 
   const preview = useMemo(() => {
     try {
-      return { ...buildPreview(), blocked: false };
+      const res = buildPreview();
+      return { ...res, blocked: 'blocked' in res && Boolean(res.blocked) };
     } catch (err) {
       return {
         viewBox: '0 0 1 1', paths: [], pitchCircles: [], readouts: [],
@@ -481,6 +484,7 @@ export const MechanismBuilderModal: React.FC<{ isOpen?: boolean; onClose: () => 
   if (!isOpen) return null;
 
   const handleInsert = () => {
+    if (preview.blocked) return;
     try {
       insert();
     } catch (err) {
@@ -807,6 +811,31 @@ export const MechanismBuilderModal: React.FC<{ isOpen?: boolean; onClose: () => 
                         className={inputClass}
                       />
                     </Field>
+                    <Field label="Shaft Bore" hint="Center mounting bore geometry.">
+                      <select
+                        value={boreKind}
+                        onChange={(e) => setBoreKind(e.target.value as GearBoreKind)}
+                        className={inputClass}
+                      >
+                        {BORE_OPTIONS.map(([val, label]) => (
+                          <option key={val} value={val}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    {boreKind !== 'none' && boreKind !== 'bearing_608' && (
+                      <Field label="Bore Ø (mm)" hint="Shaft hole diameter (5 mm for NEMA17 stepper).">
+                        <NumberInput
+                          step={0.5}
+                          min={2}
+                          max={30}
+                          value={boreDiameterMm}
+                          onChange={(v) => v !== undefined && setBoreDiameterMm(v)}
+                          className={inputClass}
+                        />
+                      </Field>
+                    )}
                   </div>
                 </div>
               )}
@@ -949,6 +978,31 @@ export const MechanismBuilderModal: React.FC<{ isOpen?: boolean; onClose: () => 
                         className={inputClass}
                       />
                     </Field>
+                    <Field label="Shaft Bore" hint="Center mounting bore geometry.">
+                      <select
+                        value={boreKind}
+                        onChange={(e) => setBoreKind(e.target.value as GearBoreKind)}
+                        className={inputClass}
+                      >
+                        {BORE_OPTIONS.map(([val, label]) => (
+                          <option key={val} value={val}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    {boreKind !== 'none' && boreKind !== 'bearing_608' && (
+                      <Field label="Bore Ø (mm)" hint="Shaft hole diameter (5 mm for NEMA17 stepper).">
+                        <NumberInput
+                          step={0.5}
+                          min={2}
+                          max={30}
+                          value={boreDiameterMm}
+                          onChange={(v) => v !== undefined && setBoreDiameterMm(v)}
+                          className={inputClass}
+                        />
+                      </Field>
+                    )}
                   </div>
                 </div>
               )}

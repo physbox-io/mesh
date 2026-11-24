@@ -13,7 +13,7 @@ import type { SceneNode } from '../types/scene';
  * Creates a complete SceneNode for a D-Shaft Motor Hub (e.g. 5mm NEMA 17)
  */
 export function createDShaftHubNode(shaftDiameterMm = 5.0): SceneNode {
-  const outerR = (shaftDiameterMm + 5.0) / 1000;
+  const outerR = (shaftDiameterMm / 2 + 5.0) / 1000;
   const height = 0.015; // 15mm tall hub
   const dShaftR = (shaftDiameterMm / 2 + 0.12) / 1000;
   const id = `dshaft_${shaftDiameterMm}mm_${Math.random().toString(36).slice(2, 7)}`;

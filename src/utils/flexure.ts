@@ -511,8 +511,9 @@ export function bendLeafPoint(
 /** Removes generated flexure geoms and resets the joint to a clean rigid pin/slider. */
 export function revertFlexure(node: SceneNode): SceneNode {
   const nextGeoms = (node.geoms ?? []).filter((g) => !g.name.startsWith('flexure_'));
+  const jointIdx = (node.joints ?? []).findIndex((j) => j.type === 'hinge' || j.type === 'slide');
   const nextJoints = (node.joints ?? []).map((j, idx) => {
-    if (idx !== 0 || (j.type !== 'hinge' && j.type !== 'slide')) return { ...j };
+    if (idx !== jointIdx) return { ...j };
     return {
       ...j,
       stiffness: 0,

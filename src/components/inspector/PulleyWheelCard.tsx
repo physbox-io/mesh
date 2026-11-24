@@ -10,16 +10,16 @@ export function PulleyWheelCard({ node }: { node: SceneNode }) {
     <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
       <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1">🛞 Pulley Properties</h3>
       <label className="text-xs font-medium text-slate-500 flex justify-between">
-        Pulley Radius <SliderValue value={node.pulleyRadius || 0.4} onChange={(v) => {
+        Pulley Radius <SliderValue value={node.pulleyRadius || 0.05} onChange={(v) => {
           const radVal = v;
           updatePulleyParams(node.id, { pulleyRadius: radVal });
-        }} decimals={1} unit="mm" scale={1000} min={0.15} max={1.5} />
+        }} decimals={1} unit="mm" scale={1000} min={0.01} max={0.5} />
       </label>
       <RangeInput 
-        min="0.15" 
-        max="1.5" 
-        step="0.01" 
-        value={node.pulleyRadius || 0.4} 
+        min="0.01" 
+        max="0.5" 
+        step="0.005" 
+        value={node.pulleyRadius || 0.05} 
         onChange={(v) => {
           const radVal = v;
           updatePulleyParams(node.id, { pulleyRadius: radVal });

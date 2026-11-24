@@ -1242,16 +1242,16 @@ export function buildGt2BeltDrive(spec: Gt2BeltDriveSpec = {}): Gt2BeltDriveResu
     const rb = Math.max(1, r2 + offsetMm);
     const pts: [number, number][] = [];
     const arcSteps = 20;
-    // Right pulley arc (at x = C) from -(π/2 - β) to +(π/2 - β)
-    const startR = -Math.PI / 2 + beta;
-    const endR = Math.PI / 2 - beta;
+    // Right pulley arc (at x = C) from -(π/2 + β) to +(π/2 + β) -> wraps π + 2β
+    const startR = -Math.PI / 2 - beta;
+    const endR = Math.PI / 2 + beta;
     for (let i = 0; i <= arcSteps; i++) {
       const a = startR + (i / arcSteps) * (endR - startR);
       pts.push([+(C + rb * Math.cos(a)).toFixed(6), +(rb * Math.sin(a)).toFixed(6)]);
     }
-    // Left pulley arc (at x = 0) from (π/2 - β) to (3π/2 + β)
-    const startL = Math.PI / 2 - beta;
-    const endL = (3 * Math.PI) / 2 + beta;
+    // Left pulley arc (at x = 0) from (π/2 + β) to (3π/2 - β) -> wraps π - 2β
+    const startL = Math.PI / 2 + beta;
+    const endL = (3 * Math.PI) / 2 - beta;
     for (let i = 0; i <= arcSteps; i++) {
       const a = startL + (i / arcSteps) * (endL - startL);
       pts.push([+(ra * Math.cos(a)).toFixed(6), +(ra * Math.sin(a)).toFixed(6)]);
@@ -1343,10 +1343,12 @@ export function buildLeadscrewDrive(spec: LeadscrewDriveSpec = {}): LeadscrewDri
   const maxTravelHalfMm = Math.max(5, (lengthMm - nutHeightMm - 10) / 2);
   const travelRangeMm: [number, number] = [-maxTravelHalfMm, maxTravelHalfMm];
 
-  // Build flanged brass T8 nut profile (22 mm flange with 4x Ø3.5 mm mounting holes)
-  const flangeR = 11;
-  const barrelR = 5.1;
+  // Build flanged brass nut profile scaled from boreR (exact T8 dimensions at diameterMm = 8:
+  // boreR = 4.1, barrelR = 5.1, boltCircleR = 8.0, flangeR = 11.0 with 4x Ø3.5 mm mounting holes)
   const boreR = diameterMm / 2 + 0.1;
+  const barrelR = boreR + 1.0;
+  const boltCircleR = barrelR + 2.9;
+  const flangeR = boltCircleR + 3.0;
   const flangeLoop = Array.from({ length: 36 }, (_, i) => {
     const a = (i / 36) * Math.PI * 2;
     return [mm(flangeR * Math.cos(a)), mm(flangeR * Math.sin(a))];
@@ -1354,8 +1356,8 @@ export function buildLeadscrewDrive(spec: LeadscrewDriveSpec = {}): LeadscrewDri
   const boreHole = buildBoreLoop('round', boreR * 2, flangeR - 1)!.map(([x, y]) => [mm(x), mm(y)]);
   const boltHoles = [0, 1, 2, 3].map((k) => {
     const angle = (k * Math.PI) / 2;
-    const cx = 8 * Math.cos(angle);
-    const cy = 8 * Math.sin(angle);
+    const cx = boltCircleR * Math.cos(angle);
+    const cy = boltCircleR * Math.sin(angle);
     return Array.from({ length: 16 }, (_, i) => {
       const a = -(i / 16) * Math.PI * 2;
       return [mm(cx + 1.75 * Math.cos(a)), mm(cy + 1.75 * Math.sin(a))];

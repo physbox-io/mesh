@@ -15,7 +15,7 @@ import { useOrbitEnable } from './useOrbitEnable';
 import type { SceneGraph, SceneNode } from '../../types/scene';
 import type { DataMirror, FrameFlagWindow, ModelMirror, MujocoShim } from '../../types/sceneLayer';
 import { restPoses } from '../../utils/sceneCouplings';
-import { ropeLayout, ropePolylines, type RopeLayout, type V3 } from '../../utils/pulleyRope';
+import { ropeLayout, ropePolylines, visiblePulleyRopeMarkers, type RopeLayout, type V3 } from '../../utils/pulleyRope';
 
 interface PulleyRopesRendererProps {
   model: ModelMirror | null;
@@ -208,6 +208,7 @@ export const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: PulleyR
 // Rope node placeholder marker – renders a glowing ring for each pulley_rope scene node
 export const PulleyRopeMarkers = ({ sceneGraph, selectedNodeId, setSelectedNodeId }: PulleyRopeMarkersProps) => {
   const setOrbitEnabled = useOrbitEnable();
+  const hiddenNodeIds = useStore((state) => state.hiddenNodeIds);
 
   // The wheel a rope runs over, so the handle can be sized relative to it.
   const findWheelNode = useCallback((wheelId: string): SceneNode | null => {
@@ -222,29 +223,21 @@ export const PulleyRopeMarkers = ({ sceneGraph, selectedNodeId, setSelectedNodeI
     return search(sceneGraph?.nodes || []);
   }, [sceneGraph]);
 
-  const ropeNodes = useMemo(() => {
-    const ropes: SceneNode[] = [];
-    const traverse = (nodes: SceneNode[]) => {
-      if (!nodes) return;
-      for (const n of nodes) {
-        if (n.isPulleyRope) ropes.push(n);
-        traverse(n.children);
-      }
-    };
-    traverse(sceneGraph.nodes);
-    return ropes;
-  }, [sceneGraph]);
+  const ropeMarkers = useMemo(
+    () => visiblePulleyRopeMarkers(sceneGraph.nodes, hiddenNodeIds, restPoses(sceneGraph.nodes)),
+    [sceneGraph, hiddenNodeIds],
+  );
 
-  if (ropeNodes.length === 0) return null;
+  if (ropeMarkers.length === 0) return null;
 
   return (
     <>
-      {ropeNodes.map((rope) => {
+      {ropeMarkers.map(({ rope, worldPos }) => {
         // pos is [x, y_mujoco, z_mujoco] in scene graph space.
         // The SceneVisuals group is rotated [-PI/2, 0, 0], so we skip that rotation
         // and place markers in raw world space (no group rotation wrapper here).
         // MuJoCo X→Three.js X, MuJoCo Y→Three.js -Z, MuJoCo Z→Three.js Y
-        const [mx, my, mz] = rope.pos;
+        const [mx, my, mz] = worldPos;
         const threePos: [number, number, number] = [mx, mz, -my];
         const isSelected = selectedNodeId === rope.id;
         // Size the handle from the wheel it runs over. It used to be a fixed

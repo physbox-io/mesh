@@ -216,9 +216,15 @@ export function FlexureCard({ node }: { node: SceneNode }) {
             Stiffness <b>{spec.stiffness.toPrecision(3)} {jointType === 'hinge' ? 'N·m/rad' : 'N/m'}</b>
           </span>
         )}
-        <span>
-          Safe travel <b>±{spec.maxTravel.toFixed(1)}{jointType === 'hinge' ? '°' : ' mm'}</b>
-        </span>
+        {spec.kind === 'bistable' ? (
+          <span>
+            Stroke <b>{spec.maxTravel.toFixed(1)} mm</b>
+          </span>
+        ) : (
+          <span>
+            Safe travel <b>±{spec.maxTravel.toFixed(1)}{jointType === 'hinge' ? '°' : ' mm'}</b>
+          </span>
+        )}
         <span className="text-slate-400">σ {peakStressMPa.toFixed(0)} MPa</span>
       </div>
 

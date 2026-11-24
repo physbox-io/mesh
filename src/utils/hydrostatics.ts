@@ -14,6 +14,7 @@ import * as THREE from 'three';
 import { ConvexHull } from 'three/examples/jsm/math/ConvexHull.js';
 import type { SceneGeom, SceneNode } from '../types/scene';
 import { fromtoFrame, geomMatrixOf, meshVolumeAndCentroid } from './csg';
+import { getNodeWorldPos, nodeLocalQuat, quatMultiply, quatRotateVec, type QuatWXYZ } from './sceneTree';
 
 export const FRESHWATER_DENSITY = 1000; // kg/m³
 
@@ -613,8 +614,8 @@ export function evaluateSubmerged(
 
   const airFraction = 1 - flooded;
   const vol = solid.volume + airFraction * (hull.volume - solid.volume);
-  const wHull = (airFraction * (hull.volume - solid.volume)) / vol;
-  const wSolid = 1 - wHull;
+  const wSolid = (flooded * solid.volume) / vol;
+  const wHull = (airFraction * hull.volume) / vol;
   return {
     volume: vol,
     cob: [
@@ -840,8 +841,12 @@ export function measureContainerBasin(node: SceneNode): ContainerBasinLocal | nu
     let wallCount = 0;
 
     for (const b of boxes) {
-      const cx = b.pos?.[0] ?? 0, cy = b.pos?.[1] ?? 0, cz = b.pos?.[2] ?? 0;
-      const hx = b.size[0] ?? 0, hy = b.size[1] ?? 0, hz = b.size[2] ?? 0;
+      const m = geomMatrixOf(b).elements;
+      const sx = b.size[0] ?? 0, sy = b.size[1] ?? 0, sz = b.size[2] ?? 0;
+      const cx = m[12], cy = m[13], cz = m[14];
+      const hx = Math.abs(m[0]) * sx + Math.abs(m[4]) * sy + Math.abs(m[8]) * sz;
+      const hy = Math.abs(m[1]) * sx + Math.abs(m[5]) * sy + Math.abs(m[9]) * sz;
+      const hz = Math.abs(m[2]) * sx + Math.abs(m[6]) * sy + Math.abs(m[10]) * sz;
       // Flat bottom slab near outMinZ
       if (hz < height * 0.25 && hx > spanX * 0.32 && hy > spanY * 0.32 && cz - outMinZ < height * 0.35) {
         floorZ = Math.max(floorZ, cz + hz);
@@ -910,24 +915,63 @@ export function measureContainerBasin(node: SceneNode): ContainerBasinLocal | nu
 /** Collects world-space water basins for all nodes in `nodes` with `waterFill > 0`. */
 export function collectWaterBasins(nodes: SceneNode[]): WaterBasinWorld[] {
   const out: WaterBasinWorld[] = [];
-  const walk = (list: SceneNode[], offX: number, offY: number, offZ: number) => {
+  const IDENTITY: QuatWXYZ = [1, 0, 0, 0];
+  const walk = (list: SceneNode[], parentPos: [number, number, number], parentQuat: QuatWXYZ) => {
     for (const n of list || []) {
-      const wx = offX + (n.pos?.[0] ?? 0);
-      const wy = offY + (n.pos?.[1] ?? 0);
-      const wz = offZ + (n.pos?.[2] ?? 0);
+      const rotOff = quatRotateVec(parentQuat, n.pos ?? [0, 0, 0]);
+      const wx = parentPos[0] + rotOff[0];
+      const wy = parentPos[1] + rotOff[1];
+      const wz = parentPos[2] + rotOff[2];
+      const worldPos: [number, number, number] = [wx, wy, wz];
+      const worldQuat = quatMultiply(parentQuat, nodeLocalQuat(n));
       if (typeof n.waterFill === 'number' && n.waterFill > 0.005) {
         const local = measureContainerBasin(n);
         if (local) {
           const fill = Math.max(0.02, Math.min(1, n.waterFill));
-          const floorZ = wz + local.floorZ;
-          const rimZ = wz + local.rimZ;
+          let minX: number, maxX: number, minY: number, maxY: number, floorZ: number, rimZ: number;
+          if (local.shape === 'cylinder') {
+            const lcx = 0.5 * (local.minX + local.maxX);
+            const lcy = 0.5 * (local.minY + local.maxY);
+            const rx = 0.5 * (local.maxX - local.minX);
+            const ry = 0.5 * (local.maxY - local.minY);
+            const ex = quatRotateVec(worldQuat, [1, 0, 0]);
+            const ey = quatRotateVec(worldQuat, [0, 1, 0]);
+            const wf = quatRotateVec(worldQuat, [lcx, lcy, local.floorZ]);
+            const wr = quatRotateVec(worldQuat, [lcx, lcy, local.rimZ]);
+            const hx = Math.hypot(ex[0] * rx, ey[0] * ry);
+            const hy = Math.hypot(ex[1] * rx, ey[1] * ry);
+            minX = wx + Math.min(wf[0], wr[0]) - hx;
+            maxX = wx + Math.max(wf[0], wr[0]) + hx;
+            minY = wy + Math.min(wf[1], wr[1]) - hy;
+            maxY = wy + Math.max(wf[1], wr[1]) + hy;
+            floorZ = wz + Math.min(wf[2], wr[2]);
+            rimZ = wz + Math.max(wf[2], wr[2]);
+          } else {
+            minX = Infinity; maxX = -Infinity;
+            minY = Infinity; maxY = -Infinity;
+            floorZ = Infinity; rimZ = -Infinity;
+            for (const lx of [local.minX, local.maxX]) {
+              for (const ly of [local.minY, local.maxY]) {
+                for (const lz of [local.floorZ, local.rimZ]) {
+                  const rv = quatRotateVec(worldQuat, [lx, ly, lz]);
+                  const px = wx + rv[0], py = wy + rv[1], pz = wz + rv[2];
+                  if (px < minX) minX = px;
+                  if (px > maxX) maxX = px;
+                  if (py < minY) minY = py;
+                  if (py > maxY) maxY = py;
+                  if (pz < floorZ) floorZ = pz;
+                  if (pz > rimZ) rimZ = pz;
+                }
+              }
+            }
+          }
           out.push({
             containerNodeId: n.id,
             shape: local.shape,
-            minX: wx + local.minX,
-            maxX: wx + local.maxX,
-            minY: wy + local.minY,
-            maxY: wy + local.maxY,
+            minX,
+            maxX,
+            minY,
+            maxY,
             floorZ,
             rimZ,
             fillFraction: fill,
@@ -935,10 +979,10 @@ export function collectWaterBasins(nodes: SceneNode[]): WaterBasinWorld[] {
           });
         }
       }
-      if (n.children?.length) walk(n.children, wx, wy, wz);
+      if (n.children?.length) walk(n.children, worldPos, worldQuat);
     }
   };
-  walk(nodes, 0, 0, 0);
+  walk(nodes, [0, 0, 0], IDENTITY);
   return out;
 }
 
@@ -965,8 +1009,9 @@ export function resolveWaterSurfaceAt(
 ): number | null {
   const basins = collectWaterBasins(nodes).filter((b) => b.containerNodeId !== targetNode.id);
   if (basins.length > 0) {
-    const tx = targetNode.pos?.[0] ?? 0;
-    const ty = targetNode.pos?.[1] ?? 0;
+    const worldPos = getNodeWorldPos(nodes, targetNode.id) ?? targetNode.pos ?? [0, 0, 0];
+    const tx = worldPos[0];
+    const ty = worldPos[1];
     const enclosing = basins.find((b) => pointInsideWaterBasin(b, tx, ty));
     return (enclosing ?? basins[0]).surfaceZ;
   }
