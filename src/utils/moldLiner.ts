@@ -793,6 +793,24 @@ function buildHalfPair(
       // continuously sleeved without an unsealed floorCutZ cut, while a 45°
       // beveled back shoulder seats against a captive retaining lip on the
       // holder so the insert cannot push or fall out the back.
+      // Clamp the cavity envelope at least `minInsertBackMm` short of the outer
+      // back face (`-blockHeight`) so subtracting `part` never punches through
+      // the insert's first-layer bed floor into isolated pillar islands.
+      const minInsertBackMm = Math.max(1.2, ctx.skinMm);
+      const lidFloorLimit = Math.max(ctx.skinMm, blockHeight - minInsertBackMm);
+      const lidPart = (() => {
+        const partMinZ = part.boundingBox().min[2];
+        if (partMinZ >= -lidFloorLimit - 1e-4) return part;
+        const keepBox = wasm.Manifold.cube(
+          [moldWidthMm * 4, moldDepthMm * 4, lidFloorLimit + ENVELOPE_TOP + 2],
+          false,
+        ).translate([-moldWidthMm * 2, -moldDepthMm * 2, -lidFloorLimit]);
+        const clamped = part.intersect(keepBox);
+        clamped.numTri();
+        keepBox.delete();
+        return clamped;
+      })();
+
       let bodyCs: CrossSection;
       if (cavityRaw.some((d) => d > 0)) {
         const fullDepth = cavityRaw.map((d) => (d > 0 ? blockHeight : 0));
@@ -912,9 +930,24 @@ function buildHalfPair(
         const nSteps = Math.max(4, Math.ceil(lipMm / 0.15));
         for (let s = 0; s < nSteps; s++) {
           const z0 = -blockHeight + (s * lipMm) / nSteps;
-          const cs = s === 0
+          // At s > 0, `botCs.offset(...)` rounded over a concave corner of `topCs`
+          // can nick off disconnected sub-nozzle corner slivers against `topCs`
+          // right on layer 2 (z = 0.15 mm on the bed); prune any < 12 mm² islands.
+          let cs = s === 0
             ? botCs.offset(0, 'Round')
             : botCs.offset((s * lipMm) / nSteps, 'Round').intersect(topCs);
+          if (s > 0 && !cs.isEmpty()) {
+            const keptStep: SimplePolygon[] = [];
+            for (const comp of cs.decompose()) {
+              if (comp.area() >= 12) {
+                for (const poly of comp.toPolygons()) {
+                  if (contourArea(poly) > 0) keptStep.push(poly);
+                }
+              }
+              comp.delete();
+            }
+            if (keptStep.length) cs = replace2(cs, new wasm.CrossSection(keptStep, 'Positive').intersect(topCs));
+          }
           if (!cs.isEmpty()) {
             shapeParts.push(wasm.Manifold.extrude(cs, ENVELOPE_TOP - z0).translate([0, 0, z0]));
           }
@@ -946,10 +979,18 @@ function buildHalfPair(
         shapeParts.push(wasm.Manifold.extrude(topCs, blockHeight + ENVELOPE_TOP).translate([0, 0, -blockHeight]));
         pocketParts.push(wasm.Manifold.extrude(pocketTop, blockHeight + 2 + ENVELOPE_TOP).translate([0, 0, -blockHeight - 2]));
       }
-      if (sleeves) shapeParts.push(sleeves);
+      // Do NOT union raw full-depth `sleeves` onto `shapeParts` here: `topCs`
+      // already encloses every channel's outer sleeve radius at the parting face,
+      // and raw `sleeves` extend vertically to `z = -blockHeight` outside `botCs`,
+      // which defeated the 45° captive back shoulder around vents near the rim;
+      // only blind `topVents` and `bores` (if any) need explicit sleeve tools.
       for (const v of features.topVents ?? []) {
         if (v.zRoof < -0.1 && v.zRoof > -blockHeight + 0.5) {
-          const z0 = v.zRoof - 0.3 - ctx.skinMm - INSERT_CLEARANCE_MM;
+          const zSleeve = v.zRoof - 0.3 - ctx.skinMm;
+          shapeParts.push(
+            wasm.Manifold.cylinder(1.0 - zSleeve, v.r + ctx.skinMm, v.r + ctx.skinMm, 24, false).translate([v.x, v.y, zSleeve]),
+          );
+          const z0 = zSleeve - INSERT_CLEARANCE_MM;
           const rClear = v.r + ctx.skinMm + INSERT_CLEARANCE_MM;
           pocketParts.push(
             wasm.Manifold.cylinder(1.0 - z0 + ENVELOPE_TOP, rClear, rClear, 32, false).translate([v.x, v.y, z0]),
@@ -962,13 +1003,14 @@ function buildHalfPair(
         : shapeParts[0] ?? wasm.Manifold.cube([0, 0, 0]);
       shape.numTri();
       for (const sp of shapeParts) {
-        if (sp !== shape && sp !== sleeves) sp.delete();
+        if (sp !== shape) sp.delete();
       }
       const inBlock = shape.intersect(block);
       inBlock.numTri();
-      if (shape !== sleeves) shape.delete();
-      liner = inBlock.subtract(part);
+      shape.delete();
+      liner = inBlock.subtract(lidPart);
       liner.numTri();
+      if (lidPart !== part) lidPart.delete();
       inBlock.delete();
 
       const pocket = pocketParts.length === 1 ? pocketParts[0] : wasm.Manifold.union(pocketParts);
@@ -1011,8 +1053,24 @@ function buildHalfPair(
       const inBlock = shape.intersect(block);
       inBlock.numTri();
       if (shape !== outer && shape !== sleeves && shape !== landing) shape.delete();
-      liner = inBlock.subtract(part);
+      const minBlindBackMm = Math.max(1.2, ctx.skinMm);
+      const blindFloorLimit = baseDepth > 0
+        ? Math.max(0.4, baseDepth - minBlindBackMm)
+        : Math.max(0.4, floorLimit - minBlindBackMm);
+      const blindPart = (() => {
+        if (part.boundingBox().min[2] >= -blindFloorLimit - 1e-4) return part;
+        const keepBox = wasm.Manifold.cube(
+          [moldWidthMm * 4, moldDepthMm * 4, blindFloorLimit + ENVELOPE_TOP + 2],
+          false,
+        ).translate([-moldWidthMm * 2, -moldDepthMm * 2, -blindFloorLimit]);
+        const clamped = part.intersect(keepBox);
+        clamped.numTri();
+        keepBox.delete();
+        return clamped;
+      })();
+      liner = inBlock.subtract(blindPart);
       liner.numTri();
+      if (blindPart !== part) blindPart.delete();
       inBlock.delete();
 
       const pocketParts: Manifold[] = [];

@@ -589,4 +589,173 @@ describe('a curved roof', () => {
       expect(a.consistentlyWound, name).toBe(true);
     }
   }, 120_000);
+
+  it('keeps a spoke-holed gear lid insert as one wide flat-backed piece with zero first-layer pillar or tooth islands', () => {
+    // Reproduces the prod Gear sculpture's spoke-holed gear sitting across the
+    // parting plane with 5 circular spoke cutouts + hub bore and tooth tips:
+    //  1. Parting plane near the top of the gear so `liftRoofs` lifts thin HIPS
+    //     onto `base` and subtracts it from `lid` down to the gear's bottom face.
+    //  2. Both default floor (5 mm) and thin floor (1.5 mm) must keep a solid
+    //     unbroken HIPS back slab under the 5 spoke cores + hub bore (1 connected
+    //     3D solid, 1 first-layer island > 500 mm² — never 5 free-standing ~2 mm
+    //     pillars or 2–5 mm² tooth-root corner dots on z = 0).
+    const rOuter = 9.0;
+    const rRimIn = 6.2;
+    const rHubOut = 2.6;
+    const rHubIn = 1.6;
+    const th = 2.4;
+    const disc = wasm.Manifold.cylinder(th, rOuter, rOuter, 48, false);
+    const teeth = wasm.Manifold.union(
+      Array.from({ length: 16 }, (_, k) => {
+        const a = (k * 360) / 16;
+        return wasm.Manifold.cube([1.3, 2.2, th], true)
+          .translate([0, rOuter + 0.6, th / 2])
+          .rotate([0, 0, a]);
+      }),
+    );
+    const spokeHoles = wasm.Manifold.union(
+      Array.from({ length: 5 }, (_, k) => {
+        const rad = ((k * 72 + 36) * Math.PI) / 180;
+        const rc = (rRimIn + rHubOut) / 2;
+        return wasm.Manifold.cylinder(th + 1, 1.05, 1.05, 24, false)
+          .translate([rc * Math.cos(rad), rc * Math.sin(rad), -0.5]);
+      }),
+    );
+    const bore = wasm.Manifold.cylinder(th + 1, rHubIn, rHubIn, 32, false).translate([0, 0, -0.5]);
+    const spokeGear = disc.add(teeth).subtract(spokeHoles).subtract(bore).translate([10, 10, 0]);
+    const mainGear = wasm.Manifold.cylinder(2.6, 12, 12, 48, false).translate([-6, -6, 0.2]);
+    const tower = wasm.Manifold.cylinder(16, 2, 2, 24, false).translate([-6, -6, 0.2]);
+    const sculpture = wasm.Manifold.union([spokeGear, mainGear, tower]);
+    const pm = sculpture.getMesh();
+    const verts: number[] = [];
+    for (let i = 0; i < pm.vertProperties.length; i += pm.numProp) {
+      verts.push(pm.vertProperties[i] * MM, pm.vertProperties[i + 1] * MM, pm.vertProperties[i + 2] * MM);
+    }
+    for (const m of [disc, teeth, spokeHoles, bore, spokeGear, mainGear, tower, sculpture]) m.delete();
+
+    const gearScene: SceneGraph = {
+      nodes: [{
+        id: 'gs',
+        name: 'gear_sculpture',
+        type: 'body',
+        pos: [0, 0, 0],
+        geoms: [{ name: 'g', type: 'mesh', size: [1], renderVertices: verts, vertices: verts, faces: Array.from(pm.triVerts) } as unknown as SceneGeom],
+        joints: [],
+        children: [],
+      }],
+    };
+
+    for (const baseThicknessMm of [5, 1.5]) {
+      const res = generateMoldMeshes(gearScene, {
+        ...DEFAULT_MOLD_OPTIONS,
+        moldType: 'clamshell',
+        pullDirection: '+z',
+        dissolvableLiner: true,
+        linerPair: 'abs_hips',
+        linerConstruction: 'insert',
+        castMaterial: 'epoxy',
+        baseThicknessMm,
+      }, wasm);
+      expect(res.success, res.error).toBe(true);
+      const objs = objects(res.threeMf!);
+      const lidName = [...objs.keys()].find((n) => /^Lid half insert/.test(n))!;
+      expect(lidName).toBeDefined();
+      const o = objs.get(lidName)!;
+      const a = analyzeMesh(o.positions, o.faces)!;
+      expect(a.closed, `${lidName} (floor=${baseThicknessMm})`).toBe(true);
+      expect(a.consistentlyWound, `${lidName} (floor=${baseThicknessMm})`).toBe(true);
+
+      const mesh = new wasm.Mesh({ numProp: 3, vertProperties: Float32Array.from(o.positions), triVerts: Uint32Array.from(o.faces) });
+      mesh.merge();
+      const body = new wasm.Manifold(mesh);
+      const lumps = body.decompose();
+      expect(lumps.length, `${lidName} (floor=${baseThicknessMm}): 1 connected 3D solid`).toBe(1);
+      for (const l of lumps) l.delete();
+
+      const b = body.boundingBox();
+      for (const dz of [0.05, 0.1, 0.16, 0.2, 0.3]) {
+        const cs = body.slice(b.min[2] + dz);
+        const islands = cs.decompose();
+        expect(islands.length, `${lidName} (floor=${baseThicknessMm}) dz=${dz}: single base island`).toBe(1);
+        expect(islands[0].area(), `${lidName} (floor=${baseThicknessMm}) dz=${dz}: wide base`).toBeGreaterThan(400);
+        for (const isl of islands) isl.delete();
+        cs.delete();
+      }
+      body.delete();
+
+      // Also verify every other part on the 3MF plate (holders + all cavity insert pieces)
+      // has wide, anchored first-layer islands (> 25 mm², zero tiny dots) at first-layer Z = 0.1 mm.
+      for (const [partName, po] of objs) {
+        const pm2 = new wasm.Mesh({ numProp: 3, vertProperties: Float32Array.from(po.positions), triVerts: Uint32Array.from(po.faces) });
+        pm2.merge();
+        const pb = new wasm.Manifold(pm2);
+        const pBox = pb.boundingBox();
+        const cs0 = pb.slice(pBox.min[2] + 0.1);
+        const pIslands = cs0.decompose();
+        expect(pIslands.length, `${partName} (floor=${baseThicknessMm}) has bed contact`).toBeGreaterThanOrEqual(1);
+        for (const isl of pIslands) {
+          expect(isl.area(), `${partName} (floor=${baseThicknessMm}) first-layer island area`).toBeGreaterThan(25);
+          isl.delete();
+        }
+        cs0.delete();
+        pb.delete();
+      }
+    }
+  }, 120_000);
+
+  it('keeps an open blind-pocket insert floor unbroken even when baseThicknessMm is thin', () => {
+    const rOuter = 9.0;
+    const th = 4.0;
+    const disc = wasm.Manifold.cylinder(th, rOuter, rOuter, 48, false);
+    const spokeHoles = wasm.Manifold.union(
+      Array.from({ length: 5 }, (_, k) => {
+        const rad = ((k * 72) * Math.PI) / 180;
+        return wasm.Manifold.cylinder(th + 1, 1.1, 1.1, 24, false)
+          .translate([4.5 * Math.cos(rad), 4.5 * Math.sin(rad), -0.5]);
+      }),
+    );
+    const partM = disc.subtract(spokeHoles);
+    const pm = partM.getMesh();
+    const verts: number[] = [];
+    for (let i = 0; i < pm.vertProperties.length; i += pm.numProp) {
+      verts.push(pm.vertProperties[i] * MM, pm.vertProperties[i + 1] * MM, pm.vertProperties[i + 2] * MM);
+    }
+    for (const m of [disc, spokeHoles, partM]) m.delete();
+
+    const openScene: SceneGraph = {
+      nodes: [{
+        id: 'open_gear',
+        name: 'open_gear',
+        type: 'body',
+        pos: [0, 0, 0],
+        geoms: [{ name: 'g', type: 'mesh', size: [1], renderVertices: verts, vertices: verts, faces: Array.from(pm.triVerts) } as unknown as SceneGeom],
+        joints: [],
+        children: [],
+      }],
+    };
+    const res = generateMoldMeshes(openScene, {
+      ...DEFAULT_MOLD_OPTIONS,
+      moldType: 'open',
+      pullDirection: '+z',
+      dissolvableLiner: true,
+      linerPair: 'abs_hips',
+      linerConstruction: 'insert',
+      castMaterial: 'epoxy',
+      baseThicknessMm: 1.0,
+    }, wasm);
+    expect(res.success, res.error).toBe(true);
+    for (const [name, o] of objects(res.threeMf!)) {
+      const mesh = new wasm.Mesh({ numProp: 3, vertProperties: Float32Array.from(o.positions), triVerts: Uint32Array.from(o.faces) });
+      mesh.merge();
+      const body = new wasm.Manifold(mesh);
+      const b = body.boundingBox();
+      const cs = body.slice(b.min[2] + 0.1);
+      const islands = cs.decompose();
+      expect(islands.length, `${name} single unbroken base`).toBe(1);
+      expect(islands[0].area(), `${name} wide first layer`).toBeGreaterThan(250);
+      for (const isl of islands) isl.delete();
+      cs.delete();
+      body.delete();
+    }
+  }, 60_000);
 });

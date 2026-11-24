@@ -1873,9 +1873,13 @@ export function generateMoldMeshes(
     minBracketFloor,
     feed === 'bottom'
       ? Math.max(opts.baseThicknessMm, bottomFillFloorMm(neckR, linerSkinMm))
-      : Math.max(opts.baseThicknessMm, linerSkinMm > 0 ? linerSkinMm + 2 : 0),
+      : Math.max(opts.baseThicknessMm, linerSkinMm > 0 ? linerSkinMm + (opts.linerConstruction === 'insert' ? INSERT_CLEARANCE_MM + 2 : 2) : 0),
   );
-  const lidFloorMm = Math.max(minBracketFloor, opts.baseThicknessMm, linerSkinMm > 0 ? linerSkinMm + 2 : 0);
+  const lidFloorMm = Math.max(
+    minBracketFloor,
+    opts.baseThicknessMm,
+    linerSkinMm > 0 ? linerSkinMm + (opts.linerConstruction === 'insert' ? INSERT_CLEARANCE_MM + 2 : 2) : 0,
+  );
   const baseBlockHeight = baseTrueDepth + baseFloorMm;
   const lidBlockHeight = lidTrueDepth + lidFloorMm;
   // Whatever cuts the lid deepest in each column, drafted or not: the funnel stays clear of all of it.
