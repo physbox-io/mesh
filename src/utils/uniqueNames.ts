@@ -97,6 +97,17 @@ function planRenames(nodes: SceneNode[]): Renames {
   const geomNames = new Set<string>();
   const jointNames = new Set<string>();
   allNames(nodes, bodyNames, geomNames, jointNames);
+  const coupledTargets = new Set<string>();
+  const collectCoupled = (list: SceneNode[]) => {
+    for (const n of list || []) {
+      if (n.coupleTargetId) coupledTargets.add(n.coupleTargetId);
+      if (n.leftTargetId) coupledTargets.add(n.leftTargetId);
+      if (n.rightTargetId) coupledTargets.add(n.rightTargetId);
+      if (n.pulleyWheelId) coupledTargets.add(n.pulleyWheelId);
+      collectCoupled(n.children || []);
+    }
+  };
+  collectCoupled(nodes);
   const seenBodies = new Set<string>(RESERVED_BODIES);
   const seenGeoms = new Set<string>(RESERVED_GEOMS);
   const seenJoints = new Set<string>();
@@ -128,10 +139,18 @@ function planRenames(nodes: SceneNode[]): Renames {
           if (gName !== g.name) (entry.geoms ??= new Map()).set(i, gName);
           seenGeoms.add(gName);
         });
-        // An unnamed joint stays unnamed: MuJoCo takes any number of those.
+        // An unnamed joint stays unnamed unless an actuator, crumple lock, or
+        // coupling references it by name (otherwise MJCF emits "undefined").
+        const isCoupledNode = !!node.coupleTargetId
+          || coupledTargets.has(node.id)
+          || coupledTargets.has(node.name)
+          || (node.allowCoupling !== false && (!!node.toothForm || /gear|rack/i.test(`${node.id ?? ''} ${node.name ?? ''}`)));
         (node.joints || []).forEach((j, i) => {
-          if (!j.name) return;
-          let jName = j.name;
+          const needsName = !!j.actuator
+            || (j.crumpleTorqueNm !== undefined && j.type !== 'free')
+            || ((j.type === 'hinge' || j.type === 'slide') && isCoupledNode);
+          if (!j.name && !needsName) return;
+          let jName = j.name || `${bodyName}_${j.type || 'joint'}`;
           if (seenJoints.has(jName)) jName = free(jName, jointNames, seenJoints);
           if (jName !== j.name) (entry.joints ??= new Map()).set(i, jName);
           seenJoints.add(jName);

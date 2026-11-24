@@ -122,7 +122,7 @@ export function buildBreakModel(nodes: SceneNode[]): BreakModel {
       const freeJoint = (node.joints || []).find((j) => j.type === 'free')!;
       b = {
         id: `${node.id}~2`, name: `${node.name}~2`, pos: node.pos, quat: node.quat, euler: node.euler,
-        joints: [{ ...freeJoint, name: `${freeJoint.name}~2` }], geoms: [geomB], children: [],
+        joints: [{ ...freeJoint, name: `${freeJoint.name || node.name}~2` }], geoms: [geomB], children: [],
       };
       added.push(b);
       out.equality.push(`<weld name="${xmlAttr(key)}" body1="${xmlAttr(b.name)}" body2="${xmlAttr(node.name)}" anchor="${fmt(mid)}" solref="${STIFF_SOLREF}" solimp="${STIFF_SOLIMP}" />`);
@@ -412,10 +412,11 @@ function attachBlobs(
 function noSpin(node: SceneNode) {
   const free = (node.joints || []).find((j) => j.type === 'free');
   if (!free) return;
+  const baseName = free.name || node.name;
   const axes: [string, number[]][] = [['x', [1, 0, 0]], ['y', [0, 1, 0]], ['z', [0, 0, 1]]];
   node.joints = [
     ...node.joints.filter((j) => j !== free),
-    ...axes.map(([k, axis]): SceneJoint => ({ name: `${free.name}_${k}`, type: 'slide', axis, pos: [0, 0, 0] })),
+    ...axes.map(([k, axis]): SceneJoint => ({ name: `${baseName}_${k}`, type: 'slide', axis, pos: [0, 0, 0] })),
   ];
 }
 

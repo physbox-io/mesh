@@ -43,10 +43,11 @@ export function flatMesh(vertices: number[]): FlatMesh | null {
         // 45° off a rectangle and oversize it.
         const square = [0, 1, 2].findIndex((k) => Math.abs(n[k]) > 0.9999);
         const first = sub(pts[1], pts[0]);
-        const inPlane = sub(first, n.map((c) => c * dot(first, n)));
-        const u = square !== -1
+        const rawU = square !== -1
           ? [0, 1, 2].map((k) => (k === (square + 1) % 3 ? 1 : 0))
-          : dot(inPlane, inPlane) > 0 ? unit(inPlane) : along;
+          : first;
+        const inPlane = sub(rawU, n.map((c) => c * dot(rawU, n)));
+        const u = dot(inPlane, inPlane) > 0 ? unit(inPlane) : along;
         const v = cross(n, u);
         let uLo = Infinity, uHi = -Infinity, vLo = Infinity, vHi = -Infinity;
         for (const p of pts) {

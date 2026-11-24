@@ -384,10 +384,16 @@ export function mergeConstraintReports(reports: ConstraintReport[]): ConstraintR
       const was = byName.get(c.name);
       if (!was) { byName.set(c.name, c); continue; }
       const worse = severity(was) > severity(c) ? was : c;
+      const worstMm = was.worstMm !== undefined || c.worstMm !== undefined
+        ? Math.max(was.worstMm ?? 0, c.worstMm ?? 0)
+        : undefined;
+      const worstDeg = was.worstDeg !== undefined || c.worstDeg !== undefined
+        ? Math.max(was.worstDeg ?? 0, c.worstDeg ?? 0)
+        : undefined;
       byName.set(c.name, {
         ...c,
-        ...(worse.worstMm !== undefined ? { worstMm: worse.worstMm } : {}),
-        ...(worse.worstDeg !== undefined ? { worstDeg: worse.worstDeg } : {}),
+        ...(worstMm !== undefined ? { worstMm } : {}),
+        ...(worstDeg !== undefined ? { worstDeg } : {}),
         worstAtS: worse.worstAtS,
         ...(was.peakForce !== undefined || c.peakForce !== undefined
           ? { peakForce: Math.max(was.peakForce ?? 0, c.peakForce ?? 0) } : {}),

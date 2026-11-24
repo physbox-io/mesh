@@ -23,11 +23,13 @@ export function collectMeshAssets(nodes: SceneNode[]): SceneGeom[] {
   const walk = (list: SceneNode[]) => {
     if (!list) return;
     for (const node of list) {
-      for (const g of node.geoms || []) {
-        // MuJoCo refuses a mesh asset it cannot hull — empty, flat, or a line
-        // — so those are left out; buildGeom emits a box or a speck instead.
-        if (g.type === 'mesh' && g.vertices?.length && g.faces?.length && !flatMesh(g.vertices)) {
-          out.push(g);
+      if (!node.isPulleyRope && !node.cloth && !node.isComposite) {
+        for (const g of node.geoms || []) {
+          // MuJoCo refuses a mesh asset it cannot hull — empty, flat, or a line
+          // — so those are left out; buildGeom emits a box or a speck instead.
+          if (g.type === 'mesh' && g.vertices?.length && g.faces?.length && !flatMesh(g.vertices)) {
+            out.push(g);
+          }
         }
       }
       walk(node.children);

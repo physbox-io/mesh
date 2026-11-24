@@ -24,8 +24,9 @@ const formatGeomSize = (type: string, rawSize: unknown, geom?: SceneGeom): strin
   }
   // A hole in the list is an entry left out, read from the first as a short
   // size is; only a data-less mesh standing in as a box still gets 0.1.
+  const isPlane = type === 'plane';
   const arr = Array.isArray(rawSize)
-    ? rawSize.map((v: unknown) => (v === undefined ? undefined : (typeof v === 'number' && !isNaN(v) && v > 0) ? v : 0.1))
+    ? rawSize.map((v: unknown) => (v === undefined ? undefined : (typeof v === 'number' && !isNaN(v) && (isPlane ? v >= 0 : v > 0)) ? v : 0.1))
     : [0.1, 0.1, 0.1];
 
   if (type === 'sphere') {
@@ -36,7 +37,13 @@ const formatGeomSize = (type: string, rawSize: unknown, geom?: SceneGeom): strin
     const h = arr[1] || arr[0] || 0.1;
     return `${r} ${h}`;
   }
-  // For 'box', 'plane', or fallback primitive shapes
+  if (isPlane) {
+    const x = arr[0] ?? 0;
+    const y = arr[1] ?? arr[0] ?? 0;
+    const z = arr[2] ?? 0.1;
+    return `${x} ${y} ${z}`;
+  }
+  // For 'box' or fallback primitive shapes
   const x = arr[0] || 0.1;
   const y = arr[1] || arr[0] || x;
   const z = arr[2] || arr[0] || x;
@@ -92,7 +99,14 @@ const buildGeom = (geom: SceneGeom, massless = false) => {
     if (geom.rgba) slab += ` rgba="${geom.rgba.join(' ')}"`;
     return `<geom ${slab}${physicalAttrs(geom, massless)} />`;
   }
-  const emptyMesh = geom.type === 'mesh' && (flat === 'speck' || (flat !== null && rotated) || (!hasMeshData && Array.isArray(geom.vertices) && geom.vertices.length === 0));
+  const emptyMesh = geom.type === 'mesh' && (
+    flat === 'speck'
+    || (flat !== null && rotated)
+    || (!hasMeshData && (
+      (Array.isArray(geom.vertices) && geom.vertices.length === 0)
+      || (Array.isArray(geom.faces) && geom.faces.length === 0)
+    ))
+  );
   if (emptyMesh) {
     let speck = `name="${xmlAttr(geom.name)}" type="sphere" size="0.001" rgba="0 0 0 0" contype="0" conaffinity="0"`;
     if (geom.pos) speck += ` pos="${geom.pos.join(' ')}"`;
@@ -189,9 +203,12 @@ export const buildNode = (node: SceneNode): string => {
     const type = 'cable';
     const rawCountParts = (node.compositeCount || '15 1 1').trim().split(/\s+/).map(Number);
     const hasMultiDimCount = rawCountParts.some((n, idx) => idx > 0 && Number.isFinite(n) && n > 1);
-    const count = isLegacy2D || hasMultiDimCount
-      ? `${Math.max(2, parseInt(node.compositeCount || '', 10) || 15)} 1 1`
-      : (node.compositeCount || '15 1 1');
+    const firstCount = rawCountParts[0];
+    const hasTooFewCount = !Number.isFinite(firstCount) || firstCount < 2;
+    const clampedCount = Number.isFinite(firstCount) ? Math.max(2, Math.floor(firstCount)) : 15;
+    const count = isLegacy2D || hasMultiDimCount || hasTooFewCount
+      ? `${clampedCount} 1 1`
+      : (node.compositeCount || '15 1 1').trim();
     const rawSize = node.compositeSize !== undefined ? String(node.compositeSize).trim() : '1.5';
     const firstSize = parseFloat(rawSize.split(/\s+/)[0] || '');
     const size = isLegacy2D || hasMultiDimCount || /\s/.test(rawSize)
@@ -216,7 +233,7 @@ export const buildNode = (node: SceneNode): string => {
       : (geom?.size ? geom.size.join(' ') : '0.02');
     const geomRgba = geom?.rgba ? geom.rgba.join(' ') : '0.8 0.4 0.2 1';
 
-    const compositeXml = `<composite type="${type}" count="${count}" size="${size}" curve="${curve}" prefix="${xmlAttr(prefix)}"><joint kind="main" damping="${damping}" stiffness="${stiffness}" /><geom type="${geomType}" size="${geomSize}" rgba="${geomRgba}" /></composite>`;
+    const compositeXml = `<composite type="${type}" count="${xmlAttr(count)}" size="${xmlAttr(size)}" curve="${xmlAttr(curve)}" prefix="${xmlAttr(prefix)}"><joint kind="main" damping="${damping}" stiffness="${stiffness}" /><geom type="${geomType}" size="${geomSize}" rgba="${geomRgba}" /></composite>`;
 
     let attrs = `name="${xmlAttr(nameStr)}" pos="${posStr}"`;
     if (node.quat) {

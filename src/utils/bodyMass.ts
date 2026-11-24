@@ -37,7 +37,7 @@ const positive = (v: unknown): v is number => typeof v === 'number' && Number.is
  * mass on a visual geom; a decomposed mesh's mass carrier is one).
  */
 const weighs = (g: SceneGeom) => g.csg !== 'difference' && g.csg !== 'intersection'
-  && (g.role !== 'visual' || positive(g.mass));
+  && !g.contactClass && (g.role !== 'visual' || positive(g.mass));
 
 /** A decomposed mesh kept out of contact to carry its pieces' mass (resolveCsgGeoms). */
 const carriesPieceMass = (g: SceneGeom, authored: SceneGeom[]) => g.type === 'mesh' && g.role === 'visual'

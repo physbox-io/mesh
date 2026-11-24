@@ -20,6 +20,8 @@ interface Weld { bodyName: string; bodyId?: string; targetId: string; rigid?: bo
 interface CrumpleLock { jointName: string; bodyName: string; bodyId: string; parentName: string; parentId?: string }
 interface Connect { bodyId: string; bodyName: string; targetId: string; anchor: number[] }
 
+const bodyNameOf = (node: SceneNode): string => node.name || node.id || 'body';
+
 /** What the scene asks to be held, driven or joined, gathered in one walk. */
 function gather(nodes: SceneNode[]) {
   const actuators: SceneJoint[] = [];
@@ -32,25 +34,33 @@ function gather(nodes: SceneNode[]) {
   const walk = (list: SceneNode[], parentName?: string, parentId?: string) => {
     if (!list) return;
     for (const node of list) {
+      // Pulley ropes and cloth pieces are emitted as <frame>s, not <body>s,
+      // so they have no MuJoCo body of their own; their children hang off the
+      // enclosing parent body.
+      if (node.isPulleyRope || node.cloth) {
+        walk(node.children, parentName, parentId);
+        continue;
+      }
+      const bodyName = bodyNameOf(node);
       byId.set(node.id, node);
-      byName.set(node.name, node);
+      byName.set(bodyName, node);
       for (const j of modelJoints(node)) {
         jointsByName.set(j.name, { node, joint: j });
         if (j.crumpleTorqueNm !== undefined && j.type !== 'free') {
-          crumpleLocks.push({ jointName: j.name, bodyName: node.name, bodyId: node.id, parentName: parentName ?? '', parentId });
+          crumpleLocks.push({ jointName: j.name, bodyName, bodyId: node.id, parentName: parentName ?? '', parentId });
         }
       }
-      if (node.weldTargetId) {
-        welds.push({ bodyName: node.name, bodyId: node.id, targetId: node.weldTargetId, ...(node.weldRigid ? { rigid: true } : {}) });
+      if (node.weldTargetId && node.weldTargetId !== node.id && node.weldTargetId !== bodyName) {
+        welds.push({ bodyName, bodyId: node.id, targetId: node.weldTargetId, ...(node.weldRigid ? { rigid: true } : {}) });
       }
       if (node.isComposite && node.weldLastToId) {
-        welds.push({ bodyName: (node.compositePrefix || `${node.name}_`) + 'B_last', targetId: node.weldLastToId });
+        welds.push({ bodyName: (node.compositePrefix || `${bodyName}_`) + 'B_last', targetId: node.weldLastToId });
       }
-      if (node.connectTargetId && node.connectAnchor) {
-        connects.push({ bodyId: node.id, bodyName: node.name, targetId: node.connectTargetId, anchor: node.connectAnchor });
+      if (node.connectTargetId && node.connectAnchor && node.connectTargetId !== node.id && node.connectTargetId !== bodyName) {
+        connects.push({ bodyId: node.id, bodyName, targetId: node.connectTargetId, anchor: node.connectAnchor });
       }
       for (const j of modelJoints(node)) if (j.actuator) actuators.push(j);
-      walk(node.children, node.name, node.id);
+      walk(node.children, bodyName, node.id);
     }
   };
   walk(nodes);
@@ -165,6 +175,7 @@ export function constraintsXml(nodes: SceneNode[], breaks: ReturnType<typeof bui
   welds.forEach((w, i) => {
     // Not a body in the scene: a body a rope generates (`<prefix>B_last`).
     const target = bodyOf(w.targetId);
+    if (w.bodyId && (w.targetId === w.bodyId || target?.id === w.bodyId)) return;
     // A bolted joint: stiff, where the default weld lets a 3 kg drawer sag
     // millimetres onto what is under it. Only when asked for.
     const stiff = w.rigid ? ' solref="0.004 1" solimp="0.99 0.999 0.0002 0.5 2"' : '';
@@ -173,7 +184,7 @@ export function constraintsXml(nodes: SceneNode[], breaks: ReturnType<typeof bui
     // from it swing round it: a 20 g knob welded to a drawer fell 165 mm in
     // two seconds. The anchor is in body2's frame.
     const anchor = w.bodyId && target ? weldAnchor(w.bodyId, target.id) : '';
-    equalities += `\n    <weld name="weld_constraint_${i + 1}" body1="${xmlAttr(w.bodyName)}" body2="${xmlAttr(target?.name || w.targetId)}"${anchor}${stiff} />`;
+    equalities += `\n    <weld name="weld_constraint_${i + 1}" body1="${xmlAttr(w.bodyName)}" body2="${xmlAttr(target ? bodyNameOf(target) : w.targetId)}"${anchor}${stiff} />`;
   });
 
   // Closed-loop pins.
@@ -184,7 +195,8 @@ export function constraintsXml(nodes: SceneNode[], breaks: ReturnType<typeof bui
     // A fixed body2 is the same as the world to MuJoCo, so naming it costs
     // nothing.
     const target = bodyOf(c.targetId);
-    const body2 = target ? ` body2="${xmlAttr(target.name || c.targetId)}"` : '';
+    if (c.targetId === c.bodyId || target?.id === c.bodyId) return;
+    const body2 = target ? ` body2="${xmlAttr(bodyNameOf(target))}"` : '';
     // Held rigid, as a pin is: at MuJoCo's default impedance a pin was only as
     // stiff as the lighter body it held, so a scissor lift's pins opened 7 mm
     // under its 2 kg platform with a 1 kg slider, and it folded flat with a
@@ -217,8 +229,16 @@ export function constraintsXml(nodes: SceneNode[], breaks: ReturnType<typeof bui
     linkedKeys.add(key);
     excludes.push([a, b]);
   };
-  for (const c of plan.couplings) if (!c.keepContact) link(jointsByName.get(c.joint1)?.node.name, jointsByName.get(c.joint2)?.node.name);
-  for (const c of connects) link(c.bodyName, bodyOf(c.targetId)?.name);
+  for (const c of plan.couplings) {
+    if (c.keepContact) continue;
+    const n1 = jointsByName.get(c.joint1)?.node;
+    const n2 = jointsByName.get(c.joint2)?.node;
+    link(n1 ? bodyNameOf(n1) : undefined, n2 ? bodyNameOf(n2) : undefined);
+  }
+  for (const c of connects) {
+    const t = bodyOf(c.targetId);
+    link(c.bodyName, t ? bodyNameOf(t) : undefined);
+  }
 
   // Dry friction on a coupled joint goes where the chain feels it. The nodes
   // are this compile's copies, so their joint lists can be replaced.

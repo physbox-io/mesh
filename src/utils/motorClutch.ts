@@ -54,10 +54,11 @@ export function clutchDriverBodyXml(bodyName: string, frameAttrs: string, j: Sce
   const kv = j.actuator!.kv ?? 1;
   const pos = j.pos ? ` pos="${j.pos.join(' ')}"` : '';
   const axis = j.axis ? ` axis="${j.axis.join(' ')}"` : '';
+  const driverKey = j.name || bodyName;
   const joint = `<joint name="${xmlAttr(clutchDriverJointName(j.name))}" type="${j.type}"${pos}${axis} armature="${clutchDriverInertia(kv)}" limited="false" />`;
   // A speck: it must have a mass to own a dof, and must touch nothing.
-  const geom = `<geom name="${xmlAttr(`${bodyName}__drive_g`)}" type="sphere" size="0.0005" mass="1e-6" contype="0" conaffinity="0" rgba="0 0 0 0" />`;
-  return `<body name="${xmlAttr(`${bodyName}__drive`)}"${frameAttrs}>${joint}${geom}</body>`;
+  const geom = `<geom name="${xmlAttr(`${driverKey}__drive_g`)}" type="sphere" size="0.0005" mass="1e-6" contype="0" conaffinity="0" rgba="0 0 0 0" />`;
+  return `<body name="${xmlAttr(`${driverKey}__drive_b`)}"${frameAttrs}>${joint}${geom}</body>`;
 }
 
 /** The clutch itself: dry friction on (joint − driver) at the motor's limit, held nearly rigid below it. */

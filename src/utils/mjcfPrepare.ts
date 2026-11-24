@@ -9,6 +9,7 @@ import { withoutNulls } from './withoutNulls';
 import { applyContactClasses } from './contactClasses';
 import { bodyFormGeoms } from './cloth/bodyForm';
 import { finishBodyFormGeoms } from './cloth/bodyFormEdit';
+import { isNodeRotationBaked } from './sceneTree';
 
 const wedgeMeshCache = new Map<string, ReturnType<typeof generateWedgeMeshData>>();
 
@@ -78,6 +79,15 @@ export function prepareScene(scene: SceneGraph): { nodes: SceneNode[]; breaks: R
   let hasCloth = false;
   eachNode(nodes, (node) => { if (node.cloth) hasCloth = true; });
   eachNode(nodes, (node) => {
+    // A mesh body whose rotation is already baked into its vertices keeps
+    // euler/quat only for the sidebar UI. Strip them on the compiler's copy
+    // before resolveCsgGeoms/applyContactClasses replace or drop the source
+    // geoms that carry baseVertices, which would otherwise make
+    // isNodeRotationBaked return false and double-rotate the body.
+    if (isNodeRotationBaked(node)) {
+      delete node.euler;
+      delete node.quat;
+    }
     authoredGeoms.set(node, node.geoms || []);
     node.geoms = resolveCsgGeoms(node, 'physics', { keepDrawn: hasCloth });
   });

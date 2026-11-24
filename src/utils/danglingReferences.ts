@@ -115,8 +115,15 @@ function present(nodes: SceneNode[]): Present {
 const isLive = (to: string, live: Present) =>
   live.names.has(to) || live.prefixes.some((p) => to.startsWith(p));
 
+const isSelfTarget = (node: SceneNode, f: ReferenceField, to: string): boolean =>
+  (f === 'weldTargetId' || f === 'connectTargetId')
+  && ((!!node.id && to === node.id) || (!!node.name && to === node.name));
+
 const dangling = (node: SceneNode, live: Present): ReferenceField[] =>
-  FIELDS.filter((f) => typeof node[f] === 'string' && !isLive(node[f] as string, live));
+  FIELDS.filter((f) => {
+    const to = node[f];
+    return typeof to === 'string' && (!isLive(to, live) || isSelfTarget(node, f, to));
+  });
 
 const hasDanglingCloth = (node: SceneNode, live: Present): boolean => {
   const fit = node.cloth?.garment?.fitTo;
