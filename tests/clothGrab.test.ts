@@ -8,7 +8,10 @@ describe('cloth taken hold of while the scene runs (ClothSim.grab)', () => {
     const r = await clothRun([nodes.find((n) => n.id === 'formB'), nodes.find((n) => n.id === 'hoodie')] as never);
     const m = r.models[0];
     const hood = m.groups.filter((g) => /hood[LR]$/.test(g.name));
-    const hoodTop = () => Math.max(...hood.flatMap((g) => g.particles.map((p) => r.sim.x[3 * p + 2])));
+    const hoodParticles = [...new Set(hood.flatMap((g) => g.particles))];
+    const hoodTop = () => Math.max(...hoodParticles.map((p) => r.sim.x[3 * p + 2]));
+    const hoodMeanZ = () => hoodParticles.reduce((s, p) => s + r.sim.x[3 * p + 2], 0) / hoodParticles.length;
+    const hoodMeanSpeed = () => hoodParticles.reduce((s, p) => s + Math.hypot(r.sim.v[3 * p], r.sim.v[3 * p + 1], r.sim.v[3 * p + 2]), 0) / hoodParticles.length;
     // The hood's highest point, by its index as drawn.
     let o = 0, idx = -1, top = -1, pz = -Infinity;
     for (const g of m.groups) { if (g.name.endsWith('hoodL')) g.particles.forEach((p, l) => { if (r.sim.x[3 * p + 2] > pz) { pz = r.sim.x[3 * p + 2]; idx = o + l; top = p; } }); o += g.particles.length; }
@@ -26,8 +29,15 @@ describe('cloth taken hold of while the scene runs (ClothSim.grab)', () => {
     r.run(0.5);
     expect(Math.hypot(...[0, 1, 2].map((c) => r.sim.x[3 * top + c] - to[c]))).toBeLessThan(0.03);
     r.sim.grab(null, null);
-    r.run(1.5);
+    const releasedMeanZ = hoodMeanZ();
+    r.run(0.6);
+    // Soft cotton jersey drapes down behind the neck and settles quickly rather
+    // than springing back up against gravity and oscillating for seconds.
+    expect(hoodMeanSpeed()).toBeLessThan(0.1);
+    expect(hoodMeanZ()).toBeLessThanOrEqual(releasedMeanZ + 0.015);
+    r.run(0.9);
     expect(hoodTop()).toBeLessThan(up - 0.15);
+    expect(hoodMeanZ()).toBeLessThanOrEqual(releasedMeanZ + 0.015);
     expect(r.crossings().length).toBeLessThan(before + 20);
     expect(r.speedOver(0.2)).toBeLessThan(0.02);
   }, 600000);

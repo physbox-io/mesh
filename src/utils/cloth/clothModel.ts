@@ -18,7 +18,7 @@ import { garmentNameWarnings, linePicks } from './clothNames';
 import * as THREE from 'three';
 import type { ClothMaterial, ClothMaterialName, ClothPatternPrint, GarmentBelt, GarmentTrim } from '../../types/cloth';
 import type { SceneNode } from '../../types/scene';
-import { chain, CLOTH_MATERIALS, clothMaterial, DEFAULT_CLOTH_SPACING, DEFAULT_SEW_TIME, meshCloth } from './clothMesh';
+import { chain, CLOTH_MATERIALS, clothBendRigidity, clothMaterial, DEFAULT_CLOTH_SPACING, DEFAULT_SEW_TIME, meshCloth, resolveClothMaterial } from './clothMesh';
 import { restOff } from './garmentPlan';
 import { garmentShell } from './garmentShell';
 import { doneUp } from './fastening';
@@ -1174,9 +1174,9 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       if (sharedAt.size) anyShared = true;
       // Tacked onto an earlier add-on (a belt over a pocket): its points, as particles now.
       piece.tacks = piece.tacks.map((tk) => { const on = tk.onPiece ? placed.get(tk.onPiece) : undefined; return on ? { ...tk, tri: [on(tk.tri[0]), on(tk.tri[1]), on(tk.tri[2])], onPiece: undefined } : tk; });
-      const pm = { ...(CLOTH_MATERIALS[piece.material ?? materialName] ?? material), ...(piece.materialOverrides ?? {}) };
-      const stretch = (pm.young * pm.thickness) / (material.young * material.thickness), bend = (pm.young * pm.thickness ** 3) / (material.young * material.thickness ** 3);
-      if ((pm.young * pm.thickness ** 3) / 12 >= BOARD_STIFFNESS) boards.push({ particles: piece.uv.map((_, i) => particleOf(i)), rest: piece.rest3 ?? piece.uv.map(([u, vv]) => [u * (piece.shrink ?? 1), vv]), tris: piece.tris, held: [...piece.tacks.map((tk) => tk.local), ...(piece.shared ?? []).map((sh) => sh.local)] });
+      const pm = resolveClothMaterial(CLOTH_MATERIALS[piece.material ?? materialName] ?? material, piece.materialOverrides);
+      const stretch = (pm.young * pm.thickness) / (material.young * material.thickness), bend = clothBendRigidity(pm) / Math.max(1e-12, clothBendRigidity(material));
+      if (clothBendRigidity(pm) >= BOARD_STIFFNESS) boards.push({ particles: piece.uv.map((_, i) => particleOf(i)), rest: piece.rest3 ?? piece.uv.map(([u, vv]) => [u * (piece.shrink ?? 1), vv]), tris: piece.tris, held: [...piece.tacks.map((tk) => tk.local), ...(piece.shared ?? []).map((sh) => sh.local)] });
       // Cut short of where it starts, if drawn in: its flat length is its rest.
       const uv = piece.uv.map(([u, vv]) => [u * (piece.shrink ?? 1), vv]);
       piece.start.forEach((q, i) => { if (own.has(i)) { x0.push(q); mass.push(0); } });
@@ -1265,7 +1265,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       // Soft cloth sewn on hinges at its seam as a seam does: held to the
       // angle it started at, a hood pulled down off the head climbed back up
       // over it once let go.
-      const setShape = piece.pressed || !!piece.rest3 || (pm.young * pm.thickness ** 3) / 12 >= BOARD_STIFFNESS;
+      const setShape = piece.pressed || !!piece.rest3 || clothBendRigidity(pm) >= BOARD_STIFFNESS;
       if (material.bending && piece.tacks.length && setShape) {
         for (let t = 0; t < piece.tris.length; t += 3) for (let e = 0; e < 3; e++) {
           const a = piece.tris[t + e], b = piece.tris[t + ((e + 1) % 3)], o = piece.tris[t + ((e + 2) % 3)];
@@ -1318,7 +1318,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       base[p.name] = x0.length;
       const off = base[p.name], particleOf = (local: number) => off + local;
       const pm = CLOTH_MATERIALS[p.material ?? materialName] ?? material, k = p.stiffnessScale ?? 1;
-      const stretch = (k * pm.young * pm.thickness) / (material.young * material.thickness), bend = (k * pm.young * pm.thickness ** 3) / (material.young * material.thickness ** 3);
+      const stretch = (k * pm.young * pm.thickness) / (material.young * material.thickness), bend = (k * clothBendRigidity(pm)) / Math.max(1e-12, clothBendRigidity(material));
       for (const q of m.start) { x0.push(toWorld(q)); mass.push(0); }
       for (let t = 0; t < m.tris.length; t += 3) {
         const [i, j, l] = [m.tris[t], m.tris[t + 1], m.tris[t + 2]];

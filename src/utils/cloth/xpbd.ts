@@ -25,6 +25,7 @@ import { BoardShapes, type Board } from './clothBoards';
 import { contourStep, findCrossings, trianglesNear, untangleMesh, type UntangleMesh } from './clothUntangle';
 import { ClothCcd } from './clothCcd';
 import { colliderContactInto, type Collider, type ContactOut } from './clothColliders';
+import { clothBendRigidity } from './clothMesh';
 
 /** Substep, seconds. */
 /**
@@ -282,9 +283,9 @@ export class ClothSim {
       this.w.set(m.invMass, base);
       const mat = m.material;
       // Stretch: an edge's compliance is the inverse of the sheet's stiffness
-      // (E t, N/m). Bending: the sheet's rigidity E t^3 / 12 (N m).
+      // (E t, N/m). Bending: the sheet's flexural rigidity (N m).
       const stretchAlpha = 1 / Math.max(1, mat.young * mat.thickness);
-      const bendK = (mat.young * mat.thickness ** 3) / 12;
+      const bendK = clothBendRigidity(mat);
       for (let k = 0; k < m.edges.length; k += 2) {
         const rest = m.edgeRest[k / 2];
         E.push(base + m.edges[k], base + m.edges[k + 1]);

@@ -22,7 +22,10 @@ export const CLOTH_MATERIALS: Record<ClothMaterialName, ClothMaterial> = {
   // 160 g/m2 cotton jersey, a t-shirt: 0.8 mm, as jersey is. Modelled 2 mm
   // thick (the same stretch at 2.5x less modulus), it was 15x stiffer to
   // bend, could not follow the form into the armpit, and chattered there.
-  jersey: { arealDensity: 0.16, young: 2.5e6, poisson: 0.2, thickness: 0.0008, bending: true, damping: 0.2, friction: 0.6, windCd: 1.2, give: 0.15, easeIn: 0 },
+  // Its yarn loops slide when bent, so flexural rigidity is ~0.1x the solid
+  // plate E t^3 / 12 (~1.1e-5 N m, Peirce bending length ~1.9 cm); at 1x, a
+  // folded hoodie hood sprang back up against gravity like neoprene.
+  jersey: { arealDensity: 0.16, young: 2.5e6, poisson: 0.2, thickness: 0.0008, bending: true, bendFactor: 0.1, damping: 0.2, friction: 0.6, windCd: 1.2, give: 0.15, easeIn: 0 },
   // 2x2 rib knit: heavier and softer to stretch across the wales, for cuffs,
   // waistbands, socks and close-fitting tops.
   rib: { arealDensity: 0.22, young: 1.5e6, poisson: 0.25, thickness: 0.0012, bending: true, damping: 0.2, friction: 0.65, windCd: 1.2, give: 0.35, easeIn: 0 },
@@ -66,8 +69,28 @@ export function stableYoung(mat: ClothMaterial, spacing: number, scale = 1): num
 export const DEFAULT_CLOTH_SPACING = 0.04;
 export const DEFAULT_SEW_TIME = 1.5;
 
+/**
+ * Merge a base cloth material with optional overrides. When overrides replace
+ * `young` or `thickness` (e.g. a stiffened collar or board peak) without an
+ * explicit `bendFactor`, reset `bendFactor` to 1 so the solid-plate formula
+ * applies directly to the overridden modulus and thickness.
+ */
+export function resolveClothMaterial(base: ClothMaterial, overrides?: Partial<ClothMaterial>): ClothMaterial {
+  if (!overrides) return { ...base };
+  const merged: ClothMaterial = { ...base, ...overrides };
+  if (overrides.bendFactor === undefined && (overrides.young !== undefined || overrides.thickness !== undefined)) {
+    merged.bendFactor = 1;
+  }
+  return merged;
+}
+
+/** Flexural rigidity D (N·m): `bendFactor * E t^3 / 12`. */
+export function clothBendRigidity(mat: Pick<ClothMaterial, 'young' | 'thickness' | 'bendFactor'>): number {
+  return ((mat.bendFactor ?? 1) * mat.young * mat.thickness ** 3) / 12;
+}
+
 export function clothMaterial(spec: ClothSpec): ClothMaterial {
-  return { ...CLOTH_MATERIALS[spec.material ?? 'jersey'], ...(spec.materialOverrides ?? {}) };
+  return resolveClothMaterial(CLOTH_MATERIALS[spec.material ?? 'jersey'], spec.materialOverrides);
 }
 
 // ---------- 2D ----------

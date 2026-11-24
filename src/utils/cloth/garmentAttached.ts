@@ -9,7 +9,7 @@
 
 import { BOARD_STIFFNESS } from './clothBoards';
 import type { ClothMaterialName, GarmentAttachment } from '../../types/cloth';
-import { CLOTH_MATERIALS, meshOutline } from './clothMesh';
+import { CLOTH_MATERIALS, clothBendRigidity, meshOutline, resolveClothMaterial } from './clothMesh';
 import { heightsOver, nearestTack, SEWN_OFF, type AddOnPiece, type AddOnTack } from './garmentAddOns';
 
 type V3 = number[];
@@ -219,8 +219,8 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
     const mesh = meshOutline(a.outline.map((q, k) => ({ id: `s${k}`, pts: [q, a.outline[(k + 1) % n]] })), step);
     const stretch = (i: number, j: number) => { const out: number[] = []; for (let k = i; k !== j; k = (k + 1) % n) out.push(...(out.length ? mesh.edgeVerts[`s${k}`].slice(1) : mesh.edgeVerts[`s${k}`])); return out; };
     const onSewn = new Set(stretch(i0, i1));
-    const pm = { ...(CLOTH_MATERIALS[a.material ?? hostMaterial] ?? CLOTH_MATERIALS.jersey), ...(a.materialOverrides ?? {}) };
-    const board = (pm.young * pm.thickness ** 3) / 12 >= BOARD_STIFFNESS;
+    const pm = resolveClothMaterial(CLOTH_MATERIALS[a.material ?? hostMaterial] ?? CLOTH_MATERIALS.jersey, a.materialOverrides);
+    const board = clothBendRigidity(pm) >= BOARD_STIFFNESS;
     // Its own stretches sewn together (a hood's crown, anything folded and sewn): paired by fraction along each.
     const selfStitches: [number, number][] = [];
     built.set(a.name, { stretch, n });
@@ -474,8 +474,8 @@ export function topStretch(outline: [number, number][]): [number, number] {
  * (E t^3 / 12(1 - nu^2)) and the angle between each pair of its triangles,
  * and its weight's height. Only to tell one start from another.
  */
-function restEnergy(x: number[][], tris: number[], m: { young: number; thickness: number; poisson: number; arealDensity: number }): number {
-  const kb = (m.young * m.thickness ** 3) / (12 * (1 - m.poisson * m.poisson));
+function restEnergy(x: number[][], tris: number[], m: { young: number; thickness: number; poisson: number; arealDensity: number; bendFactor?: number }): number {
+  const kb = clothBendRigidity(m) / (1 - m.poisson * m.poisson);
   const normal: number[][] = [], area: number[] = [], edge = new Map<string, number[]>();
   let weight = 0;
   for (let t = 0; t < tris.length; t += 3) {

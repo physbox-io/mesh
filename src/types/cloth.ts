@@ -217,6 +217,14 @@ export interface ClothMaterial {
   thickness: number;
   /** Whether it resists bending as well as stretch. A membrane need not, and is cheaper. */
   bending: boolean;
+  /**
+   * Dimensionless flexural-rigidity factor relative to a monolithic solid plate
+   * (`E t^3 / 12`), defaulting to 1. Textiles are yarn networks whose fibres
+   * slide past each other when bent, so soft knits like jersey bend roughly an
+   * order of magnitude more easily than a solid rubber sheet of the same
+   * tensile modulus and thickness.
+   */
+  bendFactor?: number;
   damping: number;
   friction: number;
   /**
