@@ -230,8 +230,8 @@ export function historyActions({ set, get }: SliceDeps): HistoryActions {
         };
 
         silenceAllLiveAcoustics();
-        peekPhysicsWorkerClient()?.setPlaying(false);
-        peekPhysicsWorkerClient()?.setDrag(null, null);
+        peekPhysicsWorkerClient()?.setPlaying?.(false);
+        peekPhysicsWorkerClient()?.setDrag?.(null, null);
         clearBreakage(set);
 
         set({
@@ -291,8 +291,8 @@ export function historyActions({ set, get }: SliceDeps): HistoryActions {
         };
 
         silenceAllLiveAcoustics();
-        peekPhysicsWorkerClient()?.setPlaying(false);
-        peekPhysicsWorkerClient()?.setDrag(null, null);
+        peekPhysicsWorkerClient()?.setPlaying?.(false);
+        peekPhysicsWorkerClient()?.setDrag?.(null, null);
         clearBreakage(set);
 
         set({

@@ -160,8 +160,8 @@ export function sceneSwapActions({ set, get }: SliceDeps): SceneSwapActions {
 
         get().prepareForDiscreteChange();
         silenceAllLiveAcoustics();
-        peekPhysicsWorkerClient()?.setPlaying(false);
-        peekPhysicsWorkerClient()?.setDrag(null, null);
+        peekPhysicsWorkerClient()?.setPlaying?.(false);
+        peekPhysicsWorkerClient()?.setDrag?.(null, null);
         // Whatever broke in the last scene broke in THAT scene. Carried over, a
         // reloaded vase was already "in pieces" and could never break again, and
         // a weld whose key the new scene happens to share started out sheared.
@@ -203,8 +203,8 @@ export function sceneSwapActions({ set, get }: SliceDeps): SceneSwapActions {
       if (!preset) return;
       get().prepareForDiscreteChange();
       silenceAllLiveAcoustics();
-      peekPhysicsWorkerClient()?.setPlaying(false);
-      peekPhysicsWorkerClient()?.setDrag(null, null);
+      peekPhysicsWorkerClient()?.setPlaying?.(false);
+      peekPhysicsWorkerClient()?.setDrag?.(null, null);
       clearBreakage(set);
       useGarmentSculpt.getState().set({ target: null });
 
@@ -266,8 +266,8 @@ export function sceneSwapActions({ set, get }: SliceDeps): SceneSwapActions {
     loadGeneratedScene: (scene, carve) => {
       get().prepareForDiscreteChange();
       silenceAllLiveAcoustics();
-      peekPhysicsWorkerClient()?.setPlaying(false);
-      peekPhysicsWorkerClient()?.setDrag(null, null);
+      peekPhysicsWorkerClient()?.setPlaying?.(false);
+      peekPhysicsWorkerClient()?.setDrag?.(null, null);
       clearBreakage(set);
       useGarmentSculpt.getState().set({ target: null });
       const swap = ++sceneSwapId;
