@@ -28,24 +28,28 @@ export const getSyncedSceneGraph = (
     parentWorldPos: THREE.Vector3,
     parentWorldQuat: THREE.Quaternion
   ) => {
-    if (node.isPulleyRope) {
+    if (node.isPulleyRope || node.cloth) {
       // No body of its own, but its children sit in its frame: mjcf.ts puts
-      // them in a <frame> at the rope's pose, and the tree reads them so.
+      // them in a <frame> at the rope/cloth's pose, and the tree reads them so.
       // Handing them the parent's frame wrote each child back off by the
-      // rope's offset, and it jumped there on the next build.
+      // frame's offset, and it jumped there on the next build.
       if (node.children?.length) {
         const [w, x, y, z] = nodeLocalQuat(node);
-        const ropeQuat = parentWorldQuat.clone().multiply(new THREE.Quaternion(x, y, z, w));
+        const frameQuat = parentWorldQuat.clone().multiply(new THREE.Quaternion(x, y, z, w));
         const p = node.pos ?? [0, 0, 0];
-        const ropePos = new THREE.Vector3(p[0], p[1], p[2]).applyQuaternion(parentWorldQuat).add(parentWorldPos);
+        const framePos = new THREE.Vector3(p[0], p[1], p[2]).applyQuaternion(parentWorldQuat).add(parentWorldPos);
         for (const child of node.children) {
-          syncNode(child, ropePos, ropeQuat);
+          syncNode(child, framePos, frameQuat);
         }
       }
       return;
     }
 
-    const bodyId = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, node.name);
+    const primaryName = node.name || node.id;
+    let bodyId = primaryName ? mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, primaryName) : -1;
+    if (bodyId === -1 && node.name && node.id && node.id !== node.name) {
+      bodyId = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, node.id);
+    }
     
     const currentWorldPos = parentWorldPos.clone();
     const currentWorldQuat = parentWorldQuat.clone();

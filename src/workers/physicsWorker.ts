@@ -84,7 +84,7 @@ import {
 import { isCriticallyDampedDamperPress } from '../utils/voiceSympathyPool';
 import { HistoryRing } from './historyRing';
 import { buildImpactWatches, checkImpacts as detectImpacts, type ImpactWatches } from './impactWatch';
-import { JOINT_NV, applyEditedCtrl, captureState, copyCarriedActuators as copyCarriedActuatorsByName, copyJointsByName, documentCtrlValues, seedNewBodies, type CarriedState } from './carryState';
+import { JOINT_NV, applyEditedCtrl, captureState, copyCarriedActuators as copyCarriedActuatorsByName, copyJointsByName, documentCtrlValues, seedNewBodies, writeInitialVelocity, type CarriedState } from './carryState';
 import { ScriptStateStore, attachScriptState, scriptStateForBuild } from '../utils/scriptState';
 import { BREAK_ARM_S, axialPush, barBending, toBodyFrame, weldTorque, canCrumple, crumpleAsWeld, crumpleKey, holdSteps, isBreakable, weldKey, weldOverload, type WeldBreakConfig } from '../utils/breakThresholds';
 import { BREAK_FIELDS, parseBreakKey } from '../utils/breakKeys';
@@ -422,9 +422,24 @@ const createScriptApi = (node: SceneNode): Record<string, unknown> => {
   // rate in the body's frame and projected onto the joint axis, the same frame
   // the axis is written in.
   const _alongAxis = (fnName: string, v: number[] | number, joint: SceneJoint): number => {
-    if (typeof v === 'number') return v;
-    if (Array.isArray(v) && v.length === 1) return v[0];
+    if (typeof v === 'number') {
+      if (!Number.isFinite(v)) throw new Error(`${fnName}: value must be a finite number; nothing was set`);
+      return v;
+    }
+    if (Array.isArray(v) && v.length === 1) {
+      if (typeof v[0] !== 'number' || !Number.isFinite(v[0])) {
+        throw new Error(`${fnName}: value must be a finite number; nothing was set`);
+      }
+      return v[0];
+    }
     if (Array.isArray(v) && v.length >= 3) {
+      if (
+        typeof v[0] !== 'number' || !Number.isFinite(v[0]) ||
+        typeof v[1] !== 'number' || !Number.isFinite(v[1]) ||
+        typeof v[2] !== 'number' || !Number.isFinite(v[2])
+      ) {
+        throw new Error(`${fnName}: all 3 components must be finite numbers; nothing was set`);
+      }
       const a = joint.axis ?? [0, 0, 1];
       const len = Math.hypot(a[0], a[1], a[2]) || 1;
       const along = (v[0] * a[0] + v[1] * a[1] + v[2] * a[2]) / len;
@@ -441,6 +456,11 @@ const createScriptApi = (node: SceneNode): Record<string, unknown> => {
     if (!Array.isArray(v) || v.length < n) {
       throw new Error(`${fnName}: joint '${joint.name}' is a ${joint.type}; pass an array of ${n} numbers`);
     }
+    for (let i = 0; i < n; i++) {
+      if (typeof v[i] !== 'number' || !Number.isFinite(v[i])) {
+        throw new Error(`${fnName}: all ${n} components must be finite numbers; nothing was set`);
+      }
+    }
     return v;
   };
 
@@ -452,7 +472,6 @@ const createScriptApi = (node: SceneNode): Record<string, unknown> => {
       const mdl = model!, dat = data!;
       const { joint, jId } = _resolveSetterJoint('setPosition', bodyName);
       const qposadr = mdl.jnt_qposadr[jId];
-      pendingWake.add(mdl.jnt_bodyid[jId]);
       if (joint.type === 'free') {
         const p = _vector('setPosition', pos, 3, joint);
         dat.qpos[qposadr + 0] = p[0]; dat.qpos[qposadr + 1] = p[1]; dat.qpos[qposadr + 2] = p[2];
@@ -462,12 +481,12 @@ const createScriptApi = (node: SceneNode): Record<string, unknown> => {
       } else {
         dat.qpos[qposadr] = _alongAxis('setPosition', pos, joint);
       }
+      pendingWake.add(mdl.jnt_bodyid[jId]);
     }),
     setVelocity: _guard((vel: number[] | number, bodyName: string = node.id) => {
       const mdl = model!, dat = data!;
       const { joint, jId } = _resolveSetterJoint('setVelocity', bodyName);
       const dofadr = mdl.jnt_dofadr[jId];
-      pendingWake.add(mdl.jnt_bodyid[jId]);
       if (joint.type === 'free') {
         const v = _vector('setVelocity', vel, 3, joint);
         dat.qvel[dofadr + 0] = v[0]; dat.qvel[dofadr + 1] = v[1]; dat.qvel[dofadr + 2] = v[2];
@@ -476,24 +495,26 @@ const createScriptApi = (node: SceneNode): Record<string, unknown> => {
       } else {
         dat.qvel[dofadr] = _alongAxis('setVelocity', vel, joint);
       }
+      pendingWake.add(mdl.jnt_bodyid[jId]);
     }),
     setAngularVelocity: _guard((angvel: number[] | number, bodyName: string = node.id) => {
       const mdl = model!, dat = data!;
       const { joint, jId } = _resolveSetterJoint('setAngularVelocity', bodyName);
       const dofadr = mdl.jnt_dofadr[jId];
-      pendingWake.add(mdl.jnt_bodyid[jId]);
       if (joint.type === 'free') {
         // World frame, as getAngularVelocity reads it: a free joint's qvel holds ω in the body's frame.
         const w = worldToBodyFrame(dat.xmat, mdl.jnt_bodyid[jId], _vector('setAngularVelocity', angvel, 3, joint));
         dat.qvel[dofadr + 3] = w[0]; dat.qvel[dofadr + 4] = w[1]; dat.qvel[dofadr + 5] = w[2];
       } else if (joint.type === 'ball') {
-        const w = _vector('setAngularVelocity', angvel, 3, joint);
+        // World frame, as getAngularVelocity reads it: a ball joint's qvel also holds ω in the body's frame.
+        const w = worldToBodyFrame(dat.xmat, mdl.jnt_bodyid[jId], _vector('setAngularVelocity', angvel, 3, joint));
         dat.qvel[dofadr + 0] = w[0]; dat.qvel[dofadr + 1] = w[1]; dat.qvel[dofadr + 2] = w[2];
       } else if (joint.type === 'hinge') {
         dat.qvel[dofadr] = _alongAxis('setAngularVelocity', angvel, joint);
       } else {
         throw new Error(`setAngularVelocity: joint '${joint.name}' is a slide, which cannot rotate; use setVelocity`);
       }
+      pendingWake.add(mdl.jnt_bodyid[jId]);
     }),
     getPosition: (bodyName?: string) => {
       const dat = data!;
@@ -527,24 +548,40 @@ const createScriptApi = (node: SceneNode): Record<string, unknown> => {
       return jId !== -1 ? dat.qvel[mdl.jnt_dofadr[jId]] : 0;
     },
     applyForce: (forceVec: number[], bodyName?: string) => {
-      if (!Array.isArray(forceVec)) { noteScriptProblem(me, `applyForce: pass [fx, fy, fz], not ${typeof forceVec}`); return; }
+      if (
+        !Array.isArray(forceVec) || forceVec.length < 3 ||
+        typeof forceVec[0] !== 'number' || !Number.isFinite(forceVec[0]) ||
+        typeof forceVec[1] !== 'number' || !Number.isFinite(forceVec[1]) ||
+        typeof forceVec[2] !== 'number' || !Number.isFinite(forceVec[2])
+      ) {
+        noteScriptProblem(me, 'applyForce: pass [fx, fy, fz] of 3 finite numbers; nothing was applied');
+        return;
+      }
       const dat = data!;
       const bId = _body('applyForce', bodyName);
       if (bId === -1) return;
       pendingWake.add(bId);
-      dat.xfrc_applied[bId * 6 + 0] += forceVec[0] || 0;
-      dat.xfrc_applied[bId * 6 + 1] += forceVec[1] || 0;
-      dat.xfrc_applied[bId * 6 + 2] += forceVec[2] || 0;
+      dat.xfrc_applied[bId * 6 + 0] += forceVec[0];
+      dat.xfrc_applied[bId * 6 + 1] += forceVec[1];
+      dat.xfrc_applied[bId * 6 + 2] += forceVec[2];
     },
     applyTorque: (torqueVec: number[], bodyName?: string) => {
-      if (!Array.isArray(torqueVec)) { noteScriptProblem(me, `applyTorque: pass [tx, ty, tz], not ${typeof torqueVec}`); return; }
+      if (
+        !Array.isArray(torqueVec) || torqueVec.length < 3 ||
+        typeof torqueVec[0] !== 'number' || !Number.isFinite(torqueVec[0]) ||
+        typeof torqueVec[1] !== 'number' || !Number.isFinite(torqueVec[1]) ||
+        typeof torqueVec[2] !== 'number' || !Number.isFinite(torqueVec[2])
+      ) {
+        noteScriptProblem(me, 'applyTorque: pass [tx, ty, tz] of 3 finite numbers; nothing was applied');
+        return;
+      }
       const dat = data!;
       const bId = _body('applyTorque', bodyName);
       if (bId === -1) return;
       pendingWake.add(bId);
-      dat.xfrc_applied[bId * 6 + 3] += torqueVec[0] || 0;
-      dat.xfrc_applied[bId * 6 + 4] += torqueVec[1] || 0;
-      dat.xfrc_applied[bId * 6 + 5] += torqueVec[2] || 0;
+      dat.xfrc_applied[bId * 6 + 3] += torqueVec[0];
+      dat.xfrc_applied[bId * 6 + 4] += torqueVec[1];
+      dat.xfrc_applied[bId * 6 + 5] += torqueVec[2];
     },
     getOrientation: (bodyName?: string) => {
       const dat = data!;
@@ -3978,6 +4015,37 @@ const initialVelocityJointNames = (nodes: SceneNode[]): string[] => {
  * scripts, damping, breaks, impacts, history. False when the step failed or
  * went to NaN, which has already been reported and has stopped play.
  */
+/** Clear differential audio/watch state and silence any active continuous audio channels. */
+const resetAudioWatchState = () => {
+  prevConstraintDof = null;
+  prevStringVelDof = null;
+  for (const w of jointStopWatches) w.initialized = false;
+  for (const w of clothTrailingWatches) w.initialized = false;
+  pendingAudioImpacts.clear();
+  lastAudioEmitSim.clear();
+  pendingAeroSnaps.clear();
+  bowContactStartSimTime.clear();
+  recentBowEvents.clear();
+  prevActiveStringsByBow.clear();
+  continuousPairStartSimTime.clear();
+  if (hadActiveBowedStrings) {
+    hadActiveBowedStrings = false;
+    post({ type: 'BOWED_STRINGS', contacts: [] });
+  }
+  if (hadActiveFrictionContacts) {
+    hadActiveFrictionContacts = false;
+    post({ type: 'CONTACT_FRICTION', contacts: [] });
+  }
+  if (hadActiveDampingContacts) {
+    hadActiveDampingContacts = false;
+    post({ type: 'AUDIO_DAMPING', contacts: [] });
+  }
+  if (hadActiveAeroVoices) {
+    hadActiveAeroVoices = false;
+    post({ type: 'AERO_AUDIO', voices: [], snaps: [] });
+  }
+};
+
 const stepOnce = (stepSize: number): boolean => {
   if (!model || !data || !mujoco) return false;
   try {
@@ -4001,16 +4069,42 @@ const stepOnce = (stepSize: number): boolean => {
     // timestep), so the reset warning is watched as well. See mujocoAutoReset.
     const prevResets = autoResetCount(data);
     mujoco.mj_step(model, data);
-    stepCloth(stepSize);
     if (data.time <= prevTime || autoResetCount(data) !== prevResets) {
       const message = prevTime === 0
         ? 'Simulation diverged on its first step: MuJoCo reset it to the starting pose at rest — simulation stopped.' +
           wipedInitialVelocityNote(initialVelocityJointNames(sceneGraph.nodes))
         : 'Simulation diverged (solver auto-reset detected) — simulation stopped.';
+      resetAudioWatchState();
       post({ type: 'ERROR', message, fatal: false });
       isPlaying = false;
       return false;
     }
+    // Check finiteness immediately after mj_step, before running cloth,
+    // kinematics, breaks, impacts, audio, or history side effects.
+    // One view, not one per element: every `data.qpos` / `data.qvel` read is an
+    // embind getter that allocates a fresh Float64Array over the heap.
+    const qpos = data.qpos;
+    const nq = model.nq;
+    for (let j = 0; j < nq; j++) {
+      if (!Number.isFinite(qpos[j])) {
+        resetAudioWatchState();
+        post({ type: 'ERROR', message: 'NaN or Inf detected in qpos — simulation stopped.', fatal: false });
+        isPlaying = false;
+        return false;
+      }
+    }
+    const qvel = data.qvel;
+    const nv = model.nv;
+    for (let j = 0; j < nv; j++) {
+      if (!Number.isFinite(qvel[j])) {
+        resetAudioWatchState();
+        post({ type: 'ERROR', message: 'NaN or Inf detected in qvel — simulation stopped.', fatal: false });
+        isPlaying = false;
+        return false;
+      }
+    }
+
+    stepCloth(stepSize);
     // Bodies to the instant the joints are at, for everything read from here on.
     syncKinematics(mujoco, model, data);
     checkConstraintBreaks();
@@ -4023,31 +4117,11 @@ const stepOnce = (stepSize: number): boolean => {
       const entry = buildHistoryEntry(aeroDiagnostics);
       history.push(entry);
     }
-
-    // One view, not one per element: every `data.qpos` / `data.qvel` read is an
-    // embind getter that allocates a fresh Float64Array over the heap.
-    const qpos = data.qpos;
-    const nq = model.nq;
-    for (let j = 0; j < nq; j++) {
-      if (!Number.isFinite(qpos[j])) {
-        post({ type: 'ERROR', message: 'NaN or Inf detected in qpos — simulation stopped.', fatal: false });
-        isPlaying = false;
-        return false;
-      }
-    }
-    const qvel = data.qvel;
-    const nv = model.nv;
-    for (let j = 0; j < nv; j++) {
-      if (!Number.isFinite(qvel[j])) {
-        post({ type: 'ERROR', message: 'NaN or Inf detected in qvel — simulation stopped.', fatal: false });
-        isPlaying = false;
-        return false;
-      }
-    }
     return true;
   } catch (e) {
     const msg = String((e as Error)?.message || e);
     const fatal = /Aborted|enlarge memory|abort|bad_alloc/i.test(msg);
+    resetAudioWatchState();
     post({
       type: 'ERROR',
       message: msg,
@@ -4423,9 +4497,17 @@ const doBuild = (
   model = null;
   data = null;
 
-  const newModel = meshVfs ? mujoco.MjModel.from_xml_string(xml, meshVfs) : mujoco.MjModel.from_xml_string(xml);
-  const newData = new mujoco.MjData(newModel);
-  if (threaded) mujoco.mju_threadpool(newData, STEP_THREADS);
+  let newModel: MjModel | null = null;
+  let newData: MjData | null = null;
+  try {
+    newModel = meshVfs ? mujoco.MjModel.from_xml_string(xml, meshVfs) : mujoco.MjModel.from_xml_string(xml);
+    newData = new mujoco.MjData(newModel);
+    if (threaded) mujoco.mju_threadpool(newData, STEP_THREADS);
+  } catch (e) {
+    if (newData) { try { newData.delete(); } catch { /* ignore */ } }
+    if (newModel) { try { newModel.delete(); } catch { /* ignore */ } }
+    throw e;
+  }
 
   model = newModel;
   data = newData;
@@ -4493,11 +4575,12 @@ const doBuild = (
     traverseVel(sceneGraph.nodes);
 
     let needForward = false;
+    const jntType = newModel.jnt_type;
+    const jntDofadr = newModel.jnt_dofadr;
+    const newQvel = newData.qvel;
     for (const j of initVelJoints) {
       const jntId = jointIdCache[j.name];
-      if (jntId !== undefined) {
-        const dofAdr = newModel.jnt_dofadr[jntId];
-        for (let i = 0; i < j.vel.length; i++) newData.qvel[dofAdr + i] = j.vel[i];
+      if (jntId !== undefined && writeInitialVelocity(jntType, jntDofadr, newModel.nv, newQvel, jntId, j.vel)) {
         needForward = true;
       }
     }
@@ -4678,6 +4761,8 @@ const runHeadless = async (
   );
   const savedPluckTouchSite = new Map(recentPluckTouchSite);
   const savedContinuousPairStart = new Map(continuousPairStartSimTime);
+  const savedLastNodeStrike = new Map(lastNodeStrikeSimTime);
+  const savedPendingAeroSnaps = new Map(pendingAeroSnaps);
   const savedCloth = cloth;
   // A headless run starts its scripts from nothing and must not leave its
   // state or compiled closures in the live scene's.
@@ -4746,13 +4831,21 @@ const runHeadless = async (
     traverseVel(sceneGraph.nodes);
     let needForward = false;
     const initialVelocityJoints: string[] = [];
+    const jntType = model.jnt_type;
+    const jntDofadr = model.jnt_dofadr;
+    const qvel = data.qvel;
     for (const j of initVelJoints) {
       const jntId = jointIdCache[j.name];
-      if (jntId !== undefined) {
-        const dofAdr = model.jnt_dofadr[jntId];
-        for (let i = 0; i < j.vel.length; i++) data.qvel[dofAdr + i] = j.vel[i];
+      if (jntId !== undefined && writeInitialVelocity(jntType, jntDofadr, model.nv, qvel, jntId, j.vel)) {
         needForward = true;
-        if (j.vel.some((v) => v !== 0)) initialVelocityJoints.push(j.name);
+        const jntNv = JOINT_NV[jntType[jntId]] ?? 1;
+        const count = Math.min(j.vel.length, jntNv, Math.max(0, model.nv - jntDofadr[jntId]));
+        for (let i = 0; i < count; i++) {
+          if (typeof j.vel[i] === 'number' && Number.isFinite(j.vel[i]) && j.vel[i] !== 0) {
+            initialVelocityJoints.push(j.name);
+            break;
+          }
+        }
       }
     }
     if (needForward) mujoco.mj_forward(model, data);
@@ -4778,18 +4871,25 @@ const runHeadless = async (
      */
     const rebuildMidRun = (rebuild: HeadlessRebuild) => {
       applyMeshFiles(rebuild.meshFiles, rebuild.dropMeshes);
-      let nextModel: MjModel;
+      // Release the stepping threadpool before compiling: Emscripten's pthread
+      // pool is sized to MAX_THREADS, and compiling while STEP_THREADS are held
+      // can deadlock waiting for worker threads.
+      if (threaded && headlessData) mj.mju_threadpool(headlessData, 0);
+      let nextModel: MjModel | null = null;
+      let nextData: MjData | null = null;
       try {
         nextModel = meshVfs ? mj.MjModel.from_xml_string(rebuild.xml, meshVfs) : mj.MjModel.from_xml_string(rebuild.xml);
+        nextData = new mj.MjData(nextModel);
+        if (threaded) mj.mju_threadpool(nextData, STEP_THREADS);
       } catch (e) {
+        if (nextData) { try { nextData.delete(); } catch { /* ignore */ } }
+        if (nextModel) { try { nextModel.delete(); } catch { /* ignore */ } }
+        if (threaded && headlessData) { try { mj.mju_threadpool(headlessData, STEP_THREADS); } catch { /* ignore */ } }
         warnings.push(`A body shattered at t=${data!.time.toFixed(3)} s, but the model with its pieces did not compile (${String((e as Error)?.message || e)}), so the run went on with it whole.`);
         return;
       }
-      const nextData = new mj.MjData(nextModel);
       const carried = captureState(model, data, jointIdCache, actuatorIdCache);
       earlierReports.push(constraints.report(data!));
-      if (threaded && headlessData) mj.mju_threadpool(headlessData, 0);
-      if (threaded) mj.mju_threadpool(nextData, STEP_THREADS);
       try { headlessData?.delete(); } catch { /* already gone */ }
       try { headlessModel?.delete(); } catch { /* already gone */ }
       headlessModel = nextModel;
@@ -4943,6 +5043,10 @@ const runHeadless = async (
     for (const [k, v] of savedPluckTouchSite) recentPluckTouchSite.set(k, v);
     continuousPairStartSimTime.clear();
     for (const [k, v] of savedContinuousPairStart) continuousPairStartSimTime.set(k, v);
+    lastNodeStrikeSimTime.clear();
+    for (const [k, v] of savedLastNodeStrike) lastNodeStrikeSimTime.set(k, v);
+    pendingAeroSnaps.clear();
+    for (const [k, v] of savedPendingAeroSnaps) pendingAeroSnaps.set(k, v);
     prevConstraintDof = null;
     prevStringVelDof = null;
     breakableWelds = savedBreakableWelds; brokenWeldKeys = savedBrokenWeldKeys;
@@ -4978,6 +5082,14 @@ let impactAnswer: ((rebuild: HeadlessRebuild | undefined) => void) | null = null
  */
 let heldMessages: MessageEvent[] | null = null;
 
+const drainHeldMessages = async () => {
+  // Still holding while it drains, so anything newer queues behind.
+  while (heldMessages && heldMessages.length) {
+    await handleMessage(heldMessages.shift()!);
+  }
+  heldMessages = null;
+};
+
 const askMainAboutImpact = (id: string, event: ImpactEvent) => new Promise<HeadlessRebuild | undefined>((resolve) => {
   impactAnswer = resolve;
   post({ type: 'HEADLESS_IMPACT', id, event });
@@ -5000,8 +5112,18 @@ const handleMessage = async (evt: MessageEvent) => {
   try {
     switch (msg.type) {
       case 'BUILD': {
+        const holds = !mujoco && !heldMessages;
+        if (holds) heldMessages = [];
+        let loadFailed = false;
         try {
-          if (!mujoco) await loadMujoco();
+          if (!mujoco) {
+            try {
+              await loadMujoco();
+            } catch (e) {
+              loadFailed = true;
+              throw e;
+            }
+          }
           applyMeshFiles(msg.meshFiles, msg.dropMeshes);
           if (msg.hydroModels) {
             cachedHydroByNodeId = new Map(msg.hydroModels.map((h: HydroBodyModel) => [h.nodeId, h]));
@@ -5016,7 +5138,10 @@ const handleMessage = async (evt: MessageEvent) => {
           }
         } catch (e) {
           const errMsg = String((e as Error)?.message || e);
-          post({ type: 'BUILT', id: msg.id, ok: false, error: errMsg, fatal: /Aborted|enlarge memory|abort|bad_alloc/i.test(errMsg) });
+          const fatal = loadFailed || /Aborted|enlarge memory|abort|bad_alloc/i.test(errMsg);
+          post({ type: 'BUILT', id: msg.id, ok: false, error: errMsg, fatal });
+        } finally {
+          if (holds) await drainHeldMessages();
         }
         break;
       }
@@ -5038,33 +5163,7 @@ const handleMessage = async (evt: MessageEvent) => {
       case 'SET_SOUND': {
         soundEnabled = !!msg.enabled;
         if (!soundEnabled) {
-          prevConstraintDof = null;
-          prevStringVelDof = null;
-          for (const w of jointStopWatches) w.initialized = false;
-          for (const w of clothTrailingWatches) w.initialized = false;
-          pendingAudioImpacts.clear();
-          lastAudioEmitSim.clear();
-          pendingAeroSnaps.clear();
-          bowContactStartSimTime.clear();
-          recentBowEvents.clear();
-          prevActiveStringsByBow.clear();
-          continuousPairStartSimTime.clear();
-          if (hadActiveBowedStrings) {
-            hadActiveBowedStrings = false;
-            post({ type: 'BOWED_STRINGS', contacts: [] });
-          }
-          if (hadActiveFrictionContacts) {
-            hadActiveFrictionContacts = false;
-            post({ type: 'CONTACT_FRICTION', contacts: [] });
-          }
-          if (hadActiveDampingContacts) {
-            hadActiveDampingContacts = false;
-            post({ type: 'AUDIO_DAMPING', contacts: [] });
-          }
-          if (hadActiveAeroVoices) {
-            hadActiveAeroVoices = false;
-            post({ type: 'AERO_AUDIO', voices: [], snaps: [] });
-          }
+          resetAudioWatchState();
         }
         break;
       }
@@ -5090,33 +5189,7 @@ const handleMessage = async (evt: MessageEvent) => {
           // the simulation stopped. See FRAME_INTERVAL_MS.
           if (framePending && model && data) postFrame();
           // Re-prime differential DOF watches so SET_QPOS edits while paused never pop on unpause!
-          prevConstraintDof = null;
-          prevStringVelDof = null;
-          for (const w of jointStopWatches) w.initialized = false;
-          for (const w of clothTrailingWatches) w.initialized = false;
-          pendingAudioImpacts.clear();
-          lastAudioEmitSim.clear();
-          bowContactStartSimTime.clear();
-          recentBowEvents.clear();
-          prevActiveStringsByBow.clear();
-          continuousPairStartSimTime.clear();
-          pendingAeroSnaps.clear();
-          if (hadActiveBowedStrings) {
-            hadActiveBowedStrings = false;
-            post({ type: 'BOWED_STRINGS', contacts: [] });
-          }
-          if (hadActiveFrictionContacts) {
-            hadActiveFrictionContacts = false;
-            post({ type: 'CONTACT_FRICTION', contacts: [] });
-          }
-          if (hadActiveDampingContacts) {
-            hadActiveDampingContacts = false;
-            post({ type: 'AUDIO_DAMPING', contacts: [] });
-          }
-          if (hadActiveAeroVoices) {
-            hadActiveAeroVoices = false;
-            post({ type: 'AERO_AUDIO', voices: [], snaps: [] });
-          }
+          resetAudioWatchState();
           postScriptStatus(true);
         }
         break;
@@ -5163,13 +5236,27 @@ const handleMessage = async (evt: MessageEvent) => {
         const jId = jointIdCache[msg.jointName] ?? mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT.value, msg.jointName);
         if (jId !== -1) {
           const adr = model.jnt_qposadr[jId];
-          if (Array.isArray(msg.value)) {
-            for (let i = 0; i < msg.value.length; i++) {
-              if (adr + msg.axis + i < model.nq) data.qpos[adr + msg.axis + i] = msg.value[i];
+          const axis = typeof msg.axis === 'number' && Number.isInteger(msg.axis) ? msg.axis : -1;
+          let wrote = false;
+          if (axis >= 0) {
+            if (Array.isArray(msg.value)) {
+              for (let i = 0; i < msg.value.length; i++) {
+                const idx = adr + axis + i;
+                const val = msg.value[i];
+                if (idx >= 0 && idx < model.nq && typeof val === 'number' && Number.isFinite(val)) {
+                  data.qpos[idx] = val;
+                  wrote = true;
+                }
+              }
+            } else {
+              const idx = adr + axis;
+              if (idx >= 0 && idx < model.nq && typeof msg.value === 'number' && Number.isFinite(msg.value)) {
+                data.qpos[idx] = msg.value;
+                wrote = true;
+              }
             }
-          } else {
-            data.qpos[adr + msg.axis] = msg.value;
           }
+          if (!wrote) break;
           pendingWake.add(model.jnt_bodyid[jId]);
           const vadr = model.jnt_dofadr[jId];
           const nv = JOINT_NV[model.jnt_type[jId]] ?? 1;
@@ -5197,18 +5284,23 @@ const handleMessage = async (evt: MessageEvent) => {
         break;
       }
       case 'RUN_HEADLESS': {
-        try {
-          if (!mujoco) await loadMujoco();
-        } catch (e) {
-          post({ type: 'HEADLESS_RESULT', id: msg.id, ok: false, error: String((e as Error)?.message || e), warnings: [] });
-          break;
-        }
-        applyMeshFiles(msg.meshFiles, msg.dropMeshes);
         const judged = !!msg.judgeImpacts;
-        // Only the outermost run holds and hands back; see heldMessages.
-        const holds = judged && !heldMessages;
+        // Hold incoming messages during cold-boot WASM load and/or judged runs
+        // so interleaved control/query messages are queued and drained in order.
+        const holds = (!mujoco || judged) && !heldMessages;
         if (holds) heldMessages = [];
         try {
+          if (!mujoco) {
+            try {
+              await loadMujoco();
+            } catch (e) {
+              const errMsg = String((e as Error)?.message || e);
+              post({ type: 'HEADLESS_RESULT', id: msg.id, ok: false, error: errMsg, warnings: [] });
+              post({ type: 'ERROR', message: errMsg, fatal: true });
+              break;
+            }
+          }
+          applyMeshFiles(msg.meshFiles, msg.dropMeshes);
           const id: string = msg.id;
           const result = await runHeadless(
             msg.xml, msg.sceneGraph, msg.ticks, msg.stride,
@@ -5220,12 +5312,7 @@ const handleMessage = async (evt: MessageEvent) => {
           );
           post({ type: 'HEADLESS_RESULT', id, ...result });
         } finally {
-          if (holds) {
-            // Still holding while it drains, so anything newer queues behind.
-            const held = heldMessages ?? [];
-            while (held.length) await handleMessage(held.shift()!);
-            heldMessages = null;
-          }
+          if (holds) await drainHeldMessages();
         }
         break;
       }

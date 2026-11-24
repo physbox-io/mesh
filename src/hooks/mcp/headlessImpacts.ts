@@ -18,6 +18,13 @@ import { DEFAULT_FRACTURE_PIECES } from '../../utils/fracture';
 import { effectiveSceneGraph, wallAtImpact } from '../../store/breakage';
 import { findNodeById } from '../../store/sceneClone';
 import { cutShards, shardRoom } from '../../store/shatterCut';
+import { nodeLocalQuat } from '../../utils/sceneTree';
+
+const quatToMat3 = ([w, x, y, z]: [number, number, number, number]): number[] => [
+  1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y),
+  2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x),
+  2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y),
+];
 
 /** A body that came apart during the run. */
 export interface HeadlessShatter {
@@ -70,35 +77,69 @@ export function headlessImpacts(scene: SceneGraph, compile: (graph: SceneGraph) 
     }
   };
 
+  const tryShatter = async (
+    target: SceneNode,
+    localPoint: number[],
+    targetEvent: ImpactEvent,
+  ): Promise<boolean> => {
+    if (broken[target.id]) return false;
+    const wallM = target.shatterThicknessRef ? wallAtImpact(target, localPoint) : null;
+    if (!shatterVerdict(targetEvent.impulseNs, target, wallM)) return false;
+    const pieces = Math.min(target.shatterPieces ?? DEFAULT_FRACTURE_PIECES, shardRoom(broken, target.id));
+    if (pieces < 2) return false;
+    let shards: SceneNode[] | null = null;
+    try {
+      shards = await cutShards(target, targetEvent, pieces);
+    } catch (err) {
+      console.warn('[headless shatter]', err);
+    }
+    if (!shards) return false;
+    broken[target.id] = shards;
+    shattered.push({
+      id: target.id,
+      name: target.name,
+      time: targetEvent.time,
+      impulseNs: targetEvent.impulseNs,
+      shards: shards.map((s) => s.id),
+    });
+    return true;
+  };
+
   const judge: HeadlessImpactJudge = async (event) => {
     // The scene as it now is, with whatever already broke in pieces.
     const live = effectiveSceneGraph(scene, broken);
     const node = findNodeById(live.nodes, event.nodeId);
-    if (!node) return null;
+    const other = event.otherNodeId ? findNodeById(live.nodes, event.otherNodeId) : null;
+    if (!node && !other) return null;
 
-    // Shattering wins over denting, as in handleImpact.
-    if (!broken[node.id]) {
-      const wallM = node.shatterThicknessRef ? wallAtImpact(node, event.localPoint) : null;
-      if (shatterVerdict(event.impulseNs, node, wallM)) {
-        const pieces = Math.min(node.shatterPieces ?? DEFAULT_FRACTURE_PIECES, shardRoom(broken, node.id));
-        if (pieces < 2) return null;
-        let shards: SceneNode[] | null = null;
-        try {
-          shards = await cutShards(node, event, pieces);
-        } catch (err) {
-          console.warn('[headless shatter]', err);
-        }
-        if (!shards) return null;
-        broken[node.id] = shards;
-        shattered.push({ id: node.id, name: node.name, time: event.time, impulseNs: event.impulseNs, shards: shards.map((s) => s.id) });
-        const graph = effectiveSceneGraph(scene, broken);
-        return { xml: compile(graph), sceneGraph: graph };
-      }
+    let didShatter = false;
+    // Shattering wins over denting on each side of the collision independently.
+    if (node) {
+      if (await tryShatter(node, event.localPoint, event)) didShatter = true;
+      else mark(node, event);
     }
 
-    mark(node, event);
-    const other = event.otherNodeId ? findNodeById(live.nodes, event.otherNodeId) : null;
-    if (other && event.otherLocalPoint && event.otherLocalNormal) mark(other, event);
+    if (other) {
+      const otherPoint = event.otherLocalPoint ?? [0, 0, 0];
+      const otherNormal = event.otherLocalNormal ?? [0, 0, 1];
+      const otherEvent: ImpactEvent = {
+        ...event,
+        nodeId: other.id,
+        localPoint: otherPoint,
+        localNormal: otherNormal,
+        pos: other.pos ?? [0, 0, 0],
+        xmat: quatToMat3(nodeLocalQuat(other)),
+        vel: [0, 0, 0],
+        angvel: [0, 0, 0],
+      };
+      if (await tryShatter(other, otherPoint, otherEvent)) didShatter = true;
+      else if (event.otherLocalPoint && event.otherLocalNormal) mark(other, event);
+    }
+
+    if (didShatter) {
+      const graph = effectiveSceneGraph(scene, broken);
+      return { xml: compile(graph), sceneGraph: graph };
+    }
     return null;
   };
 

@@ -346,6 +346,11 @@ export class PhysicsWorkerClient {
             this.pendingBuilds.delete(msg.id);
             pending.resolve(msg);
           }
+          if (!msg.ok && msg.fatal) {
+            const errMsg = msg.error || 'The physics engine failed fatally during build.';
+            this.rejectAll(new Error(errMsg));
+            this.onError?.(errMsg, true);
+          }
           break;
         }
         case 'FRAME':
@@ -395,6 +400,11 @@ export class PhysicsWorkerClient {
           if (pending) {
             this.pendingHeadless.delete(msg.id);
             pending.resolve(msg);
+          }
+          if (!msg.ok && (msg as { fatal?: boolean }).fatal) {
+            const errMsg = msg.error || 'The physics engine failed fatally during headless run.';
+            this.rejectAll(new Error(errMsg));
+            this.onError?.(errMsg, true);
           }
           break;
         }

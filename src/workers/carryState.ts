@@ -17,6 +17,34 @@ type MjData = InstanceType<Mujoco['MjData']>;
 export const JOINT_NQ = [7, 4, 1, 1];
 export const JOINT_NV = [6, 3, 1, 1];
 
+/**
+ * Copy a joint's `initialVelocity` into `qvel`, clamped to the joint's own DOF
+ * span and the model's `nv`, ignoring any non-finite elements. Returns whether
+ * at least one element was written.
+ */
+export function writeInitialVelocity(
+  jntType: ArrayLike<number>,
+  jntDofadr: ArrayLike<number>,
+  nv: number,
+  qvel: Float64Array,
+  jntId: number,
+  vel: readonly number[],
+): boolean {
+  const dofAdr = jntDofadr[jntId];
+  if (dofAdr < 0) return false;
+  const jntNv = JOINT_NV[jntType[jntId]] ?? 1;
+  const count = Math.min(vel.length, jntNv, Math.max(0, nv - dofAdr));
+  let wrote = false;
+  for (let i = 0; i < count; i++) {
+    const v = vel[i];
+    if (typeof v === 'number' && Number.isFinite(v)) {
+      qvel[dofAdr + i] = v;
+      wrote = true;
+    }
+  }
+  return wrote;
+}
+
 export interface CarriedState {
   nq: number; nv: number; nu: number; time: number;
   qpos: Float64Array; qvel: Float64Array; ctrl: Float64Array;
@@ -163,10 +191,9 @@ export function seedNewBodies(
           if (!j.initialVelocity || placed.has(j.name)) continue;
           const id = jointIdOf[j.name];
           if (id === undefined) continue;
-          const dofAdr = jntDofadr[id];
-          const initVel = j.initialVelocity;
-          for (let i = 0; i < initVel.length; i++) newQvel[dofAdr + i] = initVel[i];
-          seededNew = true;
+          if (writeInitialVelocity(jntType, jntDofadr, newModel.nv, newQvel, id, j.initialVelocity)) {
+            seededNew = true;
+          }
         }
       }
       seedNew(node.children);
