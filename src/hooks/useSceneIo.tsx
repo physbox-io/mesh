@@ -12,6 +12,7 @@ import { promoteJointedMeshGeomsDeep } from '../store/meshGeomTransforms';
 import { clearBreakage } from '../store/breakage';
 import { framingPatch } from '../store/sceneFraming';
 import { getPhysicsWorkerClient, onNextPaint, silenceAllLiveAcoustics } from '../store/physicsEngine';
+import { applySceneSound } from '../store/sceneSwapActions';
 import { packMeshArrays, unpackMeshArrays } from '../utils/meshPacking';
 import { exportBaseName } from '../utils/exportBaseName';
 import { cloudAutosave } from '../utils/cloudDocuments';
@@ -103,6 +104,7 @@ export function applyLoadedSceneToStore(parsed: {
       outgoingSceneGraph: outgoing,
     });
     const installed = useStore.getState().sceneGraph;
+    applySceneSound(installed);
     const swap = ++importSwapSeq;
     const build = Promise.resolve(useStore.getState().recompile(installed, null, true, true));
     const finish = () => onNextPaint(() => {

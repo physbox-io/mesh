@@ -20,6 +20,9 @@ import { framingPatch } from './sceneFraming';
 import { DEFAULT_ENVIRONMENT, environmentOf, takeEnvironment } from './sceneEnvironment';
 import type { PhysicsState } from './useStore';
 import type { SliceDeps } from './sliceDeps';
+import { useSoundStore } from './soundStore';
+import { sceneHasInstruments } from '../utils/sceneSound';
+import { unlockAudioContext } from '../utils/modalAudio';
 
 /** A preset as listed in PRESETS: a scene, and optionally a camera framing and an environment. */
 interface Preset {
@@ -36,6 +39,23 @@ interface Preset {
    * defaults and quietly rescales the thing it was handed.
    */
   carve?: Partial<ReliefCarveOptions>;
+  /**
+   * Whether loading this preset switches Sound on. Left out, a scene with
+   * instrument bodies does (sceneHasInstruments) and others do not.
+   */
+  sound?: boolean;
+}
+
+/**
+ * Switch Sound on for a scene made to be heard, and back off on leaving
+ * one that switched it on. A load is usually a click, so the audio context
+ * can be woken here, as the header's own toggle does.
+ */
+export function applySceneSound(scene: SceneGraph, explicit?: boolean) {
+  const wants = explicit ?? sceneHasInstruments(scene.nodes);
+  if (useSoundStore.getState().applySceneSound(wants)) {
+    try { unlockAudioContext(); } catch { /* no audio in tests */ }
+  }
 }
 
 /**
@@ -188,6 +208,7 @@ export function sceneSwapActions({ set, get }: SliceDeps): SceneSwapActions {
             ...(environment ?? DEFAULT_ENVIRONMENT),
           }));
         });
+        applySceneSound(savedScene);
         if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
           window.dispatchEvent(new CustomEvent('physics:preset-loaded', { detail: { name, prev } }));
         }
@@ -246,6 +267,7 @@ export function sceneSwapActions({ set, get }: SliceDeps): SceneSwapActions {
           ...environmentOf(preset.environment),
         }));
       });
+      applySceneSound(scene, preset.sound);
       if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
         window.dispatchEvent(new CustomEvent('physics:preset-loaded', { detail: { name, prev } }));
       }
@@ -288,6 +310,7 @@ export function sceneSwapActions({ set, get }: SliceDeps): SceneSwapActions {
           ...DEFAULT_ENVIRONMENT,
         }));
       });
+      applySceneSound(scene);
       // A generated board is sized from the stock it will be cut from, which
       // is usually a good deal smaller than the default view assumes.
       finishSceneSwap(swap, get().recompile(scene, null, true, true), set,
