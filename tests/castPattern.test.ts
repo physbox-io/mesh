@@ -1077,4 +1077,22 @@ describe('cope + drag flask height', () => {
     // 20 mm * 1.013 grown height + 15 mm clearance ≈ 35.26 mm.
     expect(auto.summary.sprueHeightMm).toBeCloseTo(20 * 1.013 + 15, 1);
   });
+
+  it('flares a slender sand downsprue foot for bed grip and warns when a burnout pattern has point contact at Z = 0', () => {
+    const ringSand = generateCastPattern(comfortFitRing(), { method: 'sand', metalId: 'silver' });
+    expect(ringSand.success).toBe(true);
+    expect(ringSand.warnings.join(' ')).not.toMatch(/minimal flat bed contact/);
+
+    // A ball in Lost-PLA touches Z = 0 at a single point (0 mm² flat bed contact) with top sprue only:
+    const ball = {
+      nodes: [{
+        id: 'b', name: 'ball', type: 'body', pos: [0, 0, 0],
+        geoms: [{ name: 'g', type: 'sphere', size: [0.02], pos: [0, 0, 0.02] }],
+        joints: [], children: [],
+      }],
+    } as unknown as SceneGraph;
+    const ballBurnout = generateCastPattern(ball, { method: 'lost-pla', metalId: 'bronze' });
+    expect(ballBurnout.success).toBe(true);
+    expect(ballBurnout.warnings.join(' ')).toMatch(/minimal flat bed contact.*brim\/raft/i);
+  });
 });

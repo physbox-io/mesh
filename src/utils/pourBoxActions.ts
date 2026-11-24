@@ -65,7 +65,7 @@ export function pourBoxStlFiles(box: PourBox, sep: '_' | '-' = '-'): { piece: st
     out.push({ piece: 'sleeve', bytes: pourBoxStl(box.sleeve, 'sleeve') });
   }
   if (box.hole) {
-    out.push({ piece: `${box.hole.purpose}${sep}pin`, bytes: pourBoxStl(holePinMesh(box.hole), 'pin') });
+    out.push({ piece: `${box.hole.purpose}${sep}pin`, bytes: pourBoxStl(holePinMesh(box.hole, 32, { printable: true }), 'pin') });
   }
   return out;
 }

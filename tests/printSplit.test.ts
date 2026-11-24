@@ -134,6 +134,26 @@ describe('splitForPrint — cutting', () => {
     expect(r.sections[0].up[2]).toBeLessThan(-0.99);
   });
 
+  it('turns an inverted 45° cone onto its wide flat base instead of balancing on its 0 mm² tip', () => {
+    // Upright cone standing on its pointed apex at z = 0 (42° walls need 0 overhang support
+    // either way, and height is identical either way — previously `AXES[0]` kept it tip-down!).
+    const cone = wasm.Manifold.cylinder(40, 0.2, 36, 48, false);
+    const gm = cone.getMesh();
+    const soup = new Float64Array(gm.triVerts.length * 3);
+    for (let i = 0; i < gm.triVerts.length; i++) {
+      const v = gm.triVerts[i] * gm.numProp;
+      soup[i * 3] = gm.vertProperties[v] / 1000;
+      soup[i * 3 + 1] = gm.vertProperties[v + 1] / 1000;
+      soup[i * 3 + 2] = gm.vertProperties[v + 2] / 1000;
+    }
+    cone.delete();
+
+    const r = ok(splitForPrint(wasm, [soup], { bed: bed200, joinery: { kind: 'none' } }));
+    expect(r.sections).toHaveLength(1);
+    // Flipped upside down (`up = [0, 0, -1]`) so the ⌀72 mm flat disc sits on Z = 0!
+    expect(r.sections[0].up[2]).toBeLessThan(-0.99);
+  });
+
   it('refuses something that is not a solid, and says why', () => {
     const open = box(50, 50, 50).slice(0, 9 * 10);
     // Ten of twelve triangles: two rims meeting at corners, not fillable as simple loops.

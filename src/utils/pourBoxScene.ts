@@ -7,7 +7,7 @@ import * as THREE from 'three';
 import type { SceneGeom, SceneGraph, SceneNode } from '../types/scene';
 import { getNodeWorldTransform } from './laserCutExporter';
 import { partSoups } from './partSoups';
-import { buildPourBox, topZAt, type HolePurpose, type PourBox, type PourBoxMesh, type PourBoxOptions } from './siliconeMold';
+import { buildPourBox, MIN_PIN_BED_DIA_MM, topZAt, type HolePurpose, type PourBox, type PourBoxMesh, type PourBoxOptions } from './siliconeMold';
 import { loadManifold } from './sculptCut';
 
 /** The selected bodies, rigid children included, as one soup in world mm. */
@@ -228,7 +228,11 @@ export function pourBoxNotes(name: string, box: PourBox, pinAdded = Boolean(box.
     `- Base: ${r.baseFootprintMm[0]} × ${r.baseFootprintMm[1]} mm; ${sleeveDesc}.`,
     ...(r.splitSleeve ? ['- Seat both sleeve halves in the base groove and push the sliding clips down over the side rails before pouring; tap the clips up to peel the sleeve off once cured.'] : []),
     `- Fill to ${r.fillHeightMm} mm: ${r.siliconeMm3.toLocaleString()} mm³, ${r.siliconeG} g ${r.siliconeName.toLowerCase()} (${r.partAG} g A + ${r.partBG} g B; mix +10% margin).`,
-    ...(box.hole && pinAdded ? [`- ${box.hole.purpose} pin: ⌀${box.hole.diaMm} × ${box.hole.lengthMm.toFixed(1)} mm (${HOLE_USE[box.hole.purpose]})`] : []),
+    ...(box.hole && pinAdded
+      ? [
+          `- ${box.hole.purpose} pin: ⌀${box.hole.diaMm} × ${box.hole.lengthMm.toFixed(1)} mm (${HOLE_USE[box.hole.purpose]}${box.hole.diaMm < MIN_PIN_BED_DIA_MM ? ` Printed collar-down for bed grip; invert so the ⌀${MIN_PIN_BED_DIA_MM} mm top collar sits above the fill line.` : ''})`,
+        ]
+      : []),
     ...r.warnings.map((w) => `- ${w}`),
   ];
 }

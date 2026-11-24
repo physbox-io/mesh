@@ -1451,6 +1451,148 @@ function pegPieces(
  */
 type LeftRoof = CavityRoof & { flatWafer?: boolean };
 
+/** Minimum first-layer bed contact area for any upper piece sliced by `splitInsert`, mm². */
+const MIN_SPLIT_BASE_ISLAND_MM2 = 6;
+
+/**
+ * After `splitInsert` cuts an insert along horizontal planes `cuts`, an upper
+ * piece `k > 0` stands on `z = cuts[k - 1]` (which becomes `Z = 0` on the bed):
+ *  1. Any disconnected 3D lump of piece `k` whose own bed contact on `z + 0.05`
+ *     is under `MIN_SPLIT_BASE_ISLAND_MM2` (e.g. a narrow pillar or tooth tip
+ *     sliced across by the cut plane) cannot anchor itself on the bed in HIPS/PVA:
+ *     keep it attached to `pieces[k - 1]` below instead.
+ *  2. Because `cuts[k - 1] = face - CUT_UNDER_MM` (`0.02 mm` under the flat face
+ *     it frees), a tiny feature grazed only inside that `0.02 mm` band or a narrow
+ *     `< MIN_SPLIT_BASE_ISLAND_MM2` toe touching `z` would emit unanchored first-layer
+ *     dots before merging higher up: shave `0.05 mm` off any `< MIN_SPLIT_BASE_ISLAND_MM2`
+ *     bottom island on `z` (and lift the `0.02 mm` rim step flush where the main
+ *     `z + 0.05` face is already wide) so layer 1 (`Z = 0..0.2 mm`) has zero tiny dots.
+ */
+function anchorSplitPieces(wasm: ManifoldToplevel, pieces: Manifold[], cuts: number[]): Manifold[] {
+  if (pieces.length <= 1) return pieces;
+  const out = [...pieces];
+  for (let k = 1; k < out.length; k++) {
+    const cutZ = cuts[Math.min(k - 1, cuts.length - 1)];
+    const lumps = out[k].decompose();
+    if (lumps.length > 1) {
+      const keepUpper: Manifold[] = [];
+      const mergeBelow: Manifold[] = [];
+      for (const lump of lumps) {
+        const lb = lump.boundingBox();
+        if (lb.min[2] > cutZ + 0.25) {
+          // Floating above cutZ without touching the bed at all -> return to piece below
+          mergeBelow.push(lump);
+          continue;
+        }
+        const foot = lump.slice(lb.min[2] + 0.05);
+        const footArea = foot.area();
+        foot.delete();
+        if (footArea < MIN_SPLIT_BASE_ISLAND_MM2) {
+          mergeBelow.push(lump);
+        } else {
+          keepUpper.push(lump);
+        }
+      }
+      if (mergeBelow.length > 0 && keepUpper.length > 0) {
+        const addedBelow = mergeBelow.length === 1 ? mergeBelow[0] : wasm.Manifold.compose(mergeBelow);
+        out[k - 1] = replace(out[k - 1], out[k - 1].add(addedBelow));
+        if (addedBelow !== mergeBelow[0]) addedBelow.delete();
+        const nextUpper = keepUpper.length === 1 ? keepUpper[0] : wasm.Manifold.compose(keepUpper);
+        out[k] = replace(out[k], nextUpper);
+      }
+      for (const l of lumps) l.delete();
+    }
+
+    // Check first-layer islands right above the piece's bottom (`minZ + 0.01 mm` and `+ 0.08 mm`)
+    // and trim any tiny (< MIN_SPLIT_BASE_ISLAND_MM2) grazed toes up by 0.22 mm so the piece's
+    // Z = 0 bed layer only contains anchored islands >= MIN_SPLIT_BASE_ISLAND_MM2.
+    const pb = out[k].boundingBox();
+    const probeZ = pb.min[2] + 0.01;
+    const csLow = out[k].slice(probeZ);
+    const lowIslands = csLow.decompose();
+    csLow.delete();
+    const tinyPolys: SimplePolygon[] = [];
+    let hasWide = false;
+    for (const isl of lowIslands) {
+      if (isl.area() >= MIN_SPLIT_BASE_ISLAND_MM2) hasWide = true;
+      else tinyPolys.push(...isl.toPolygons());
+      isl.delete();
+    }
+    if (!hasWide) {
+      // Check slightly above CUT_UNDER_MM (`minZ + CUT_UNDER_MM + 0.03`): if the wide
+      // flat shelf opens right above the 20 µm CUT_UNDER_MM rim, trim the 25 µm rim off
+      // so the wide shelf itself sits cleanly on Z = 0!
+      const csShelf = out[k].slice(pb.min[2] + CUT_UNDER_MM + 0.03);
+      const shelfWide = csShelf.decompose().some((isl) => {
+        const ok = isl.area() >= MIN_SPLIT_BASE_ISLAND_MM2;
+        isl.delete();
+        return ok;
+      });
+      csShelf.delete();
+      if (shelfWide && pb.max[2] - pb.min[2] > 0.3) {
+        const trimZ = pb.min[2] + CUT_UNDER_MM + 0.01;
+        const [trimmed, shaved] = out[k].splitByPlane([0, 0, 1], trimZ);
+        shaved.delete();
+        if (!trimmed.isEmpty()) {
+          out[k] = replace(out[k], withoutCrumbs(wasm, trimmed));
+        } else {
+          trimmed.delete();
+        }
+      }
+    } else if (tinyPolys.length > 0) {
+      const tinyRaw = new wasm.CrossSection(tinyPolys, 'Positive');
+      const tinyPad = tinyRaw.offset(0.08, 'Round');
+      tinyRaw.delete();
+      // Only shave up to 0.20 mm so upper walls stay intact; return the shaved tip to out[k - 1]
+      // only where it doesn't bridge over cast space (it sits right on cutZ, touching out[k - 1]).
+      const shaveH = Math.min(0.22, Math.max(0.05, (pb.max[2] - pb.min[2]) * 0.25));
+      const shavePrism = wasm.Manifold.extrude(tinyPad, shaveH + 0.04).translate([0, 0, pb.min[2] - 0.02]);
+      tinyPad.delete();
+      const shavedTip = out[k].intersect(shavePrism);
+      if (!shavedTip.isEmpty()) {
+        out[k - 1] = replace(out[k - 1], out[k - 1].add(shavedTip));
+      }
+      shavedTip.delete();
+      out[k] = replace(out[k], withoutCrumbs(wasm, out[k].subtract(shavePrism)));
+      shavePrism.delete();
+    }
+
+    // Re-check at +0.08 mm (mid first layer) in case CUT_UNDER_MM left a tiny island above +0.01 mm.
+    const pb2 = out[k].boundingBox();
+    const csMid = out[k].slice(pb2.min[2] + 0.08);
+    const midIslands = csMid.decompose();
+    csMid.delete();
+    const midTiny: SimplePolygon[] = [];
+    let midHasWide = false;
+    for (const isl of midIslands) {
+      if (isl.area() >= MIN_SPLIT_BASE_ISLAND_MM2) midHasWide = true;
+      else midTiny.push(...isl.toPolygons());
+      isl.delete();
+    }
+    if (midHasWide && midTiny.length > 0 && pb2.max[2] - pb2.min[2] > 0.4) {
+      const tinyRaw = new wasm.CrossSection(midTiny, 'Positive');
+      const tinyPad = tinyRaw.offset(0.08, 'Round');
+      tinyRaw.delete();
+      const shavePrism = wasm.Manifold.extrude(tinyPad, 0.24).translate([0, 0, pb2.min[2] - 0.02]);
+      tinyPad.delete();
+      const shavedTip = out[k].intersect(shavePrism);
+      if (!shavedTip.isEmpty()) {
+        out[k - 1] = replace(out[k - 1], out[k - 1].add(shavedTip));
+      }
+      shavedTip.delete();
+      out[k] = replace(out[k], withoutCrumbs(wasm, out[k].subtract(shavePrism)));
+      shavePrism.delete();
+    }
+  }
+  return out.filter((p) => {
+    if (p.isEmpty()) {
+      p.delete();
+      return false;
+    }
+    return true;
+  });
+}
+
 function splitInsert(
   wasm: ManifoldToplevel,
   liner: Manifold,
@@ -1546,6 +1688,7 @@ function splitInsert(
   for (const f of flats) f.cs.delete();
   cuts.sort((a, b) => a - b);
   pieces.sort((p, q) => p.boundingBox().min[2] - q.boundingBox().min[2]);
+  if (pieces.length > 1) pieces = anchorSplitPieces(wasm, pieces, cuts);
   // Pegs stand on a piece's top and go into holes opening on the next one's
   // bed: neither hangs over anything, so what was left stays what is left.
   let pegs = 0;

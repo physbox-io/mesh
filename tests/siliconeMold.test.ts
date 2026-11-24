@@ -156,12 +156,29 @@ describe('a hole through the mold', () => {
     expect(buildPourBox(wasm, brick, { hole: 'wick' }).report.warnings).toEqual([]);
   });
 
-  it('makes the pin a closed, outward-wound solid to print', () => {
+  it('makes the pin a closed, outward-wound solid to print, with a wide collar-down foot on slender pins', () => {
     const box = buildPourBox(wasm, brick, { hole: 'fixing' });
     const pin = holePinMesh(box.hole!);
     expect(soupVolumeOf(pin)).toBeCloseTo(Math.PI * 1.5 ** 2 * box.hole!.lengthMm, 0);
     const a = analyzeMesh(pin.positions, pin.faces);
     expect(a.closed).toBe(true);
+
+    // Printable STL pin for a ⌀3 mm fixing / ⌀2.5 mm wick hole stands on a ⌀8 mm (~50 mm²) collar!
+    const printablePin = holePinMesh(box.hole!, 32, { printable: true });
+    const pa = analyzeMesh(printablePin.positions, printablePin.faces);
+    expect(pa.closed).toBe(true);
+    expect(pa.consistentlyWound).toBe(true);
+    const pm = new wasm.Mesh({
+      numProp: 3,
+      vertProperties: Float32Array.from(printablePin.positions),
+      triVerts: Uint32Array.from(printablePin.faces),
+    });
+    pm.merge();
+    const pmSolid = new wasm.Manifold(pm);
+    const firstLayer = pmSolid.slice(0.1);
+    expect(firstLayer.area()).toBeGreaterThan(45); // ⌀8 mm collar ≈ 50 mm², not 7 mm²!
+    firstLayer.delete();
+    pmSolid.delete();
   });
 
   it('refuses a point that is not over the master', () => {

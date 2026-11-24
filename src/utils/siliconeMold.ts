@@ -172,18 +172,52 @@ export function soupVolume(soup: ArrayLike<number>): number {
 }
 
 /**
- * The hole's pin as a printable mesh, mm, standing on Z = 0: a closed
- * cylinder, its faces wound outward (the sides from their own direction, the
- * bottom down, the top up).
+ * Minimum bed-contact diameter for a vertical printed hole pin, mm (`~50 mm²`).
+ * Slender wick (`⌀2.5 mm`) and fixing (`⌀3 mm`) pins are printed upside-down
+ * (`printable: true`) with an integral 45°-chamfered top collar above the
+ * silicone fill line so they anchor solidly on `Z = 0` without a slicer brim
+ * and never knock off the nozzle mid-print.
  */
-export function holePinMesh(hole: NonNullable<PourBox['hole']>, segments = 32): PourBoxMesh {
+export const MIN_PIN_BED_DIA_MM = 8;
+
+/**
+ * The hole's pin as a printable mesh, mm, standing on Z = 0: a closed
+ * solid of revolution wound outward. When `printable` is true and the pin is
+ * narrower than `MIN_PIN_BED_DIA_MM` (such as a `⌀2.5 mm` wick pin or `⌀3 mm`
+ * fixing pin), it is oriented upside-down on the bed with a `⌀8 mm` top collar
+ * (`0.8 mm` flat pad + 45° taper into the shaft, sitting in the `1 mm` air
+ * stickout above `fillZ` when inverted onto the master) so its first layer has
+ * `~50 mm²` of bed grip without altering the submerged silicone displacement.
+ */
+export function holePinMesh(
+  hole: NonNullable<PourBox['hole']>,
+  segments = 32,
+  options?: { printable?: boolean },
+): PourBoxMesh {
   const r = hole.diaMm / 2;
   const h = hole.lengthMm;
+  const rFoot = options?.printable && hole.diaMm < MIN_PIN_BED_DIA_MM
+    ? MIN_PIN_BED_DIA_MM / 2
+    : r;
+  const padH = 0.8;
+  const taperH = rFoot > r + 1e-6 ? Math.min(rFoot - r, Math.max(0.4, h - padH - 0.5)) : 0;
+  const stops: Array<{ z: number; r: number }> = rFoot > r + 1e-6 && h > padH + taperH + 0.2
+    ? [
+        { z: 0, r: rFoot },
+        { z: padH, r: rFoot },
+        { z: padH + taperH, r },
+        { z: h, r },
+      ]
+    : [
+        { z: 0, r },
+        { z: h, r },
+      ];
+
   const positions: number[] = [];
-  for (const z of [0, h]) {
+  for (const st of stops) {
     for (let k = 0; k < segments; k++) {
       const a = (k / segments) * 2 * Math.PI;
-      positions.push(r * Math.cos(a), r * Math.sin(a), z);
+      positions.push(st.r * Math.cos(a), st.r * Math.sin(a), st.z);
     }
   }
   const bottomCentre = positions.length / 3;
@@ -191,13 +225,17 @@ export function holePinMesh(hole: NonNullable<PourBox['hole']>, segments = 32): 
   const topCentre = bottomCentre + 1;
   positions.push(0, 0, h);
   const faces: number[] = [];
+  const topRing = (stops.length - 1) * segments;
   for (let k = 0; k < segments; k++) {
     const k1 = (k + 1) % segments;
-    // Side, facing out: counter-clockwise seen from outside.
-    faces.push(k, k1, segments + k1, k, segments + k1, segments + k);
+    for (let s = 0; s + 1 < stops.length; s++) {
+      const b0 = s * segments;
+      const b1 = (s + 1) * segments;
+      faces.push(b0 + k, b0 + k1, b1 + k1, b0 + k, b1 + k1, b1 + k);
+    }
     // Bottom, facing -z; top, facing +z.
     faces.push(bottomCentre, k1, k);
-    faces.push(topCentre, segments + k, segments + k1);
+    faces.push(topCentre, topRing + k, topRing + k1);
   }
   return { positions, faces };
 }

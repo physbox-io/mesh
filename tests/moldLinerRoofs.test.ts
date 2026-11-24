@@ -758,4 +758,60 @@ describe('a curved roof', () => {
       body.delete();
     }
   }, 60_000);
+
+  it('merges unanchored secondary pillar lumps back into the lower splitInsert piece instead of leaving tiny first-layer dots', () => {
+    // Parted at z = 10 mm: the cavity half holds a wide shelf roof (z = 4..9.4, triggering a splitInsert
+    // cut at 0.6 mm below the face) AND an isolated narrow ring/hollow post away from the shelf whose
+    // enclosed HIPS core is ~2 mm wide (~3.1 mm² < 6 mm²) crossing the same cut plane!
+    // Without `anchorSplitPieces`, piece 2 of 2 would include a disconnected 2 mm pillar standing on Z = 0.
+    const hollowPostOuter = wasm.Manifold.cylinder(8, 3.2, 3.2, 32, false).translate([17, 0, 2.5]);
+    const hollowPostCore = wasm.Manifold.cylinder(9, 1.0, 1.0, 24, false).translate([17, 0, 2.0]);
+    const ringCap = hollowPostOuter.subtract(hollowPostCore);
+    const mainPlate = wasm.Manifold.cube([20, 20, 5.4], false).translate([-16, -10, 4]);
+    const topFrame = wasm.Manifold.cube([26, 26, 2], false).translate([-19, -13, 10])
+      .subtract(wasm.Manifold.cube([14, 14, 4], false).translate([-13, -7, 9]));
+    const centerPost = wasm.Manifold.cube([4, 4, 8], false).translate([-8, -2, 4]);
+    const combinedPart = wasm.Manifold.union([mainPlate, topFrame, centerPost, ringCap]);
+    const pm = combinedPart.getMesh();
+    const verts: number[] = [];
+    for (let i = 0; i < pm.vertProperties.length; i += pm.numProp) {
+      verts.push(pm.vertProperties[i] * MM, pm.vertProperties[i + 1] * MM, pm.vertProperties[i + 2] * MM);
+    }
+    for (const m of [hollowPostOuter, hollowPostCore, ringCap, mainPlate, topFrame, centerPost, combinedPart]) m.delete();
+
+    const splitPillarScene: SceneGraph = {
+      nodes: [{
+        id: 'sp', name: 'split_pillar', type: 'body', pos: [0, 0, 0],
+        geoms: [{ name: 'g', type: 'mesh', size: [1], renderVertices: verts, vertices: verts, faces: Array.from(pm.triVerts) } as unknown as SceneGeom],
+        joints: [], children: [],
+      }],
+      castPrep: { draftDeg: 0, draftMode: 'remove', partingZ: 10 * MM, edges: null, originals: {} },
+    } as unknown as SceneGraph;
+
+    const res = generateMoldMeshes(splitPillarScene, {
+      ...OPTS,
+      wallMarginMm: 10,
+      linerConstruction: 'insert',
+    }, wasm);
+    expect(res.success, res.error).toBe(true);
+    const objs = objects(res.threeMf!);
+    for (const [name, o] of objs) {
+      const a = analyzeMesh(o.positions, o.faces)!;
+      expect(a.closed, `${name} closed`).toBe(true);
+      expect(a.consistentlyWound, `${name} wound`).toBe(true);
+      const mesh = new wasm.Mesh({ numProp: 3, vertProperties: Float32Array.from(o.positions), triVerts: Uint32Array.from(o.faces) });
+      mesh.merge();
+      const body = new wasm.Manifold(mesh);
+      const b = body.boundingBox();
+      for (const dz of [0.01, 0.08, 0.15]) {
+        const cs = body.slice(b.min[2] + dz);
+        for (const isl of cs.decompose()) {
+          expect(isl.area(), `${name} dz=${dz} island area >= 6 mm²`).toBeGreaterThanOrEqual(6);
+          isl.delete();
+        }
+        cs.delete();
+      }
+      body.delete();
+    }
+  }, 90_000);
 });

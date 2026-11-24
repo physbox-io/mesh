@@ -1028,8 +1028,29 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
     // one piece standing on Z = 0, and started at a parting plane above that
     // the sprue, and the runner hung off it, printed in mid-air. Below the
     // plane it moulds a sprue well in the drag, which is no harm: it catches
-    // the first, coldest metal down.
-    appendCylinder(pat, sprueG.x, sprueG.y, 0, sprueTop, sprueDia / 2);
+    // the first, coldest metal down. When the sprue itself is slender (< ⌀6 mm),
+    // flare its sprue-well base to at least ⌀6 mm (`~28 mm²`) with a 45° step so
+    // the column cannot peel off the print bed and still draws out of the drag.
+    const sprueR = sprueDia / 2;
+    const sprueFootR = Math.max(sprueR, Math.min(3.5, Math.max(sprueR, 3.0)));
+    const flareRoom = partingZ > 1.0 ? Math.min(partingZ * 0.5, sprueTop * 0.25) : Math.min(2.0, sprueTop * 0.25);
+    if (sprueFootR > sprueR + 0.05 && flareRoom >= sprueFootR - sprueR + 0.4) {
+      const footFlat = 0.4;
+      appendRevolutionStack(
+        pat,
+        sprueG.x,
+        sprueG.y,
+        [
+          { z: 0, r: sprueFootR },
+          { z: footFlat, r: sprueFootR },
+          { z: footFlat + (sprueFootR - sprueR), r: sprueR },
+          { z: sprueTop, r: sprueR },
+        ],
+        24,
+      );
+    } else {
+      appendCylinder(pat, sprueG.x, sprueG.y, 0, sprueTop, sprueR);
+    }
     gatingVolumeMm3 += (Math.PI * sprueDia * sprueDia * sprueTop) / 4;
     rigTopZ = Math.max(rigTopZ, sprueTop);
     // Runner along the parting plane, from the sprue to the gate — with a short
@@ -1414,6 +1435,28 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
     warnings.push(
       `Rig envelope is ${Math.round(gPartW)} × ${Math.round(gPartD)} × ${Math.round(rigTopZ)} mm; consider casting in sections.`
     );
+  }
+
+  // Check actual Z = 0 bed contact of the pattern so masters balancing on curved
+  // bottoms, gear teeth, or tiny legs (< 12 mm²) get a clear brim/raft warning
+  // before breaking a nozzle on layer 1.
+  {
+    let bedAreaMm2 = 0;
+    for (let i = 0; i + 8 < pat.length; i += 9) {
+      const z0 = pat[i + 2], z1 = pat[i + 5], z2 = pat[i + 8];
+      if (z0 > 0.25 && z1 > 0.25 && z2 > 0.25) continue;
+      if (Math.max(z0, z1, z2) > 0.25) continue;
+      const ux = pat[i + 3] - pat[i], uy = pat[i + 4] - pat[i + 1], uz = z1 - z0;
+      const vx = pat[i + 6] - pat[i], vy = pat[i + 7] - pat[i + 1], vz = z2 - z0;
+      const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      const len = Math.hypot(nx, ny, nz);
+      if (len > 1e-12 && nz / len < -0.85) bedAreaMm2 += len / 2;
+    }
+    if (bedAreaMm2 < 12 && gPartH > 5) {
+      warnings.push(
+        `Pattern has minimal flat bed contact (~${bedAreaMm2.toFixed(1)} mm² at Z = 0); orient a flat face down or enable a brim/raft and tree supports in your slicer so first-layer islands stay anchored.`,
+      );
+    }
   }
 
   const patternStl = trisToBinaryStl(pat);

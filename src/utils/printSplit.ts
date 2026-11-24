@@ -458,8 +458,32 @@ function footprint(pts: [number, number][], W: number, D: number): { fits: boole
   return { fits: b.fits, spin: b.spin, w: b.w, d: b.d, overflow: b.overflow };
 }
 
-function poseSupport(geo: PieceGeo, down: Vec3, ctx: Ctx): number {
-  return supportArea(rotatePoints(rotationBetween(down, [0, 0, -1]), geo.soup), ctx.overhangDeg, 0.5).area;
+/** Minimum bed-contact area (mm²) below which a print pose risks knocking off the nozzle without a brim. */
+const MIN_BED_CONTACT_MM2 = 16;
+
+function poseMetrics(geo: PieceGeo, down: Vec3, ctx: Ctx): { support: number; bedContactMm2: number } {
+  const tris = rotatePoints(rotationBetween(down, [0, 0, -1]), geo.soup);
+  const support = supportArea(tris, ctx.overhangDeg, 0.5).area;
+  const count = Math.floor(tris.length / 9);
+  let minZ = Infinity;
+  for (let i = 2; i < count * 9; i += 3) if (tris[i] < minZ) minZ = tris[i];
+  const zBand = minZ + 0.25;
+  let bedContactMm2 = 0;
+  for (let t = 0; t < count; t++) {
+    const i = t * 9;
+    const z0 = tris[i + 2], z1 = tris[i + 5], z2 = tris[i + 8];
+    if (z0 > zBand && z1 > zBand && z2 > zBand) continue;
+    const ux = tris[i + 3] - tris[i], uy = tris[i + 4] - tris[i + 1], uz = z1 - z0;
+    const vx = tris[i + 6] - tris[i], vy = tris[i + 7] - tris[i + 1], vz = z2 - z0;
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const len = Math.hypot(nx, ny, nz);
+    if (!(len > 1e-12)) continue;
+    // Downward-facing bed facets sitting within the first layer (`z <= minZ + 0.25 mm`).
+    if (nz / len < -0.85 && Math.max(z0, z1, z2) <= zBand) {
+      bedContactMm2 += len / 2;
+    }
+  }
+  return { support, bedContactMm2 };
 }
 
 function evaluatePose(geo: PieceGeo, down: Vec3, ctx: Ctx): PoseEval {
@@ -478,13 +502,19 @@ function evaluatePose(geo: PieceGeo, down: Vec3, ctx: Ctx): PoseEval {
   const fits = overflow <= 1 + 1e-9;
   // Only a pose that fits can be chosen on cost, so a miss is not measured
   // here: bestPose measures the one miss it ends up with.
-  const support = fits ? poseSupport(geo, down, ctx) : 0;
+  const metrics = fits ? poseMetrics(geo, down, ctx) : { support: 0, bedContactMm2: 0 };
+  // Penalize poses that balance on tiny points/tips (< MIN_BED_CONTACT_MM2) when a
+  // flat cut face or broader resting face is available: unanchored first-layer dots
+  // peel off the build plate and catch the nozzle.
+  const unanchoredPenalty = fits && metrics.bedContactMm2 < MIN_BED_CONTACT_MM2
+    ? ((MIN_BED_CONTACT_MM2 - metrics.bedContactMm2) / MIN_BED_CONTACT_MM2) * Math.max(250, height * 8)
+    : 0;
   return {
-    down, spin: fp.spin, fits, supportMm2: support, heightMm: height,
+    down, spin: fp.spin, fits, supportMm2: metrics.support, heightMm: height,
     sizeMm: [fp.w, fp.d, height], overflow,
-    // Support is what costs: time, material and a scarred face. Height breaks
-    // ties, because a lower print is a quicker one.
-    cost: fits ? support + 0.5 * height : Infinity,
+    // Support is what costs: time, material and a scarred face. Poor bed contact
+    // costs print reliability; height breaks ties, because a lower print is quicker.
+    cost: fits ? metrics.support + unanchoredPenalty + 0.5 * height : Infinity,
   };
 }
 
@@ -508,7 +538,7 @@ function bestPose(geo: PieceGeo, extraDowns: Vec3[], ctx: Ctx): PoseEval {
       best = e;
     }
   }
-  return best!.fits ? best! : { ...best!, supportMm2: poseSupport(geo, best!.down, ctx) };
+  return best!.fits ? best! : { ...best!, supportMm2: poseMetrics(geo, best!.down, ctx).support };
 }
 
 // ---------------------------------------------------------------------------

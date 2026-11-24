@@ -940,4 +940,16 @@ describe('DFM engine declutter, wall thickness, pose, printer, & hardware regres
     const fit = r.findings.find((f) => f.id === 'stock_fit');
     expect(fit?.actions?.[0]?.kind).toBe('fit_stock');
   });
+
+  it('flags a sphere/point-contact print pose with print_tiny_bed_contact while passing a flat-bottomed box', () => {
+    const ball = meshBody(sphereMesh(0.02), { id: 'ball', name: 'ball', pos: [0, 0, 0.02] });
+    const rBall = analyseDfm(scene([ball]), 'print', { asPlaced: true });
+    const tiny = rBall.findings.find((f) => f.id === 'print_tiny_bed_contact');
+    expect(tiny).toBeDefined();
+    expect(tiny!.severity).toBe('critical');
+
+    const flatBox = boxBody([0, 0, 0.02], [0.02, 0.02, 0.02], 'flat');
+    const rBox = analyseDfm(scene([flatBox]), 'print', { asPlaced: true });
+    expect(rBox.findings.find((f) => f.id === 'print_tiny_bed_contact')).toBeUndefined();
+  });
 });

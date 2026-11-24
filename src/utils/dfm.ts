@@ -711,6 +711,36 @@ function analysePrint(
       }
     }
 
+    // Tiny first-layer bed contact on a non-trivial part (> 8 mm tall): point/edge
+    // contact or small isolated feet (< 12 mm²) peel off the bed and catch the nozzle.
+    const partHeightMm = Number.isFinite(b.minZ) ? (b.maxZ - b.minZ) * 1000 : 0;
+    if (partHeightMm > 8 && totalArea > 0) {
+      const zBedBand = b.minZ + 0.00025;
+      let bedContactMm2 = 0;
+      for (let t = 0; t < count; t++) {
+        const i = t * 9;
+        const z0 = tris[i + 2], z1 = tris[i + 5], z2 = tris[i + 8];
+        if (Math.max(z0, z1, z2) > zBedBand) continue;
+        const ux = tris[i + 3] - tris[i], uy = tris[i + 4] - tris[i + 1], uz = z1 - z0;
+        const vx = tris[i + 6] - tris[i], vy = tris[i + 7] - tris[i + 1], vz = z2 - z0;
+        const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+        const len = Math.hypot(nx, ny, nz);
+        if (len > 1e-12 && nz / len < -0.85) bedContactMm2 += (len / 2) * 1e6;
+      }
+      if (bedContactMm2 < 12) {
+        findings.push({
+          id: 'print_tiny_bed_contact',
+          process: 'print',
+          severity: bedContactMm2 < 3 ? 'critical' : 'warning',
+          title: bedContactMm2 < 0.5 ? 'Point/edge bed contact on first layer' : `Small first-layer footprint (${bedContactMm2.toFixed(1)} mm²)`,
+          detail: `Only ${bedContactMm2.toFixed(1)} mm² of flat surface touches the build plate across a ${partHeightMm.toFixed(0)} mm tall print, risking first-layer detachment or nozzle collision.`,
+          fix: 'Orient a flat face onto the build plate (Split for Print auto-orients sections) or add a brim/raft in your slicer.',
+          position: [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, b.minZ],
+          metric: bedContactMm2,
+        });
+      }
+    }
+
     // Shrinkage warping depends on actual bed-contact footprint (z <= minZ + 1.5 mm),
     // not a wide mid-air canopy above a narrow stem.
     if (limits.warpsOnLargeFlats && Number.isFinite(b.minZ)) {
