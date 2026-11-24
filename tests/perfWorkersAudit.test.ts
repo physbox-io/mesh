@@ -439,9 +439,9 @@ describe('fractureWorkerClient, sculptCutClient, silhouetteClient & textureClien
     } as MessageEvent);
     const surface = await t2;
     expect(surface).toEqual({
-      vertices: [0, 0, 0, 1, 0, 0, 0, 1, 0],
-      faces: [0, 1, 2],
-      paint: { res: [1], idx: [0], rgba: [255, 128, 64, 255] },
+      vertices: new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0]),
+      faces: new Uint32Array([0, 1, 2]),
+      paint: { res: [1], idx: new Uint32Array([0]), rgba: new Uint8Array([255, 128, 64, 255]) },
       regions: [],
       warnings: [],
     });

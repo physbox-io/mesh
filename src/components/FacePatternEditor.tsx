@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { X, AlertCircle, Sparkles, Trash2 } from 'lucide-react';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
@@ -14,7 +14,7 @@ import {
   type TexturedSurface,
 } from '../utils/surfaceTexture';
 import { geomHalfLen } from '../utils/geomSurface';
-import { requestTexturedSurface } from '../utils/textureClient';
+import { requestTexturedSurfaceWithStatus } from '../utils/textureClient';
 import type { FacePatternGlowEvent, FacePatternTarget } from '../utils/facePatternPick';
 import { Field, PatternFields, inputClass } from './PatternFields';
 import { hexToRgb, rgbToHex } from '../utils/hexColor';
@@ -99,9 +99,11 @@ export const FacePatternEditor: React.FC = () => {
   // What is in the scene now: the pattern as last applied, or null for none yet.
   const [applied, setApplied] = useState<SurfaceTexture | null>(null);
   const [report, setReport] = useState<TexturedSurface | null>(null);
+  const [buildError, setBuildError] = useState<string | null>(null);
   // Fetching a font and laying the text out, before Apply can write it.
   const [preparing, setPreparing] = useState(false);
   const [prepError, setPrepError] = useState<string | null>(null);
+  const prepReqRef = useRef(0);
 
   /*
    * Seeded when the dialog opens on a face, folded in during render as the
@@ -120,11 +122,23 @@ export const FacePatternEditor: React.FC = () => {
       setDraft(editing !== undefined ? existing[editing] : newTexture(target));
       setApplied(editing !== undefined ? existing[editing] : null);
       setReport(null);
+      setBuildError(null);
       setPrepError(null);
+      setPreparing(false);
     } else {
       setDraft(null);
+      setBuildError(null);
+      setPreparing(false);
     }
   }
+
+  // Invalidate any in-flight spec.prepare() on target change or unmount.
+  useEffect(() => {
+    prepReqRef.current += 1;
+    return () => {
+      prepReqRef.current += 1;
+    };
+  }, [key]);
 
   // The face lit up until there is a pattern on it to show where it is.
   const glowAt: FacePatternGlowEvent = target && !applied && synced === key ? target : null;
@@ -139,11 +153,17 @@ export const FacePatternEditor: React.FC = () => {
   useEffect(() => {
     if (!geom?.textures?.length) return;
     let live = true;
-    void requestTexturedSurface(geom, geomHalfLen(geom)).then((surface) => { if (live) setReport(surface); });
+    void requestTexturedSurfaceWithStatus(geom, geomHalfLen(geom)).then(({ surface, error }) => {
+      if (!live) return;
+      setReport(surface);
+      setBuildError(error);
+    });
     return () => { live = false; };
   }, [geom]);
 
   const cancel = () => {
+    prepReqRef.current += 1;
+    setPreparing(false);
     if (target) setGeomTextures(target.nodeId, target.geomName, before);
     closeFacePattern();
   };
@@ -154,7 +174,11 @@ export const FacePatternEditor: React.FC = () => {
   const options: PatternOptions = { ...spec.defaults, ...(draft.options ?? {}) };
   const editingExisting = !!before && index < before.length;
 
-  const patch = (p: Partial<SurfaceTexture>) => setDraft((d) => (d ? { ...d, ...p } : d));
+  const patch = (p: Partial<SurfaceTexture>) => {
+    prepReqRef.current += 1;
+    setPreparing(false);
+    setDraft((d) => (d ? { ...d, ...p } : d));
+  };
   const setOption = (k: string, v: number | string | undefined) => {
     if (v === undefined) return;
     patch({ options: { ...options, [k]: v } });
@@ -176,24 +200,29 @@ export const FacePatternEditor: React.FC = () => {
   const emboss = draft.depthM > 0;
   const depthMm = Math.abs(draft.depthM) * 1000;
   const region = report?.regions[index];
-  const pending = !region || synced !== key;
+  const pending = (!region && !buildError) || synced !== key;
   const warnings = (report?.warnings ?? []).filter((w) => w.startsWith(`Pattern ${index + 1}:`) || !w.startsWith('Pattern '));
-  const notes = !applied || pending || !region.applied ? [] : layoutNotes(region);
+  const notes = !applied || pending || !region?.applied ? [] : layoutNotes(region);
 
   const apply = async (): Promise<boolean> => {
+    const reqId = ++prepReqRef.current;
     let ready = draft;
     if (spec.prepare) {
       setPreparing(true);
       setPrepError(null);
       try {
-        ready = { ...draft, options: await spec.prepare(options) };
+        const preparedOptions = await spec.prepare(options);
+        if (prepReqRef.current !== reqId) return false;
+        ready = { ...draft, options: preparedOptions };
       } catch (e) {
+        if (prepReqRef.current !== reqId) return false;
         setPrepError(e instanceof Error ? e.message : String(e));
         return false;
       } finally {
-        setPreparing(false);
+        if (prepReqRef.current === reqId) setPreparing(false);
       }
     }
+    if (prepReqRef.current !== reqId) return false;
     const list = [...(before ?? [])];
     list[index] = ready;
     setGeomTextures(target.nodeId, target.geomName, list);
@@ -201,6 +230,7 @@ export const FacePatternEditor: React.FC = () => {
     setApplied(ready);
     // The numbers shown were the last build's; these say building until this one is in.
     setReport(null);
+    setBuildError(null);
     return true;
   };
   const done = async () => {
@@ -209,6 +239,8 @@ export const FacePatternEditor: React.FC = () => {
   };
 
   const remove = () => {
+    prepReqRef.current += 1;
+    setPreparing(false);
     const list = (before ?? []).filter((_, i) => i !== index);
     setGeomTextures(target.nodeId, target.geomName, list.length ? list : undefined);
     closeFacePattern();
@@ -345,21 +377,21 @@ export const FacePatternEditor: React.FC = () => {
           <div className="bg-slate-100 dark:bg-slate-800 p-2 rounded-lg">
             <div className="text-slate-400">Face</div>
             <div className="font-semibold text-slate-700 dark:text-slate-200">
-              {!applied || pending || !region.applied ? '—' : `${mm(region.extentM[0])} × ${mm(region.extentM[1])} mm`}
+              {!applied || pending || !region?.applied ? '—' : `${mm(region.extentM[0])} × ${mm(region.extentM[1])} mm`}
             </div>
           </div>
           <div className="bg-slate-100 dark:bg-slate-800 p-2 rounded-lg">
             <div className="text-slate-400">Triangles</div>
             <div className="font-semibold text-slate-700 dark:text-slate-200">
-              {!applied ? '—' : pending ? 'building…' : region.triangles.toLocaleString()}
+              {!applied ? '—' : buildError ? 'failed' : pending ? 'building…' : region ? region.triangles.toLocaleString() : '—'}
             </div>
           </div>
         </div>
 
-        {prepError && (
+        {(prepError || buildError) && (
           <div className="flex items-start gap-2 p-2 rounded-lg bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60">
             <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
-            <p className="text-[11px] text-rose-700 dark:text-rose-300 leading-relaxed">{prepError}</p>
+            <p className="text-[11px] text-rose-700 dark:text-rose-300 leading-relaxed">{prepError ?? buildError}</p>
           </div>
         )}
 

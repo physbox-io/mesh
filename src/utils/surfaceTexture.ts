@@ -200,8 +200,8 @@ export interface ReliefField {
 
 export interface TexturedSurface {
   /** Welded positions, in the frame given. */
-  vertices: number[];
-  faces: number[];
+  vertices: number[] | Float64Array;
+  faces: number[] | Uint32Array;
   /** The patterns' palettes, on the displaced vertices. */
   paint?: PaintLayer;
   regions: TextureRegionReport[];
@@ -1307,11 +1307,20 @@ interface Grid {
 
 function gridFor(width: number, height: number, cellM: number): { cols: number; rows: number; step: number } {
   // Half the cell, so the pattern is sampled finer than the mesh that carries it.
-  let step = cellM / 2;
-  const cells = (s: number) => (Math.ceil(width / s) + 1) * (Math.ceil(height / s) + 1);
-  if (cells(step) > MAX_PATTERN_CELLS) step = Math.sqrt((width * height) / MAX_PATTERN_CELLS) * 1.05;
+  const safeW = Number.isFinite(width) && width > 0 ? width : 0;
+  const safeH = Number.isFinite(height) && height > 0 ? height : 0;
+  let step = Math.max(1e-6, Number.isFinite(cellM) && cellM > 0 ? cellM / 2 : DEFAULT_TEXTURE_CELL_M / 2);
+  if (safeW === 0 && safeH === 0) return { cols: 1, rows: 1, step };
+  const cells = (s: number) => (Math.ceil(safeW / s) + 1) * (Math.ceil(safeH / s) + 1);
+  if (cells(step) > MAX_PATTERN_CELLS) {
+    if (safeW > 0 && safeH > 0) {
+      step = Math.max(step, Math.sqrt((safeW * safeH) / MAX_PATTERN_CELLS) * 1.05);
+    } else {
+      step = Math.max(step, (Math.max(safeW, safeH) / Math.max(1, MAX_PATTERN_CELLS - 1)) * 1.05);
+    }
+  }
   while (cells(step) > MAX_PATTERN_CELLS) step *= 1.05;
-  return { cols: Math.ceil(width / step) + 1, rows: Math.ceil(height / step) + 1, step };
+  return { cols: Math.ceil(safeW / step) + 1, rows: Math.ceil(safeH / step) + 1, step };
 }
 
 function sample(grid: Grid, x: number, y: number): number {
@@ -1701,11 +1710,13 @@ export function applySurfaceTextures(
       area += areas[f];
       sum = [sum[0] + normals[f][0] * areas[f], sum[1] + normals[f][1] * areas[f], sum[2] + normals[f][2] * areas[f]];
     }
+    if (!(area > 0)) return skip(index, 'the face has zero area.');
     const normal = norm(sum);
     let minCos = 1;
     for (const f of grown) minCos = Math.min(minCos, dot(normals[f], normal));
     const flat = minCos >= Math.cos((0.5 * Math.PI) / 180);
     const uv = regionUv(surface, grown, normal, minCos, texture);
+    if (!(uv.width > 0) || !(uv.height > 0)) return skip(index, 'the face has zero extent.');
     if (uv.note) warnings.push(`Pattern ${index + 1}: ${uv.note}`);
     const stretch = regionStretch(mesh, grown, uv, areas);
     if (stretch > STRETCH_WARNING) {

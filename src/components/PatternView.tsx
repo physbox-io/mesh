@@ -38,6 +38,7 @@ export function PatternView({ stl }: { stl: Uint8Array | null }) {
   const contentRef = useRef<THREE.Group | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
+  const renderRef = useRef<(() => void) | null>(null);
   const userMovedRef = useRef(false);
 
   // Build the renderer once.
@@ -62,7 +63,6 @@ export function PatternView({ stl }: { stl: Uint8Array | null }) {
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
     controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE };
-    controls.addEventListener('start', () => { userMovedRef.current = true; });
     controlsRef.current = controls;
 
     scene.add(new THREE.AmbientLight(0xffffff, 0.75));
@@ -77,28 +77,42 @@ export function PatternView({ stl }: { stl: Uint8Array | null }) {
     contentRef.current = group;
     scene.add(group);
 
+    let raf = 0;
+    const renderOnce = () => {
+      raf = 0;
+      const damped = controls.update();
+      renderer.render(scene, camera);
+      if (damped) scheduleRender();
+    };
+    const scheduleRender = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(renderOnce);
+    };
+    renderRef.current = scheduleRender;
+
+    const onStart = () => { userMovedRef.current = true; };
+    controls.addEventListener('start', onStart);
+    controls.addEventListener('change', scheduleRender);
+    controls.addEventListener('end', scheduleRender);
+
     const resize = () => {
       const w = mount.clientWidth || 600;
       const h = mount.clientHeight || 320;
       renderer.setSize(w, h, false);
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
+      scheduleRender();
     };
     resize();
     const observer = new ResizeObserver(resize);
     observer.observe(mount);
 
-    let raf = 0;
-    const tick = () => {
-      raf = requestAnimationFrame(tick);
-      controls.update();
-      renderer.render(scene, camera);
-    };
-    tick();
-
     return () => {
       cancelAnimationFrame(raf);
       observer.disconnect();
+      controls.removeEventListener('start', onStart);
+      controls.removeEventListener('change', scheduleRender);
+      controls.removeEventListener('end', scheduleRender);
       controls.dispose();
       scene.traverse((o) => {
         const m = o as THREE.Mesh;
@@ -112,6 +126,7 @@ export function PatternView({ stl }: { stl: Uint8Array | null }) {
       contentRef.current = null;
       cameraRef.current = null;
       controlsRef.current = null;
+      renderRef.current = null;
     };
   }, []);
 
@@ -129,7 +144,10 @@ export function PatternView({ stl }: { stl: Uint8Array | null }) {
     }
 
     const positions = stl ? stlToPositions(stl) : new Float32Array(0);
-    if (positions.length === 0) return;
+    if (positions.length === 0) {
+      renderRef.current?.();
+      return;
+    }
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -166,6 +184,7 @@ export function PatternView({ stl }: { stl: Uint8Array | null }) {
       controlsRef.current.target.set(0, 0, 0);
       controlsRef.current.update();
     }
+    renderRef.current?.();
   }, [stl]);
 
   return (

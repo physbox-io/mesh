@@ -19,16 +19,22 @@ import { noteWorkerStopped } from './staleBuild';
 
 const TEXTURE_TIMEOUT_MS = 60_000;
 
+export interface TexturedSurfaceResult {
+  surface: TexturedSurface | null;
+  error: string | null;
+}
+
 interface QueuedTexture {
   id: number;
   key: string;
+  geomName: string;
   geom: SceneGeom;
   halfLen?: number;
   positions: Float64Array;
   faces: Uint32Array;
   textures: NonNullable<SceneGeom['textures']>;
   splits: SceneGeom['faceSplits'];
-  resolve: (surface: TexturedSurface | null) => void;
+  resolve: (result: TexturedSurfaceResult) => void;
 }
 
 let worker: Worker | null = null;
@@ -36,18 +42,18 @@ let seq = 0;
 let active: (QueuedTexture & { timer: ReturnType<typeof setTimeout> }) | null = null;
 const queued: QueuedTexture[] = [];
 /** One build per key at a time: the viewport asks on every render. */
-const inFlight = new Map<string, Promise<TexturedSurface | null>>();
+const inFlight = new Map<string, Promise<TexturedSurfaceResult>>();
 
 function unpackSurface(packed: PackedTexturedSurface): TexturedSurface {
   return {
-    vertices: Array.from(packed.vertices),
-    faces: Array.from(packed.faces),
+    vertices: packed.vertices,
+    faces: packed.faces,
     ...(packed.paint
       ? {
           paint: {
             res: packed.paint.res,
-            idx: Array.from(packed.paint.idx),
-            rgba: Array.from(packed.paint.rgba),
+            idx: packed.paint.idx,
+            rgba: packed.paint.rgba,
           },
         }
       : {}),
@@ -66,14 +72,14 @@ function dropWorker(w: Worker | null): void {
   if (worker === w) worker = null;
 }
 
-function failAll(): void {
+function failAll(error: string): void {
   if (active) {
     clearTimeout(active.timer);
     const done = active;
     active = null;
-    done.resolve(null);
+    done.resolve({ surface: null, error });
   }
-  while (queued.length > 0) queued.shift()!.resolve(null);
+  while (queued.length > 0) queued.shift()!.resolve({ surface: null, error });
 }
 
 function ensureWorker(): Worker | null {
@@ -88,22 +94,23 @@ function ensureWorker(): Worker | null {
       const done = active;
       active = null;
       clearTimeout(done.timer);
-      const surface =
-        msg.type === 'TEXTURE_DONE'
-          ? (msg.packed ? unpackSurface(msg.packed) : (msg.surface ?? null))
-          : null;
-      if (surface) storeTexturedSurface(done.key, surface);
-      done.resolve(surface);
+      if (msg.type === 'TEXTURE_DONE') {
+        const surface = msg.packed ? unpackSurface(msg.packed) : (msg.surface ?? null);
+        if (surface) storeTexturedSurface(done.key, surface);
+        done.resolve({ surface, error: surface ? null : 'Surface pattern build returned no mesh.' });
+      } else {
+        done.resolve({ surface: null, error: msg.error || 'Surface pattern build failed.' });
+      }
       pump();
     };
-    const handleBroken = () => {
+    const handleBroken = (error: string) => {
       if (worker !== w) return;
       noteWorkerStopped();
       dropWorker(w);
-      failAll();
+      failAll(error);
     };
-    w.onerror = handleBroken;
-    w.onmessageerror = handleBroken;
+    w.onerror = () => handleBroken('The surface pattern worker stopped working.');
+    w.onmessageerror = () => handleBroken('Could not read the surface pattern worker response.');
     worker = w;
   } catch {
     worker = null;
@@ -116,7 +123,11 @@ function pump(): void {
     const next = queued.shift()!;
     const w = ensureWorker();
     if (!w) {
-      next.resolve(texturedSurfaceOf(next.geom, next.halfLen));
+      try {
+        next.resolve({ surface: texturedSurfaceOf(next.geom, next.halfLen), error: null });
+      } catch (err) {
+        next.resolve({ surface: null, error: err instanceof Error ? err.message : String(err) });
+      }
       continue;
     }
     const timer = setTimeout(() => {
@@ -124,7 +135,7 @@ function pump(): void {
       const wedged = active;
       active = null;
       dropWorker(w);
-      wedged.resolve(null);
+      wedged.resolve({ surface: null, error: 'The surface pattern build timed out.' });
       pump();
     }, TEXTURE_TIMEOUT_MS);
     active = { ...next, timer };
@@ -142,37 +153,53 @@ function pump(): void {
       if (req.faces.byteLength > 0) transfer.push(req.faces.buffer);
       w.postMessage(req, transfer);
       return;
-    } catch {
+    } catch (err) {
       clearTimeout(timer);
       active = null;
-      next.resolve(null);
+      dropWorker(w);
+      next.resolve({ surface: null, error: err instanceof Error ? err.message : 'Failed to start surface pattern build.' });
     }
   }
 }
 
 /**
- * The geom's patterned surface, built off the main thread where it can be.
- * Resolves null when the geom has no patterns or the build failed; never
- * rejects.
+ * The geom's patterned surface plus any worker/timeout error message.
+ * Never rejects.
  */
-export function requestTexturedSurface(geom: SceneGeom, halfLen?: number): Promise<TexturedSurface | null> {
-  if (!geom.textures?.length) return Promise.resolve(null);
+export function requestTexturedSurfaceWithStatus(geom: SceneGeom, halfLen?: number): Promise<TexturedSurfaceResult> {
+  if (!geom.textures?.length) return Promise.resolve({ surface: null, error: null });
   const hit = cachedTexturedSurface(geom, halfLen);
-  if (hit) return Promise.resolve(hit);
+  if (hit) return Promise.resolve({ surface: hit, error: null });
   const key = texturedSurfaceKey(geom, halfLen);
   const running = inFlight.get(key);
   if (running) return running;
 
   const base = geomLocalSurface(geom, halfLen);
-  let job: Promise<TexturedSurface | null>;
+  let job: Promise<TexturedSurfaceResult>;
   if (typeof Worker === 'undefined' || !base) {
-    job = Promise.resolve(texturedSurfaceOf(geom, halfLen));
+    try {
+      job = Promise.resolve({ surface: texturedSurfaceOf(geom, halfLen), error: null });
+    } catch (err) {
+      job = Promise.resolve({ surface: null, error: err instanceof Error ? err.message : String(err) });
+    }
   } else {
     const textures = geom.textures;
-    job = new Promise<TexturedSurface | null>((resolve) => {
+    const geomName = geom.name;
+    // Supersede any queued (not yet active) build for the same geom so rapid
+    // slider edits do not pile up stale jobs behind the active one.
+    if (geomName) {
+      for (let i = queued.length - 1; i >= 0; i--) {
+        if (queued[i].geomName === geomName && queued[i].key !== key) {
+          const [stale] = queued.splice(i, 1);
+          stale.resolve({ surface: null, error: null });
+        }
+      }
+    }
+    job = new Promise<TexturedSurfaceResult>((resolve) => {
       queued.push({
         id: ++seq,
         key,
+        geomName,
         geom,
         halfLen,
         positions: Float64Array.from(base.positions),
@@ -187,4 +214,13 @@ export function requestTexturedSurface(geom: SceneGeom, halfLen?: number): Promi
   inFlight.set(key, job);
   void job.finally(() => inFlight.delete(key));
   return job;
+}
+
+/**
+ * The geom's patterned surface, built off the main thread where it can be.
+ * Resolves null when the geom has no patterns or the build failed; never
+ * rejects.
+ */
+export function requestTexturedSurface(geom: SceneGeom, halfLen?: number): Promise<TexturedSurface | null> {
+  return requestTexturedSurfaceWithStatus(geom, halfLen).then((r) => r.surface);
 }

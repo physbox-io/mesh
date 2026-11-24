@@ -34,11 +34,15 @@ function toBase64(bytes: Uint8Array): string {
   return btoa(s);
 }
 
-function fromBase64(b64: string): Uint8Array {
-  const s = atob(b64);
-  const out = new Uint8Array(s.length);
-  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
-  return out;
+function fromBase64(b64: string): Uint8Array | null {
+  try {
+    const s = atob(b64);
+    const out = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+    return out;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -65,12 +69,13 @@ export function decodeImageGrid(opts: PatternOptions): ImageGrid | null {
   const b64 = str(opts, 'imageGrid', '');
   const width = num(opts, 'imageW', 0), height = num(opts, 'imageH', 0);
   if (!b64 || width < 1 || height < 1) return null;
-  if (decoded?.key !== b64) {
+  const cacheKey = `${width}x${height}:${b64}`;
+  if (decoded?.key !== cacheKey) {
     const bytes = fromBase64(b64);
-    if (bytes.length !== width * height) return null;
+    if (!bytes || bytes.length !== width * height) return null;
     const data = new Float32Array(bytes.length);
     for (let i = 0; i < bytes.length; i++) data[i] = bytes[i] / 255;
-    decoded = { key: b64, grid: { width, height, data } };
+    decoded = { key: cacheKey, grid: { width, height, data } };
   }
   return decoded.grid;
 }
@@ -114,7 +119,7 @@ function sourceGrid(opts: PatternOptions): ImageGrid | null {
   if (!g) return null;
   const blur = num(opts, 'blurPx', 0);
   if (blur <= 0) return g;
-  const key = str(opts, 'imageGrid', '');
+  const key = `${g.width}x${g.height}:${str(opts, 'imageGrid', '')}`;
   if (blurred?.key !== key || blurred.blur !== blur) blurred = { key, blur, grid: blurGrid(g, blur) };
   return blurred.grid;
 }
@@ -131,18 +136,57 @@ function at(g: ImageGrid, x: number, y: number): number {
 }
 
 /**
- * The mean of `kx` x `ky` bilinear samples spread over `rx` x `ry` pixels
- * either side of (x, y). Used when a mesh cell spans several pixels: sampled
- * at a point, a 1024-pixel picture on a 0.6 mm mesh aliases, and every steep
- * edge in it comes out a sawtooth.
+ * Build a summed-area table over `g.data` so box averages of any radius
+ * (`rx > 1 || ry > 1`) run in O(1) per cell without aliasing or worker hangs.
  */
-function cellAt(g: ImageGrid, x: number, y: number, rx: number, ry: number, kx: number, ky: number): number {
-  let s = 0;
-  for (let j = 0; j < ky; j++) {
-    const yy = ky === 1 ? y : y - ry + (2 * ry * (j + 0.5)) / ky;
-    for (let i = 0; i < kx; i++) s += at(g, kx === 1 ? x : x - rx + (2 * rx * (i + 0.5)) / kx, yy);
+function buildSat(g: ImageGrid): Float64Array {
+  const { width: w, height: h, data } = g;
+  const sw = w + 1;
+  const sat = new Float64Array(sw * (h + 1));
+  for (let y = 0; y < h; y++) {
+    let rowSum = 0;
+    const rowOff = y * w;
+    const satRow = (y + 1) * sw;
+    const prevRow = y * sw;
+    for (let x = 0; x < w; x++) {
+      rowSum += data[rowOff + x];
+      sat[satRow + x + 1] = sat[prevRow + x + 1] + rowSum;
+    }
   }
-  return s / (kx * ky);
+  return sat;
+}
+
+/** O(1) axis-aware box/bilinear average via summed-area table. */
+function satBoxAt(sat: Float64Array, w: number, h: number, x: number, y: number, rx: number, ry: number): number {
+  const sw = w + 1;
+  const rectMean = (x0: number, x1: number, y0: number, y1: number) =>
+    (sat[(y1 + 1) * sw + (x1 + 1)] -
+      sat[y0 * sw + (x1 + 1)] -
+      sat[(y1 + 1) * sw + x0] +
+      sat[y0 * sw + x0]) /
+    ((x1 - x0 + 1) * (y1 - y0 + 1));
+
+  if (rx > 1 && ry > 1) {
+    const x0 = Math.max(0, Math.min(w - 1, Math.floor(x - rx)));
+    const x1 = Math.max(x0, Math.min(w - 1, Math.ceil(x + rx)));
+    const y0 = Math.max(0, Math.min(h - 1, Math.floor(y - ry)));
+    const y1 = Math.max(y0, Math.min(h - 1, Math.ceil(y + ry)));
+    return rectMean(x0, x1, y0, y1);
+  }
+  if (rx > 1) {
+    const x0 = Math.max(0, Math.min(w - 1, Math.floor(x - rx)));
+    const x1 = Math.max(x0, Math.min(w - 1, Math.ceil(x + rx)));
+    const fy = Math.min(h - 1, Math.max(0, y));
+    const y0 = Math.floor(fy), y1 = Math.min(h - 1, y0 + 1);
+    const ty = fy - y0;
+    return rectMean(x0, x1, y0, y0) * (1 - ty) + rectMean(x0, x1, y1, y1) * ty;
+  }
+  const y0 = Math.max(0, Math.min(h - 1, Math.floor(y - ry)));
+  const y1 = Math.max(y0, Math.min(h - 1, Math.ceil(y + ry)));
+  const fx = Math.min(w - 1, Math.max(0, x));
+  const x0 = Math.floor(fx), x1 = Math.min(w - 1, x0 + 1);
+  const tx = fx - x0;
+  return rectMean(x0, x0, y0, y1) * (1 - tx) + rectMean(x1, x1, y0, y1) * tx;
 }
 
 /** How far apart the picture's left and right edges are, 0..1: what a wrap would show as a step. */
@@ -223,15 +267,17 @@ export const IMAGE_PATTERN: PatternSpec = {
       ph = (pw * g.height) / g.width;
     }
     const shift = fit === 'stretch' ? [0, 0] : [num(opts, 'offsetXMm', 0), num(opts, 'offsetYMm', 0)];
+    if (!(pw > 0) || !(ph > 0)) return out;
     const left = (W - pw) / 2 + shift[0], bottom = (D - ph) / 2 + shift[1];
     const invert = str(opts, 'mapping', 'white-high') === 'white-low';
     const dx = cols > 1 ? W / (cols - 1) : 0, dy = rows > 1 ? D / (rows - 1) : 0;
     // The board is sampled at half the mesh cell, so a box two steps across
     // is one cell: the picture averaged to what the mesh can carry.
     const rx = (dx / pw) * (g.width - 1), ry = (dy / ph) * (g.height - 1);
-    // At most a sample a pixel, so the whole board costs about four per pixel of the picture.
-    const samples = (r: number) => (r > 1 ? Math.ceil(2 * r) : 1);
-    const kx = samples(rx), ky = samples(ry);
+    if (!Number.isFinite(rx) || !Number.isFinite(ry)) return out;
+    // Use an O(1) summed-area table whenever a cell spans multiple pixels so
+    // tiny widthMm on large faces never hangs and high-frequency stripes never alias.
+    const sat = rx > 1 || ry > 1 ? buildSat(g) : null;
     for (let r = 0; r < rows; r++) {
       // Board y runs up the face; the picture's row 0 is its top.
       const ty = (r * dy - bottom) / ph;
@@ -240,7 +286,8 @@ export const IMAGE_PATTERN: PatternSpec = {
       for (let c = 0; c < cols; c++) {
         const tx = (c * dx - left) / pw;
         if (tx < 0 || tx > 1) continue;
-        const v = cellAt(g, tx * (g.width - 1), py, rx, ry, kx, ky);
+        const px = tx * (g.width - 1);
+        const v = sat ? satBoxAt(sat, g.width, g.height, px, py, rx, ry) : at(g, px, py);
         out[r * cols + c] = invert ? 1 - v : v;
       }
     }

@@ -67,7 +67,7 @@ export const GeneratePatternModal: React.FC = () => {
     // Each pattern says how deep it wants to be read at; see `depthFraction`.
     const wanted = stock.thicknessMm * (spec.depthFraction ?? DEFAULT_DEPTH_FRACTION);
     const room = stock.thicknessMm - PANEL_BASE_MM - RELIEF_FLOOR_MM;
-    setDepthMm(Math.round(Math.min(room, Math.max(MIN_SENSIBLE_DEPTH_MM, wanted)) * 10) / 10);
+    setDepthMm(Math.max(0.1, Math.round(Math.min(room, Math.max(MIN_SENSIBLE_DEPTH_MM, wanted)) * 10) / 10));
   }
 
   /*
@@ -192,6 +192,7 @@ export const GeneratePatternModal: React.FC = () => {
 
   const maxDepthMm = stock.thicknessMm - PANEL_BASE_MM - RELIEF_FLOOR_MM;
   const tooDeep = !through && depthMm > maxDepthMm;
+  const settling = settledOptions !== options || settledDepth !== depthMm || settledStock !== stock;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
@@ -351,7 +352,7 @@ export const GeneratePatternModal: React.FC = () => {
             </button>
             <button
               onClick={handleGenerate}
-              disabled={!plank || tooDeep}
+              disabled={!plank || tooDeep || settling}
               className="px-4 py-1.5 text-xs font-bold text-white bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition-colors cursor-pointer"
             >
               Generate

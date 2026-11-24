@@ -48,9 +48,9 @@ export interface PaintLayer {
    */
   res: number[];
   /** Indices of the vertices carrying paint. */
-  idx: number[];
+  idx: number[] | Uint32Array;
   /** r, g, b, coverage for each entry in `idx`, quantised to 0..255. */
-  rgba: number[];
+  rgba: number[] | Uint8Array;
 }
 
 /** The live, dense form of a PaintLayer — what a stroke actually writes into. */

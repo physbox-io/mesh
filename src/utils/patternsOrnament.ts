@@ -500,6 +500,7 @@ export const thaiTiles: PatternSpec = {
       }
       // Tile coordinates, the motif's circle touching the border.
       const inner = half - gutter / 2 - border;
+      if (inner <= 1e-6) return 0;
       const u = (lx - tw / 2) / inner;
       const v = (ly - th / 2) / inner;
       const which = alt !== 'none' && (i + j) % 2 === 1 ? alt : motif;

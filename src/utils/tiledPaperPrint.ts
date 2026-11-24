@@ -76,17 +76,30 @@ const escXml = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 /** Extracts inner markup and viewBox dimensions from a millimetre SVG string. */
-export function parseMmSvg(svg: string): { widthMm: number; heightMm: number; inner: string } {
-  const vbMatch = /viewBox="\s*([-\d.]+)\s+([-\d.]+)\s+([\d.]+)\s+([\d.]+)\s*"/i.exec(svg);
-  const wMatch = /\bwidth="([\d.]+)\s*(?:mm)?"/i.exec(svg);
-  const hMatch = /\bheight="([\d.]+)\s*(?:mm)?"/i.exec(svg);
+export function parseMmSvg(svg: string): {
+  minX: number;
+  minY: number;
+  widthMm: number;
+  heightMm: number;
+  inner: string;
+} {
+  const svgOpen = /<svg\b[^>]*>/i.exec(svg);
+  const header = svgOpen ? svgOpen[0] : svg;
+  const vbMatch =
+    /viewBox=["']\s*([-+]?\d*\.?\d+(?:e[-+]?\d+)?)(?:[\s,]+)([-+]?\d*\.?\d+(?:e[-+]?\d+)?)(?:[\s,]+)([-+]?\d*\.?\d+(?:e[-+]?\d+)?)(?:[\s,]+)([-+]?\d*\.?\d+(?:e[-+]?\d+)?)\s*["']/i.exec(
+      header
+    );
+  const wMatch = /\bwidth=["']\s*([\d.]+)\s*(?:mm)?\s*["']/i.exec(header);
+  const hMatch = /\bheight=["']\s*([\d.]+)\s*(?:mm)?\s*["']/i.exec(header);
+  const minX = vbMatch ? parseFloat(vbMatch[1]) : 0;
+  const minY = vbMatch ? parseFloat(vbMatch[2]) : 0;
   const widthMm = Math.max(1, vbMatch ? parseFloat(vbMatch[3]) : wMatch ? parseFloat(wMatch[1]) : 200);
   const heightMm = Math.max(1, vbMatch ? parseFloat(vbMatch[4]) : hMatch ? parseFloat(hMatch[1]) : 200);
-  const openEnd = svg.indexOf('>');
+  const openEnd = svgOpen ? svgOpen.index + svgOpen[0].length : -1;
   const closeStart = svg.lastIndexOf('</svg>');
   const inner =
-    openEnd >= 0 && closeStart > openEnd ? svg.slice(openEnd + 1, closeStart) : svg;
-  return { widthMm, heightMm, inner };
+    openEnd >= 0 && closeStart >= openEnd ? svg.slice(openEnd, closeStart) : svg;
+  return { minX, minY, widthMm, heightMm, inner };
 }
 
 /**
@@ -98,12 +111,14 @@ export function tileSvgForHomePrint(
 ): TiledPrintDocument {
   const paper = PAPER_SPECS[options?.paper ?? 'a4'];
   const title = options?.title?.trim() || '1:1 Pattern';
-  const { widthMm, heightMm, inner } = parseMmSvg(sourceSvg);
+  const { minX, minY, widthMm, heightMm, inner } = parseMmSvg(sourceSvg);
 
   const printableW = paper.widthMm - 2 * paper.marginMm;
   const printableH = paper.heightMm - 2 * paper.marginMm;
   const stepX = Math.max(20, printableW - paper.overlapMm);
   const stepY = Math.max(20, printableH - paper.overlapMm);
+  const halfOverlapX = (printableW - stepX) / 2;
+  const halfOverlapY = (printableH - stepY) / 2;
 
   const cols = Math.max(1, widthMm <= printableW ? 1 : 1 + Math.ceil((widthMm - printableW) / stepX));
   const rows = Math.max(1, heightMm <= printableH ? 1 : 1 + Math.ceil((heightMm - printableH) / stepY));
@@ -119,8 +134,9 @@ export function tileSvgForHomePrint(
       const srcY = r * stepY;
       const clipId = `tile-clip-${r}-${c}`;
 
-      // Corner alignment diamonds at the overlap seam corners so adjacent sheets
-      // tape together edge-to-edge with sub-millimetre accuracy.
+      // Corner alignment diamonds at the shared seam corners so mating diamonds
+      // across adjacent sheets sit at identical source coordinates, leaving the
+      // outer half-overlap strip outside each interior seam as a glue/tape tab.
       const diamond = (cx: number, cy: number) =>
         `<polygon points="${fmt(cx)},${fmt(cy - 3.5)} ${fmt(cx + 3.5)},${fmt(cy)} ${fmt(cx)},${fmt(cy + 3.5)} ${fmt(cx - 3.5)},${fmt(cy)}" fill="none" stroke="#0f172a" stroke-width="0.35"/>` +
         `<line x1="${fmt(cx - 4.5)}" y1="${fmt(cy)}" x2="${fmt(cx + 4.5)}" y2="${fmt(cy)}" stroke="#0f172a" stroke-width="0.25"/>` +
@@ -131,6 +147,11 @@ export function tileSvgForHomePrint(
       const rx = mx + printableW;
       const by = my + printableH;
 
+      const seamL = c > 0 ? mx + halfOverlapX : mx;
+      const seamR = c < cols - 1 ? rx - halfOverlapX : rx;
+      const seamT = r > 0 ? my + halfOverlapY : my;
+      const seamB = r < rows - 1 ? by - halfOverlapY : by;
+
       // Namespace SVG ids per tile so defs (like arrow markers) don't collide across pages.
       const scopedInner = inner
         .replace(/\bid="([^"]+)"/g, `id="$1_p${pageNumber}"`)
@@ -139,7 +160,7 @@ export function tileSvgForHomePrint(
       const scaleBox =
         pageNumber === 1
           ? [
-              `<g transform="translate(${fmt(rx - 54)}, ${fmt(by - 54)})">`,
+              `<g transform="translate(${fmt(seamR - 54)}, ${fmt(seamB - 54)})">`,
               `  <rect x="0" y="0" width="50" height="50" fill="rgba(255,255,255,0.88)" stroke="#0f172a" stroke-width="0.45"/>`,
               `  <line x1="0" y1="25" x2="50" y2="25" stroke="#94a3b8" stroke-width="0.25" stroke-dasharray="2,1.5"/>`,
               `  <text x="25" y="21" font-family="sans-serif" font-size="3.4" font-weight="bold" text-anchor="middle" fill="#0f172a">50 × 50 mm</text>`,
@@ -151,13 +172,17 @@ export function tileSvgForHomePrint(
 
       const neighborHints: string[] = [];
       if (c < cols - 1) {
+        const hintX = seamR + halfOverlapX / 2;
+        const hintY = (seamT + seamB) / 2;
         neighborHints.push(
-          `<text x="${fmt(rx - 2)}" y="${fmt(my + printableH / 2)}" transform="rotate(90 ${fmt(rx - 2)} ${fmt(my + printableH / 2)})" font-family="sans-serif" font-size="2.8" text-anchor="middle" fill="#64748b">Join → Row ${r + 1} Col ${c + 2}</text>`
+          `<text x="${fmt(hintX)}" y="${fmt(hintY)}" transform="rotate(90 ${fmt(hintX)} ${fmt(hintY)})" font-family="sans-serif" font-size="2.8" text-anchor="middle" fill="#64748b">Join → Row ${r + 1} Col ${c + 2}</text>`
         );
       }
       if (r < rows - 1) {
+        const hintX = (seamL + seamR) / 2;
+        const hintY = seamB + halfOverlapY / 2 + 1;
         neighborHints.push(
-          `<text x="${fmt(mx + printableW / 2)}" y="${fmt(by - 1.5)}" font-family="sans-serif" font-size="2.8" text-anchor="middle" fill="#64748b">Join ↓ Row ${r + 2} Col ${c + 1}</text>`
+          `<text x="${fmt(hintX)}" y="${fmt(hintY)}" font-family="sans-serif" font-size="2.8" text-anchor="middle" fill="#64748b">Join ↓ Row ${r + 2} Col ${c + 1}</text>`
         );
       }
 
@@ -168,15 +193,15 @@ export function tileSvgForHomePrint(
         `  </defs>`,
         `  <rect x="0" y="0" width="${fmt(paper.widthMm)}" height="${fmt(paper.heightMm)}" fill="#ffffff"/>`,
         `  <g clip-path="url(#${clipId})">`,
-        `    <g transform="translate(${fmt(mx - srcX)}, ${fmt(my - srcY)})">`,
+        `    <g transform="translate(${fmt(mx - srcX - minX)}, ${fmt(my - srcY - minY)})">`,
         scopedInner,
         `    </g>`,
         `  </g>`,
-        `  <rect x="${fmt(mx)}" y="${fmt(my)}" width="${fmt(printableW)}" height="${fmt(printableH)}" fill="none" stroke="#94a3b8" stroke-width="0.25" stroke-dasharray="3,2"/>`,
-        `  ${diamond(mx, my)}`,
-        `  ${diamond(rx, my)}`,
-        `  ${diamond(mx, by)}`,
-        `  ${diamond(rx, by)}`,
+        `  <rect x="${fmt(seamL)}" y="${fmt(seamT)}" width="${fmt(seamR - seamL)}" height="${fmt(seamB - seamT)}" fill="none" stroke="#94a3b8" stroke-width="0.25" stroke-dasharray="3,2"/>`,
+        `  ${diamond(seamL, seamT)}`,
+        `  ${diamond(seamR, seamT)}`,
+        `  ${diamond(seamL, seamB)}`,
+        `  ${diamond(seamR, seamB)}`,
         `  <text x="${fmt(mx + 2)}" y="${fmt(my - 3)}" font-family="monospace" font-size="3.2" fill="#334155">${escXml(title)} · Page ${pageNumber}/${totalPages} (Row ${r + 1}, Col ${c + 1})</text>`,
         ...neighborHints.map((h) => `  ${h}`),
         scaleBox,
@@ -230,7 +255,7 @@ export function tileSvgForHomePrint(
     `  <div class="print-bar">`,
     `    <div>`,
     `      <strong>${escXml(title)} · ${totalPages} ${totalPages === 1 ? 'sheet' : 'sheets'} (${rows}×${cols} grid, ${paper.label})</strong><br>`,
-    `      <span>In your printer dialog, set <b>Scale: 100% / Actual Size</b> and <b>Margins: None</b>. Verify the 50 × 50 mm square on Page 1 with a ruler, trim along dashed lines, and match the corner diamonds.</span>`,
+    `      <span>In your printer dialog, set <b>Scale: 100% / Actual Size</b> and <b>Margins: None</b>. Verify the 50 × 50 mm square on Page 1 with a ruler, trim along the dashed seam lines (leaving the outer overlap strip as a glue/tape tab if desired), and match the corner diamonds.</span>`,
     `    </div>`,
     `    <button class="print-btn" onclick="window.print()">Print 1:1 Sheets</button>`,
     `  </div>`,

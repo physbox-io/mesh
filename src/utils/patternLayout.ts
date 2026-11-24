@@ -176,16 +176,21 @@ export function buildLaidOut(
   extent: PatternExtent,
   opts: PatternOptions
 ): Float32Array {
-  const cell = cols > 1 ? extent.widthM / (cols - 1) : extent.widthM;
+  const cellX = cols > 1 ? extent.widthM / (cols - 1) : extent.widthM;
+  const cellY = rows > 1 ? extent.depthM / (rows - 1) : extent.depthM;
   const frameM = Math.max(0, num(opts, 'frameMm', 0)) / 1000;
-  let m = frameM > 0 && cell > 0 ? Math.round(frameM / cell) : 0;
+  let mX = frameM > 0 && cellX > 0 ? Math.round(frameM / cellX) : 0;
+  let mY = frameM > 0 && cellY > 0 ? Math.round(frameM / cellY) : 0;
   // A frame that leaves no pattern is no frame.
-  if (cols - 2 * m < 3 || rows - 2 * m < 3) m = 0;
-  const ic = cols - 2 * m;
-  const ir = rows - 2 * m;
+  if (cols - 2 * mX < 3 || rows - 2 * mY < 3) {
+    mX = 0;
+    mY = 0;
+  }
+  const ic = cols - 2 * mX;
+  const ir = rows - 2 * mY;
   const inner: PatternExtent = {
-    widthM: m > 0 ? (ic - 1) * cell : extent.widthM,
-    depthM: m > 0 ? (ir - 1) * cell : extent.depthM,
+    widthM: mX > 0 ? (ic - 1) * cellX : extent.widthM,
+    depthM: mY > 0 ? (ir - 1) * cellY : extent.depthM,
   };
 
   const align = str(opts, 'layoutAlign', spec.tile ? 'fit' : 'free') as LayoutAlign;
@@ -194,40 +199,46 @@ export function buildLaidOut(
   if (g.length !== ic * ir) return g;
 
   g = applySymmetry(g, ic, ir, str(opts, 'symmetry', 'none') as Symmetry);
-  const softenCells = cell > 0 ? Math.max(0, num(opts, 'softenMm', 0)) / 1000 / cell : 0;
-  if (softenCells >= 0.5) g = soften(g, ic, ir, softenCells);
-  const fadeCells = cell > 0 ? Math.max(0, num(opts, 'fadeMm', 0)) / 1000 / cell : 0;
-  if (fadeCells >= 1) fadeToEdge(g, ic, ir, fadeCells);
+  const softenM = Math.max(0, num(opts, 'softenMm', 0)) / 1000;
+  const softenX = cellX > 0 ? softenM / cellX : 0;
+  const softenY = cellY > 0 ? softenM / cellY : 0;
+  if (softenX >= 0.5 || softenY >= 0.5) g = soften(g, ic, ir, softenX, softenY);
+  const fadeM = Math.max(0, num(opts, 'fadeMm', 0)) / 1000;
+  const fadeX = cellX > 0 ? fadeM / cellX : 0;
+  const fadeY = cellY > 0 ? fadeM / cellY : 0;
+  if (fadeX >= 1 || fadeY >= 1) fadeToEdge(g, ic, ir, fadeX, fadeY);
 
   // Every consumer assumes 0..1; floating-point dust below zero from any one
   // generator must not reach the mesh as a sliver under the floor.
   for (let i = 0; i < g.length; i++) g[i] = clamp01(g[i]);
 
   const style = spec.throughCut ? 'plain' : (str(opts, 'frameStyle', 'plain') as FrameStyle);
-  if (m === 0) {
+  if (mX === 0 && mY === 0) {
     // No frame to stand above: a raised frame still has no width, so only the
     // pattern's own heights remain.
     return g;
   }
-  return frame(g, ic, ir, cols, rows, m, style, Math.max(0.5, num(opts, 'frameGrooveMm', 3)) / 1000 / cell);
+  const grooveM = Math.max(0.5, num(opts, 'frameGrooveMm', 3)) / 1000;
+  return frame(g, ic, ir, cols, rows, mX, mY, cellX, cellY, style, grooveM);
 }
 
-/** Paste the pattern into a frame `m` cells wide. */
+/** Paste the pattern into a frame `mX` x `mY` cells wide. */
 function frame(
-  g: Float32Array, ic: number, ir: number, cols: number, rows: number, m: number,
-  style: FrameStyle, grooveCells: number
+  g: Float32Array, ic: number, ir: number, cols: number, rows: number, mX: number, mY: number,
+  cellX: number, cellY: number, style: FrameStyle, grooveM: number
 ): Float32Array {
   const out = new Float32Array(cols * rows);
   // Raised: the pattern sits in a panel below the frame, so its peaks are no
   // longer the stock's top and the frame reads as a moulding round it.
   const scale = style === 'raised' ? 0.7 : 1;
   const frameLevel = style === 'sunk' ? 0 : 1;
-  const half = Math.min(grooveCells / 2, m / 2);
-  const centre = m / 2;
+  const frameW = Math.min(mX > 0 ? mX * cellX : Infinity, mY > 0 ? mY * cellY : Infinity);
+  const half = Number.isFinite(frameW) ? Math.min(grooveM / 2, frameW / 2) : 0;
+  const centre = Number.isFinite(frameW) ? frameW / 2 : 0;
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      const ri = r - m;
-      const ci = c - m;
+      const ri = r - mY;
+      const ci = c - mX;
       if (ri >= 0 && ri < ir && ci >= 0 && ci < ic) {
         out[r * cols + c] = g[ri * ic + ci] * scale;
         continue;
@@ -236,7 +247,10 @@ function frame(
       if (style === 'groove' && half > 0) {
         // Distance in, from the board's edge, of this point of the frame:
         // the groove runs round the middle of the frame's width.
-        const inset = Math.min(c, r, cols - 1 - c, rows - 1 - r);
+        const inset = Math.min(
+          Math.min(c, cols - 1 - c) * cellX,
+          Math.min(r, rows - 1 - r) * cellY
+        );
         const d = Math.abs(inset - centre);
         if (d < half) h = d / half;
       }
@@ -306,8 +320,7 @@ export function applySymmetry(g: Float32Array, cols: number, rows: number, sym: 
 
 // --- Soften and fade -------------------------------------------------------------
 
-/** A Gaussian blur about `radius` cells across: every edge rounded over by it. */
-export function soften(g: Float32Array, cols: number, rows: number, radius: number): Float32Array {
+function gaussianKernel(radius: number): { half: number; w: Float32Array } {
   const sigma = Math.max(0.3, radius / 2);
   const half = Math.min(64, Math.ceil(sigma * 2.5));
   const w = new Float32Array(2 * half + 1);
@@ -317,38 +330,57 @@ export function soften(g: Float32Array, cols: number, rows: number, radius: numb
     sum += w[i + half];
   }
   for (let i = 0; i < w.length; i++) w[i] /= sum;
-  const tmp = new Float32Array(cols * rows);
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      let s = 0;
-      for (let i = -half; i <= half; i++) {
-        const cc = c + i < 0 ? -(c + i) : c + i >= cols ? 2 * (cols - 1) - (c + i) : c + i;
-        s += g[r * cols + Math.max(0, Math.min(cols - 1, cc))] * w[i + half];
+  return { half, w };
+}
+
+/** A Gaussian blur about `radiusX` x `radiusY` cells across: every edge rounded over by it. */
+export function soften(g: Float32Array, cols: number, rows: number, radiusX: number, radiusY = radiusX): Float32Array {
+  let tmp: Float32Array;
+  if (radiusX >= 0.5) {
+    const { half, w } = gaussianKernel(radiusX);
+    tmp = new Float32Array(cols * rows);
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        let s = 0;
+        for (let i = -half; i <= half; i++) {
+          const cc = c + i < 0 ? -(c + i) : c + i >= cols ? 2 * (cols - 1) - (c + i) : c + i;
+          s += g[r * cols + Math.max(0, Math.min(cols - 1, cc))] * w[i + half];
+        }
+        tmp[r * cols + c] = s;
       }
-      tmp[r * cols + c] = s;
     }
+  } else {
+    tmp = g;
   }
   const out = new Float32Array(cols * rows);
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      let s = 0;
-      for (let i = -half; i <= half; i++) {
-        const rr = r + i < 0 ? -(r + i) : r + i >= rows ? 2 * (rows - 1) - (r + i) : r + i;
-        s += tmp[Math.max(0, Math.min(rows - 1, rr)) * cols + c] * w[i + half];
+  if (radiusY >= 0.5) {
+    const { half, w } = gaussianKernel(radiusY);
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        let s = 0;
+        for (let i = -half; i <= half; i++) {
+          const rr = r + i < 0 ? -(r + i) : r + i >= rows ? 2 * (rows - 1) - (r + i) : r + i;
+          s += tmp[Math.max(0, Math.min(rows - 1, rr)) * cols + c] * w[i + half];
+        }
+        out[r * cols + c] = clamp01(s);
       }
-      out[r * cols + c] = clamp01(s);
     }
+  } else {
+    for (let i = 0; i < out.length; i++) out[i] = clamp01(tmp[i]);
   }
   return out;
 }
 
-/** Ease the pattern up to the board's top over `cells` from its edge, in place. */
-export function fadeToEdge(g: Float32Array, cols: number, rows: number, cells: number): void {
+/** Ease the pattern up to the board's top over `cellsX` x `cellsY` from its edge, in place. */
+export function fadeToEdge(g: Float32Array, cols: number, rows: number, cellsX: number, cellsY = cellsX): void {
   for (let r = 0; r < rows; r++) {
+    const dy = Math.min(r, rows - 1 - r);
+    const ky = cellsY >= 1 && dy < cellsY ? smoothstep(0, cellsY, dy) : 1;
     for (let c = 0; c < cols; c++) {
-      const d = Math.min(c, r, cols - 1 - c, rows - 1 - r);
-      if (d >= cells) continue;
-      const k = smoothstep(0, cells, d);
+      const dx = Math.min(c, cols - 1 - c);
+      const kx = cellsX >= 1 && dx < cellsX ? smoothstep(0, cellsX, dx) : 1;
+      const k = Math.min(kx, ky);
+      if (k >= 1) continue;
       const i = r * cols + c;
       g[i] = 1 - (1 - g[i]) * k;
     }

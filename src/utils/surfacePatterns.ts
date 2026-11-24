@@ -674,8 +674,8 @@ const masonry: PatternSpec = {
         // bonds. Flemish alternates a full and a half brick along the course,
         // so its offset is per brick rather than per course.
         let offset = 0;
-        if (bond === 'running') offset = (course % 2) * brickL * 0.5;
-        else if (bond === 'flemish') offset = (course % 2) * brickL * 0.25;
+        if (bond === 'running') offset = (course & 1) * brickL * 0.5;
+        else if (bond === 'flemish') offset = (course & 1) * brickL * 0.25;
 
         const along = x + offset;
         let index = Math.floor(along / brickL);
@@ -1642,42 +1642,80 @@ const foliage: PatternSpec = {
       grow(x, extent.depthM, -Math.PI / 2 + (rnd() - 0.5) * 0.5, extent.depthM * 0.26, stemWidth, iterations);
     }
 
-    // Distance from a point to a segment, which is what makes the stem round.
-    const distToSeg = (px: number, py: number, s: Seg): number => {
+    // Rasterise each segment and leaf only over its local bounding box of grid
+    // cells so high iteration counts stay O(cells covered) instead of O(cells * segments).
+    const out = new Float32Array(cols * rows);
+    if (cols < 1 || rows < 1) return out;
+    const x0 = extent.x0 ?? 0;
+    const y0 = extent.y0 ?? 0;
+    const stepX = cols > 1 ? extent.widthM / (cols - 1) : 0;
+    const stepY = rows > 1 ? extent.depthM / (rows - 1) : 0;
+
+    for (const s of segs) {
+      if (!(s.w > 0)) continue;
+      const minX = Math.min(s.x0, s.x1) - s.w;
+      const maxX = Math.max(s.x0, s.x1) + s.w;
+      const minY = Math.min(s.y0, s.y1) - s.w;
+      const maxY = Math.max(s.y0, s.y1) + s.w;
+      const c0 = stepX > 0 ? Math.max(0, Math.floor((minX - x0) / stepX)) : 0;
+      const c1 = stepX > 0 ? Math.min(cols - 1, Math.ceil((maxX - x0) / stepX)) : cols - 1;
+      const r0 = stepY > 0 ? Math.max(0, Math.floor((minY - y0) / stepY)) : 0;
+      const r1 = stepY > 0 ? Math.min(rows - 1, Math.ceil((maxY - y0) / stepY)) : rows - 1;
+      if (c0 > c1 || r0 > r1) continue;
       const dx = s.x1 - s.x0;
       const dy = s.y1 - s.y0;
       const len2 = dx * dx + dy * dy;
-      const t = len2 > 0 ? clamp01(((px - s.x0) * dx + (py - s.y0) * dy) / len2) : 0;
-      return Math.hypot(px - (s.x0 + t * dx), py - (s.y0 + t * dy));
-    };
+      const invW = 1 / s.w;
+      for (let r = r0; r <= r1; r++) {
+        const y = y0 + (rows > 1 ? r / (rows - 1) : 0) * extent.depthM;
+        const rowOff = r * cols;
+        for (let c = c0; c <= c1; c++) {
+          const x = x0 + (cols > 1 ? c / (cols - 1) : 0) * extent.widthM;
+          const t = len2 > 0 ? clamp01(((x - s.x0) * dx + (y - s.y0) * dy) / len2) : 0;
+          const d = Math.hypot(x - (s.x0 + t * dx), y - (s.y0 + t * dy));
+          if (d < s.w) {
+            // A circular cross-section: full height on the centreline, falling to
+            // nothing at the edge.
+            const dn = d * invW;
+            const h = Math.sqrt(Math.max(0, 1 - dn * dn));
+            if (h > out[rowOff + c]) out[rowOff + c] = h;
+          }
+        }
+      }
+    }
 
-    const out = fillGrid(cols, rows, extent, (x, y) => {
-      let best = 0;
-      for (const s of segs) {
-        const d = distToSeg(x, y, s);
-        if (d < s.w) {
-          // A circular cross-section: full height on the centreline, falling to
-          // nothing at the edge.
-          const h = Math.sqrt(Math.max(0, 1 - (d / s.w) ** 2));
-          if (h > best) best = h;
-        }
-      }
-      for (const l of leaves) {
-        // An ellipse, long axis along the leaf's angle, pointed at both ends.
-        const dx = x - l.x;
+    for (const l of leaves) {
+      if (!(l.r > 0)) continue;
+      const minX = l.x - l.r;
+      const maxX = l.x + l.r;
+      const minY = l.y - l.r;
+      const maxY = l.y + l.r;
+      const c0 = stepX > 0 ? Math.max(0, Math.floor((minX - x0) / stepX)) : 0;
+      const c1 = stepX > 0 ? Math.min(cols - 1, Math.ceil((maxX - x0) / stepX)) : cols - 1;
+      const r0 = stepY > 0 ? Math.max(0, Math.floor((minY - y0) / stepY)) : 0;
+      const r1 = stepY > 0 ? Math.min(rows - 1, Math.ceil((maxY - y0) / stepY)) : rows - 1;
+      if (c0 > c1 || r0 > r1) continue;
+      const ca = Math.cos(-l.angle);
+      const sa = Math.sin(-l.angle);
+      const invR = 1 / l.r;
+      const invRY = 1 / (l.r * 0.45);
+      for (let r = r0; r <= r1; r++) {
+        const y = y0 + (rows > 1 ? r / (rows - 1) : 0) * extent.depthM;
         const dy = y - l.y;
-        const ca = Math.cos(-l.angle);
-        const sa = Math.sin(-l.angle);
-        const lx = (dx * ca - dy * sa) / l.r;
-        const ly = (dx * sa + dy * ca) / (l.r * 0.45);
-        const r2 = lx * lx + ly * ly;
-        if (r2 < 1) {
-          const h = Math.sqrt(1 - r2) * 0.72;
-          if (h > best) best = h;
+        const rowOff = r * cols;
+        for (let c = c0; c <= c1; c++) {
+          const x = x0 + (cols > 1 ? c / (cols - 1) : 0) * extent.widthM;
+          const dx = x - l.x;
+          const lx = (dx * ca - dy * sa) * invR;
+          const ly = (dx * sa + dy * ca) * invRY;
+          const r2 = lx * lx + ly * ly;
+          if (r2 < 1) {
+            const h = Math.sqrt(1 - r2) * 0.72;
+            if (h > out[rowOff + c]) out[rowOff + c] = h;
+          }
         }
       }
-      return best;
-    });
+    }
 
     // Not normalised, for the same reason as the stud plate: a vine occupies
     // part of the board and the bare ground between stems is genuinely flat.

@@ -457,8 +457,8 @@ interface DynamicGeomProps {
 }
 
 /** Z-up (MuJoCo) vertices to Y-up (three.js): the inverse of mjcf.ts's (x,y,z) to (x,-z,y). */
-function zupToYup(v: number[]): number[] {
-  const out = new Array<number>(v.length);
+function zupToYup(v: ArrayLike<number>): Float32Array {
+  const out = new Float32Array(v.length);
   for (let i = 0; i < v.length; i += 3) {
     out[i] = v[i];
     out[i + 1] = v[i + 2];

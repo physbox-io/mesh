@@ -38,12 +38,17 @@ export const SurfacePatternsCard: React.FC<{ node: SceneNode }> = ({ node }) => 
 
 const GeomPatterns: React.FC<{ node: SceneNode; geom: SceneGeom; named: boolean; disabled: boolean }> = ({ node, geom, named, disabled }) => {
   // The same build the viewport draws, for which patterns actually went on.
-  const [surface, setSurface] = useState<TexturedSurface | null>(null);
+  // Pair the result with the geom it was built for so mutating the geom never
+  // displays a stale build report while the new build is still in flight.
+  const [built, setBuilt] = useState<{ geom: SceneGeom; surface: TexturedSurface | null } | null>(null);
   useEffect(() => {
     let live = true;
-    void requestTexturedSurface(geom, geomHalfLen(geom)).then((s) => { if (live) setSurface(s); });
+    void requestTexturedSurface(geom, geomHalfLen(geom)).then((surface) => {
+      if (live) setBuilt({ geom, surface });
+    });
     return () => { live = false; };
   }, [geom]);
+  const surface = built?.geom === geom ? built.surface : null;
 
   const store = useStore.getState();
   const textures = geom.textures ?? [];

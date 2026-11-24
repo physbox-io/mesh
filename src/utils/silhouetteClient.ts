@@ -109,6 +109,7 @@ function pump(): void {
     } catch (err) {
       clearTimeout(timer);
       active = null;
+      dropWorker(w);
       next.reject(err instanceof Error ? err : new Error(String(err)));
     }
   }

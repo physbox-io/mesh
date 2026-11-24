@@ -140,6 +140,14 @@ const idOf = (a: object | undefined) => {
 const CACHE_SIZE = 8;
 const cache = new Map<string, TexturedSurface>();
 
+/** What the untextured base surface of this geom depends on (excluding textures). */
+export function baseSurfaceKey(geom: SceneGeom, halfLen?: number): string {
+  const base = geom.type === 'mesh'
+    ? `mesh:${idOf(geom.renderVertices ?? geom.vertices)}:${idOf(geom.faces)}`
+    : `${geom.type}:${(geom.size || []).join(',')}:${halfLen ?? ''}`;
+  return `${base}|${JSON.stringify(geom.faceSplits ?? [])}`;
+}
+
 /** What the textured surface of this geom depends on, as one string. */
 export function texturedSurfaceKey(geom: SceneGeom, halfLen?: number): string {
   const base = geom.type === 'mesh'

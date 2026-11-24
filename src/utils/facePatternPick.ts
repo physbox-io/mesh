@@ -12,7 +12,7 @@ import * as THREE from 'three';
 import type { SceneGeom, SceneNode } from '../types/scene';
 import { geomRayHits, resolveCsgGeoms } from './csg';
 import { getGeomFrame } from './laserCutExporter';
-import { geomHalfLen, geomLocalSurface, texturedSurfaceKey } from './geomSurface';
+import { baseSurfaceKey, geomHalfLen, geomLocalSurface } from './geomSurface';
 import { patternRegionAt, textureIndexAt } from './surfaceTexture';
 
 /** A face picked for a pattern: the geom, and the seed in its own frame. */
@@ -106,7 +106,7 @@ function glowOf(geom: SceneGeom, pick: PatternPick): PatternFaceGlow | null {
 const bases = new Map<string, { positions: number[]; faces: number[] } | null>();
 function baseSurface(geom: SceneGeom) {
   const halfLen = geomHalfLen(geom);
-  const key = texturedSurfaceKey(geom, halfLen);
+  const key = baseSurfaceKey(geom, halfLen);
   if (!bases.has(key)) {
     bases.set(key, geomLocalSurface(geom, halfLen));
     while (bases.size > 8) bases.delete(bases.keys().next().value!);

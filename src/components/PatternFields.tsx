@@ -1,8 +1,11 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Shuffle } from 'lucide-react';
 import { NumberInput } from '@physbox-io/ui';
 import type { PatternOptions, PatternSpec } from '../utils/surfacePatterns';
 import { FontPicker } from './FontPicker';
+
+/** Maximum image upload size accepted by the pattern image field (20 MB). */
+export const MAX_PATTERN_IMAGE_BYTES = 20 * 1024 * 1024;
 
 /**
  * A surface pattern's own controls, drawn from its `fields` (see
@@ -95,26 +98,15 @@ function fieldControl(
     );
   }
   if (f.kind === 'image') {
-    const picked = String(options[f.key] ?? '');
-    const w = Number(options.imageW ?? 0), h = Number(options.imageH ?? 0);
-    const status = picked ? 'New picture: Apply to read it' : w > 0 ? `Picture ${w} × ${h} px` : 'No picture yet';
     return (
-      <Field key={f.key} label={f.label} hint={f.hint}>
-        <input
-          type="file"
-          accept="image/png,image/jpeg,image/webp,image/gif,image/bmp"
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (!file) return;
-            // A data URL: `prepare` decodes it and keeps only the grey grid.
-            const reader = new FileReader();
-            reader.onload = () => { if (typeof reader.result === 'string') set(f.key, reader.result); };
-            reader.readAsDataURL(file);
-          }}
-          className="block w-full text-xs text-slate-600 dark:text-slate-300 file:mr-2 file:px-2 file:py-1 file:rounded-md file:border-0 file:text-xs file:bg-slate-100 dark:file:bg-slate-800 file:text-slate-700 dark:file:text-slate-200 cursor-pointer"
-        />
-        <span className="block text-[10px] text-slate-400 dark:text-slate-500">{status}</span>
-      </Field>
+      <ImageField
+        key={f.key}
+        fieldKey={f.key}
+        label={f.label}
+        hint={f.hint}
+        options={options}
+        onChange={set}
+      />
     );
   }
   if (f.kind === 'choice') {
@@ -156,3 +148,52 @@ function fieldControl(
     </Field>
   );
 }
+
+const ImageField: React.FC<{
+  fieldKey: string;
+  label: string;
+  hint?: string;
+  options: PatternOptions;
+  onChange: (key: string, value: number | string | undefined) => void;
+}> = ({ fieldKey, label, hint, options, onChange: set }) => {
+  const [fileError, setFileError] = useState<string | null>(null);
+  const picked = String(options[fieldKey] ?? '');
+  const w = Number(options.imageW ?? 0), h = Number(options.imageH ?? 0);
+  const status = picked ? 'New picture: Apply to read it' : w > 0 ? `Picture ${w} × ${h} px` : 'No picture yet';
+  return (
+    <Field label={label} hint={hint}>
+      <input
+        type="file"
+        accept="image/png,image/jpeg,image/webp,image/gif,image/bmp"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (!file) return;
+          setFileError(null);
+          if (file.size > MAX_PATTERN_IMAGE_BYTES) {
+            setFileError(`Picture is too large (max ${Math.round(MAX_PATTERN_IMAGE_BYTES / (1024 * 1024))} MB).`);
+            e.target.value = '';
+            return;
+          }
+          // A data URL: `prepare` decodes it and keeps only the grey grid.
+          const reader = new FileReader();
+          reader.onerror = () => {
+            setFileError('Could not read that picture file.');
+          };
+          reader.onload = () => {
+            if (typeof reader.result === 'string') {
+              setFileError(null);
+              set(fieldKey, reader.result);
+            }
+          };
+          reader.readAsDataURL(file);
+        }}
+        className="block w-full text-xs text-slate-600 dark:text-slate-300 file:mr-2 file:px-2 file:py-1 file:rounded-md file:border-0 file:text-xs file:bg-slate-100 dark:file:bg-slate-800 file:text-slate-700 dark:file:text-slate-200 cursor-pointer"
+      />
+      {fileError ? (
+        <span className="block text-[10px] text-rose-600 dark:text-rose-400">{fileError}</span>
+      ) : (
+        <span className="block text-[10px] text-slate-400 dark:text-slate-500">{status}</span>
+      )}
+    </Field>
+  );
+};

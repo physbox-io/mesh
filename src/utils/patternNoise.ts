@@ -90,7 +90,7 @@ export function fbm(x: number, y: number, seed: number, octaves = 4, gain = 0.5,
 export const fract = (x: number): number => x - Math.floor(x);
 
 /** Clamp to 0..1, which is the range every pattern's output grid must be in. */
-export const clamp01 = (x: number): number => (x < 0 ? 0 : x > 1 ? 1 : x);
+export const clamp01 = (x: number): number => (!Number.isFinite(x) || x <= 0 ? 0 : x >= 1 ? 1 : x);
 
 /**
  * Rescale a grid so its lowest value is 0 and its highest is 1, in place.
@@ -108,6 +108,7 @@ export function normaliseGrid(grid: Float32Array): Float32Array {
   let max = -Infinity;
   for (let i = 0; i < grid.length; i++) {
     const v = grid[i];
+    if (!Number.isFinite(v)) continue;
     if (v < min) min = v;
     if (v > max) max = v;
   }
@@ -116,6 +117,9 @@ export function normaliseGrid(grid: Float32Array): Float32Array {
     grid.fill(0);
     return grid;
   }
-  for (let i = 0; i < grid.length; i++) grid[i] = (grid[i] - min) / span;
+  for (let i = 0; i < grid.length; i++) {
+    const v = grid[i];
+    grid[i] = Number.isFinite(v) ? (v - min) / span : 0;
+  }
   return grid;
 }
