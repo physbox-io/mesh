@@ -283,6 +283,7 @@ export function roughSurface(w: ToolpathWriter, job: SurfaceJob, opts: ReliefCar
             w.stock.deepestCut(w.atX, w.atY, w.atZ, head.x, head.y, head.z, roughRad) <= top - layerZ + 1e-3;
           let pass: PathPoint[];
           let passFeedStated = false;
+          const linkStart = linked ? { x: w.atX, y: w.atY, z: w.atZ } : null;
           if (linked) {
             w.cutTo(head.x, head.y, head.z);
             w.gcode.push(`G1 X${f(head.x)} Y${f(head.y)} F${Math.round(rasterFeed)}`);
@@ -303,8 +304,13 @@ export function roughSurface(w: ToolpathWriter, job: SurfaceJob, opts: ReliefCar
           }
 
           // One segment per run: the preview must not draw a line across the
-          // gap the tool actually flew over.
-          w.segments.push({ type: 'roughing', points: pass, traverseZ: w.lastTraverseZ });
+          // gap the tool actually flew over. A linked row never lifted, so it
+          // carries its own link and Z rather than the previous leadIn's hop.
+          w.segments.push({
+            type: 'roughing',
+            points: linkStart ? [linkStart, ...pass] : pass,
+            traverseZ: linkStart ? linkStart.z : w.lastTraverseZ,
+          });
         }
         run = [];
       };

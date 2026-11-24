@@ -131,6 +131,7 @@ export abstract class JobMachine extends ProbingMachine {
         // program's stop offers go, as a new start's do: a resume of the old
         // program onto what this one has cut would cut the wrong thing.
         this.program = [];
+        this.runningGcode = gcode;
         this.gcodeNotes = [];
         this.jobLineBase = 0;
         this.fittingToolAt = null;
@@ -198,6 +199,7 @@ export abstract class JobMachine extends ProbingMachine {
     this.startElapsedTicker();
 
     this.program = prepared;
+    this.runningGcode = gcode;
     this.programKind = { program: prepared, laser };
     this.gcodeNotes = prepared.map(l => l.note);
     this.jobLineBase = 0;
@@ -555,6 +557,7 @@ export abstract class JobMachine extends ProbingMachine {
     // zero it ran on stale.
     const setup = this.runningSetup;
     this.runningSetup = null;
+    this.runningGcode = null;
     let between: Partial<MachineState> = {};
     if (setup) {
       this.setupEndedAt = ++this.datumSeq;

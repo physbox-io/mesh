@@ -148,15 +148,53 @@ export function trackPlayhead(
   if (moves.length === 0) return prev;
 
   const start = Math.min(Math.max(0, prev.index), moves.length - 1);
-  let hit = nearestWithin(moves, x, y, z, start, start + LIVE_SEARCH_WINDOW);
+  // Scale the forward lookahead with path length so a moderate-size relief
+  // (~5–10k moves) cannot jump across an entire roughing pass into finishing
+  // on a single off-path ramp report, while still allowing anchor recovery if
+  // the tool actually leaped ahead.
+  const forwardWindow = Math.min(
+    LIVE_SEARCH_WINDOW,
+    Math.max(120, Math.ceil(moves.length * 0.04))
+  );
+  // When the streamer supplies clock anchors, never let the forward search
+  // leap far ahead of them onto a later pass that happens to cross nearby.
+  let maxAnchorEnd = moves.length;
+  let minAnchorStart = 0;
+  let hasAnchor = false;
+  let maxAnchorT = -Infinity;
+  for (const t of anchors) {
+    if (Number.isFinite(t)) {
+      hasAnchor = true;
+      if (t > maxAnchorT) maxAnchorT = t;
+    }
+  }
+  const anchorMargin = Math.max(40, Math.ceil(moves.length * 0.03));
+  if (hasAnchor) {
+    const anchorIdx = moveIndexAt(moves, maxAnchorT);
+    maxAnchorEnd = Math.min(moves.length, anchorIdx + anchorMargin);
+    minAnchorStart = Math.max(0, anchorIdx - anchorMargin);
+  }
+  // Only run the local forward search when `start` is already near the anchor
+  // (or no anchor was supplied). When opening mid-job from PLAYHEAD_START at
+  // 80%, searching near index 0 would match an earlier layer instead of the
+  // anchor's pass.
+  const forwardHi = Math.min(start + forwardWindow, maxAnchorEnd);
+  let hit =
+    (!hasAnchor || start >= minAnchorStart) && forwardHi > start
+      ? nearestWithin(moves, x, y, z, start, forwardHi)
+      : null;
 
   if (!hit) {
-    const half = Math.max(1, Math.ceil(moves.length * ANCHOR_WINDOW_FRACTION));
-    for (const t of anchors) {
-      if (!Number.isFinite(t)) continue;
-      const centre = moveIndexAt(moves, t);
-      const found = nearestWithin(moves, x, y, z, centre - half, centre + half + 1);
-      if (found && (!hit || found.distSq < hit.distSq)) hit = found;
+    const tightHalf = anchorMargin;
+    const wideHalf = Math.max(1, Math.ceil(moves.length * ANCHOR_WINDOW_FRACTION));
+    for (const half of [tightHalf, wideHalf]) {
+      for (const t of anchors) {
+        if (!Number.isFinite(t)) continue;
+        const centre = moveIndexAt(moves, t);
+        const found = nearestWithin(moves, x, y, z, centre - half, centre + half + 1);
+        if (found && (!hit || found.distSq < hit.distSq)) hit = found;
+      }
+      if (hit) break;
     }
   }
 

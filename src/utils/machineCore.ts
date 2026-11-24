@@ -136,6 +136,13 @@ export abstract class MachineCore extends GrblMachine<MachineState> {
    * still has something to count lines against.
    */
   protected program: JobLine[] = [];
+  /** Raw G-code of the active/last-loaded program, so previews can tell if it is theirs. */
+  protected runningGcode: string | null = null;
+
+  /** True when the program currently loaded/running on the machine matches `gcode`. */
+  public matchesRunningGcode(gcode: string | null | undefined): boolean {
+    return !!gcode && this.runningGcode === gcode;
+  }
   /**
    * The program-line number that `gcodeQueue[0]` corresponds to.
    *

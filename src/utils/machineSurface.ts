@@ -287,6 +287,7 @@ export function machineSurface(
     roughingBitePercent,
     finishingRasterLines,
     toolChange,
+    ...(afterChange >= 0 && Math.abs(touchZ) >= 5e-4 ? { finishingZOffsetMm: touchZ } : {}),
     segments: previewSegments,
   };
 }

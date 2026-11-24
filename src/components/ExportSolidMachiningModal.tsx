@@ -222,6 +222,8 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
         ? {
             segments: current.segments,
             estimatedTimeSeconds: current.estimatedTimeSeconds,
+            roughingTimeSeconds: current.roughingTimeSeconds,
+            finishingZOffsetMm: current.finishingZOffsetMm,
             carveBounds: turned ? current.windowBounds : result.partBounds,
           }
         : null,
@@ -235,9 +237,10 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
             stockWidthMm: current?.stock.widthMm ?? result.stock.widthMm,
             stockDepthMm: current?.stock.depthMm ?? result.stock.depthMm,
             stockThicknessMm: current?.stock.thicknessMm ?? result.stock.thicknessMm,
+            motionProfile: machineState.motion,
           }
         : null,
-    [settled, result, current]
+    [settled, result, current, machineState.motion]
   );
 
   if (!isOpen) return null;
@@ -697,7 +700,12 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
               </div>
 
               {previewResult && previewOptions && (
-                <ToolpathView result={previewResult} options={previewOptions} machineState={machineState} />
+                <ToolpathView
+                  result={previewResult}
+                  options={previewOptions}
+                  machineState={machineState}
+                  isLiveJob={webSerialManager.matchesRunningGcode(current.gcode)}
+                />
               )}
 
               <div className="flex items-center space-x-4 text-[11px] text-slate-500 dark:text-slate-400">

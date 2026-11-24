@@ -47,10 +47,13 @@ export function ToolpathView({
   result,
   options,
   machineState,
+  isLiveJob = true,
 }: {
   result: ToolpathPreviewResult;
   options: ToolpathPreviewOptions;
   machineState: MachineState;
+  /** True when the running/paused job on the machine is this preview's program. */
+  isLiveJob?: boolean;
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<THREE.Group | null>(null);
@@ -58,6 +61,7 @@ export function ToolpathView({
   /** Set by the geometry effect, read by the frame loop. */
   const cutRef = useRef<THREE.LineSegments | null>(null);
   const pathGeoRef = useRef<THREE.BufferGeometry | null>(null);
+  const colouredGeoRef = useRef<{ geo: THREE.BufferGeometry; mode: 'depth' | 'operation' } | null>(null);
   const toolRef = useRef<THREE.Object3D | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
@@ -95,10 +99,25 @@ export function ToolpathView({
   /** Job seconds, not wall-clock seconds. */
   const [clock, setClock] = useState(0);
 
-  // A job on the machine takes the playhead over. Nothing simulated is worth
-  // watching while the real thing is running two feet away.
+  // A job on the machine takes the playhead over — only when it is this
+  // preview's own program, not another setup or an unrelated laser/contour cut.
   const live =
-    machineState.status === 'RUNNING' || machineState.status.startsWith('PAUSED');
+    isLiveJob &&
+    (machineState.status === 'RUNNING' || machineState.status.startsWith('PAUSED'));
+
+  // Named individually so the effects below depend on the three numbers they
+  // actually read, rather than on a `wpos` object rebuilt on every status poll.
+  const { x: wposX, y: wposY, z: wposZ } = machineState.wpos;
+  // After a mid-job tool change touched off on a roughing shelf, post-M6
+  // G-code Z words are shifted by `-finishingZOffsetMm`. Add it back so live
+  // work Z lines up with the nominal stock coordinates drawn in this viewport.
+  const roughEnd = result.roughingTimeSeconds ?? 0;
+  const progressSec = (machineState.progressPercent / 100) * path.seconds;
+  const afterToolChange =
+    !!result.finishingZOffsetMm &&
+    (progressSec > roughEnd + 1e-3 ||
+      (machineState.status === 'PAUSED_TOOL' && !machineState.needsZZero));
+  const liveZ = wposZ + (afterToolChange ? (result.finishingZOffsetMm ?? 0) : 0);
 
   // Mirrors of the three things the animation frame and the imperative Three.js
   // code need to read but must not be restarted by. They are written in effects
@@ -106,11 +125,13 @@ export function ToolpathView({
   // expect to find them fresh.
   const pathRef = useRef(path);
   const clockRef = useRef(0);
-  const liveRef = useRef({ live, wpos: machineState.wpos });
+  const liveRef = useRef({ live, wpos: { x: wposX, y: wposY, z: liveZ } });
 
   useEffect(() => { pathRef.current = path; }, [path]);
   useEffect(() => { clockRef.current = clock; }, [clock]);
-  useEffect(() => { liveRef.current = { live, wpos: machineState.wpos }; }, [live, machineState.wpos]);
+  useEffect(() => {
+    liveRef.current = { live, wpos: { x: wposX, y: wposY, z: liveZ } };
+  }, [live, wposX, wposY, liveZ]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -272,6 +293,7 @@ export function ToolpathView({
     geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     geo.setAttribute('color', new THREE.Float32BufferAttribute(colours, 3));
     pathGeoRef.current = geo;
+    colouredGeoRef.current = { geo, mode: colourModeRef.current };
     dispose.push(geo);
 
     // The whole path, faint: where the tool is going.
@@ -321,6 +343,7 @@ export function ToolpathView({
       group.clear();
       cutRef.current = null;
       pathGeoRef.current = null;
+      colouredGeoRef.current = null;
       toolRef.current = null;
       for (const d of dispose) d.dispose();
       grid.geometry.dispose();
@@ -340,10 +363,12 @@ export function ToolpathView({
   useEffect(() => {
     const geo = pathGeoRef.current;
     if (!geo) return;
+    if (colouredGeoRef.current?.geo === geo && colouredGeoRef.current.mode === colourMode) return;
     const colorAttr = geo.getAttribute('color') as THREE.BufferAttribute | undefined;
     if (!colorAttr) return;
     fillToolpathColours(path.moves, colourMode, deepest, colorAttr.array as Float32Array);
     colorAttr.needsUpdate = true;
+    colouredGeoRef.current = { geo, mode: colourMode };
     requestRenderRef.current();
   }, [colourMode, path, deepest]);
 
@@ -413,8 +438,10 @@ export function ToolpathView({
 
   // A new path or a new stock size is a new thing to frame, and the operator's
   // own framing was for the old one — so the manual-override flag is cleared
-  // and the view re-fitted.
+  // and the view re-fitted. Never snatch the camera away while the operator is
+  // inspecting a live cut.
   useEffect(() => {
+    if (liveRef.current.live && userMovedRef.current) return;
     userMovedRef.current = false;
     fitView();
   }, [fitView, path]);
@@ -474,18 +501,24 @@ export function ToolpathView({
     applyClock(clock);
   }, [clock, applyClock, path]);
 
-  // Named individually so the effect below depends on the three numbers it
-  // actually reads, rather than on a `wpos` object rebuilt on every status poll.
-  const { x: wposX, y: wposY, z: wposZ } = machineState.wpos;
-
   /**
    * The live playhead's own state: where the forward search starts, and how
-   * many reports have asked to take it backwards. Reset when the job stops, so
-   * the next run does not begin hunting from the end of the last one.
+   * many reports have asked to take it backwards. Reset when a job stops or
+   * starts, so a new run starts from zero rather than keeping stale dry-run
+   * progress highlighted on screen.
    */
   const liveTrackRef = useRef<PlayheadState>(PLAYHEAD_START);
+  const prevLiveRef = useRef(live);
   useEffect(() => {
-    if (!live) liveTrackRef.current = PLAYHEAD_START;
+    const wasLive = prevLiveRef.current;
+    prevLiveRef.current = live;
+    if (!live) {
+      liveTrackRef.current = PLAYHEAD_START;
+    } else if (!wasLive) {
+      liveTrackRef.current = PLAYHEAD_START;
+      clockRef.current = 0;
+      setClock(0);
+    }
   }, [live]);
   // A new path puts the clock back to zero (above), and the tracker with it.
   useEffect(() => {
@@ -504,18 +537,21 @@ export function ToolpathView({
   }, [path, machineState.progressPercent]);
 
   // Follow the machine by where it says the tool is, not by how many lines have
-  // been sent to it. See `trackPlayhead` for why the line count cannot do this
-  // job on its own, and why the nearest point on the whole path cannot either.
+  // been sent to it. Always push the live tool marker to the reported position
+  // even when `trackPlayhead` holds the cut clock (retracts, pauses, jogs).
   useEffect(() => {
     if (!live) return;
+    liveRef.current = { live, wpos: { x: wposX, y: wposY, z: liveZ } };
     const moves = pathRef.current.moves;
     if (moves.length === 0) return;
 
     const prev = liveTrackRef.current;
-    const next = trackPlayhead(moves, wposX, wposY, wposZ, prev, anchorsRef.current);
+    const next = trackPlayhead(moves, wposX, wposY, liveZ, prev, anchorsRef.current);
     liveTrackRef.current = next;
+    clockRef.current = next.clock;
+    applyClock(next.clock);
     if (next.clock !== prev.clock) setClock(next.clock);
-  }, [live, wposX, wposY, wposZ]);
+  }, [live, wposX, wposY, liveZ, applyClock, path]);
 
   // The dry run. Compressed onto a fixed screen duration, because the thing
   // being previewed can be a four-hour carve. Advances the 3D playhead directly

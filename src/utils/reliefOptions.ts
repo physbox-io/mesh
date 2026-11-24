@@ -443,6 +443,11 @@ export interface ReliefCarveResult {
   finishingRasterLines: number;
   /** Whether the job stops for a tool change between the two passes. */
   toolChange: boolean;
+  /**
+   * Z height (nominal stock mm) of the touch-off shelf at the tool change, when
+   * non-zero. Post-M6 G-code Z is shifted by `-finishingZOffsetMm`.
+   */
+  finishingZOffsetMm?: number;
   /** Plan-view scale actually applied to the model, 1.0 = 1 m per mm. */
   scaleFactor: number;
   /** How deep the relief actually came out, which in 'proportional' mode is not the carve depth. */

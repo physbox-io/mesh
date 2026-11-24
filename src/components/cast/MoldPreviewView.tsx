@@ -102,6 +102,10 @@ export function MoldPreviewView({
   const [explodeGap, setExplodeGap] = useState(30); // mm separation in exploded view
   const mountRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<THREE.Group | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const controlsRef = useRef<OrbitControls | null>(null);
+  const requestRenderRef = useRef<() => void>(() => {});
+  const userMovedRef = useRef(false);
   const effectiveViewMode = effectiveMoldView(moldType, viewMode);
   const hasClips = result.parts.some((p) => p.role === 'clip');
 
@@ -115,6 +119,7 @@ export function MoldPreviewView({
     const camera = new THREE.PerspectiveCamera(40, 1, 1, 3000);
     camera.up.set(0, 0, 1); // Z-up coordinate space matching PhysBox
     camera.position.set(130, -180, 140);
+    cameraRef.current = camera;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
     renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
@@ -135,6 +140,7 @@ export function MoldPreviewView({
       MIDDLE: THREE.MOUSE.PAN,
       RIGHT: THREE.MOUSE.ROTATE,
     };
+    controlsRef.current = controls;
 
     // Lighting setup
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
@@ -152,30 +158,49 @@ export function MoldPreviewView({
     contentRef.current = group;
     threeScene.add(group);
 
+    // Render on demand: only schedule/draw when geometry, resize, or
+    // OrbitControls damping moves the camera — zero idle GPU load.
+    let raf = 0;
+    let dirty = true;
+    const tick = () => {
+      raf = 0;
+      if (mount.offsetParent === null) return;
+      const moved = controls.update();
+      if (dirty || moved) {
+        dirty = false;
+        renderer.render(threeScene, camera);
+      }
+      if (moved) raf = requestAnimationFrame(tick);
+    };
+    const scheduleRender = () => {
+      dirty = true;
+      if (!raf) raf = requestAnimationFrame(tick);
+    };
+    requestRenderRef.current = scheduleRender;
+
+    const onUserMove = () => { userMovedRef.current = true; scheduleRender(); };
+    controls.addEventListener('start', onUserMove);
+    controls.addEventListener('change', scheduleRender);
+
     const resize = () => {
       const w = mount.clientWidth || 600;
       const h = mount.clientHeight || 400;
       renderer.setSize(w, h, false);
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
+      scheduleRender();
     };
     resize();
     const observer = new ResizeObserver(resize);
     observer.observe(mount);
-
-    let raf = 0;
-    const tick = () => {
-      raf = requestAnimationFrame(tick);
-      // A tab not on show draws nothing.
-      if (mount.offsetParent === null) return;
-      controls.update();
-      renderer.render(threeScene, camera);
-    };
-    tick();
+    scheduleRender();
 
     return () => {
-      cancelAnimationFrame(raf);
+      if (raf) cancelAnimationFrame(raf);
+      requestRenderRef.current = () => {};
       observer.disconnect();
+      controls.removeEventListener('start', onUserMove);
+      controls.removeEventListener('change', scheduleRender);
       controls.dispose();
       threeScene.traverse((o) => {
         const m = o as THREE.Mesh;
@@ -187,6 +212,8 @@ export function MoldPreviewView({
       renderer.dispose();
       renderer.domElement.remove();
       contentRef.current = null;
+      cameraRef.current = null;
+      controlsRef.current = null;
     };
   }, []);
 
@@ -386,11 +413,36 @@ export function MoldPreviewView({
       }
     }
 
+    // Frame the mold meshes before adding the background grid, unless the user
+    // has already orbited or zoomed the camera themselves.
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    if (camera && controls && !userMovedRef.current && group.children.length > 0) {
+      const box = new THREE.Box3().setFromObject(group);
+      if (!box.isEmpty()) {
+        const centre = box.getCenter(new THREE.Vector3());
+        const radius = Math.max(10, box.getBoundingSphere(new THREE.Sphere()).radius);
+        const vFov = THREE.MathUtils.degToRad(camera.fov);
+        const hFov = 2 * Math.atan(Math.tan(vFov / 2) * Math.max(0.0001, camera.aspect));
+        const dist = Math.max(radius / Math.sin(vFov / 2), radius / Math.sin(hFov / 2)) * 1.25;
+        const dir = camera.position.clone().sub(controls.target);
+        if (dir.lengthSq() < 1e-6) dir.set(130, -180, 140);
+        dir.normalize();
+        controls.target.copy(centre);
+        camera.position.copy(centre).addScaledVector(dir, dist);
+        camera.near = Math.max(0.1, dist / 1000);
+        camera.far = Math.max(3000, dist * 10);
+        camera.updateProjectionMatrix();
+        controls.update();
+      }
+    }
+
     // Grid on Z=0
     const gridDim = Math.max(120, maxExtent);
     const grid = new THREE.GridHelper(gridDim, 24, 0x94a3b8, 0x334155);
     grid.rotation.x = Math.PI / 2; // Lie flat in XY plane
     group.add(grid);
+    requestRenderRef.current();
   }, [preview, result, effectiveViewMode, isXRay, explodeGap, moldType, castPreview]);
 
   return (

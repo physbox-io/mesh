@@ -9,6 +9,13 @@ import type { MotionProfile } from './motionProfile';
 export interface ToolpathPreviewResult {
   segments: ToolpathSegment[];
   estimatedTimeSeconds: number;
+  /** Roughing share of `estimatedTimeSeconds`, when both passes ran. */
+  roughingTimeSeconds?: number;
+  /**
+   * Z height (nominal stock mm) of the touch-off shelf at the tool change, when
+   * non-zero. Post-M6 live `wpos.z` is shifted by `-finishingZOffsetMm`.
+   */
+  finishingZOffsetMm?: number;
   /** Footprint the job occupies on the stock, in machine mm. */
   carveBounds: { minX: number; minY: number; maxX: number; maxY: number };
 }
@@ -20,6 +27,7 @@ export interface ToolpathPreviewOptions {
   stockThicknessMm: number;
   finishingToolDiaMm: number;
   roughingFeedrate: number;
+  roughingPlungeRate?: number;
   finishingFeedrate: number;
   finishingPlungeRate: number;
   safeZ: number;
@@ -84,9 +92,21 @@ export function buildPreviewPath(
       // Never below where the tool already is: the exporter does not descend
       // to traverse, it only lifts if it has to.
       const over = Math.max(hop, at.z);
-      raw.push({ x1: at.x, y1: at.y, z1: at.z, x2: at.x, y2: at.y, z2: over, feed: RAPID_MM_MIN, rapid: true, pass });
-      raw.push({ x1: at.x, y1: at.y, z1: over, x2: head.x, y2: head.y, z2: over, feed: RAPID_MM_MIN, rapid: true, pass });
-      raw.push({ x1: head.x, y1: head.y, z1: over, x2: head.x, y2: head.y, z2: head.z, feed: Math.max(1, options.finishingPlungeRate), rapid: false, pass });
+      const plungeFeed = Math.max(
+        1,
+        pass === 'roughing'
+          ? (options.roughingPlungeRate ?? options.finishingPlungeRate)
+          : options.finishingPlungeRate
+      );
+      if (over > at.z + 1e-6) {
+        raw.push({ x1: at.x, y1: at.y, z1: at.z, x2: at.x, y2: at.y, z2: over, feed: RAPID_MM_MIN, rapid: true, pass });
+      }
+      if (Math.hypot(head.x - at.x, head.y - at.y) > 1e-6) {
+        raw.push({ x1: at.x, y1: at.y, z1: over, x2: head.x, y2: head.y, z2: over, feed: RAPID_MM_MIN, rapid: true, pass });
+      }
+      if (Math.abs(head.z - over) > 1e-6) {
+        raw.push({ x1: head.x, y1: head.y, z1: over, x2: head.x, y2: head.y, z2: head.z, feed: plungeFeed, rapid: false, pass });
+      }
     }
 
     for (let i = 0; i + 1 < seg.points.length; i++) {
@@ -106,11 +126,46 @@ export function buildPreviewPath(
 
   const previewTotal = clocked[clocked.length - 1].t1;
   const trueTotal = result.estimatedTimeSeconds;
-  const scale = previewTotal > 1e-6 && trueTotal > 0 ? trueTotal / previewTotal : 1;
-  if (scale !== 1) {
-    for (const m of clocked) {
-      m.t0 *= scale;
-      m.t1 *= scale;
+  const trueRough = result.roughingTimeSeconds ?? 0;
+
+  // When both passes are present and the exporter reported the roughing split,
+  // rescale roughing and finishing separately so their transition on the preview
+  // clock lands at the exact time the real program reaches M6. A single global
+  // scale skews the split because roughing and finishing omit different shares
+  // of lead-in ramps.
+  let splitIdx = -1;
+  if (trueRough > 0 && trueTotal > trueRough) {
+    let seenRough = false;
+    for (let i = 0; i < clocked.length; i++) {
+      if (clocked[i].pass === 'roughing') {
+        seenRough = true;
+      } else if (seenRough) {
+        splitIdx = i;
+        break;
+      }
+    }
+  }
+
+  if (splitIdx > 0) {
+    const previewRough = clocked[splitIdx - 1].t1;
+    const previewFin = previewTotal - previewRough;
+    const roughScale = previewRough > 1e-6 ? trueRough / previewRough : 1;
+    const finScale = previewFin > 1e-6 ? (trueTotal - trueRough) / previewFin : 1;
+    for (let i = 0; i < splitIdx; i++) {
+      clocked[i].t0 *= roughScale;
+      clocked[i].t1 *= roughScale;
+    }
+    for (let i = splitIdx; i < clocked.length; i++) {
+      clocked[i].t0 = trueRough + (clocked[i].t0 - previewRough) * finScale;
+      clocked[i].t1 = trueRough + (clocked[i].t1 - previewRough) * finScale;
+    }
+  } else {
+    const scale = previewTotal > 1e-6 && trueTotal > 0 ? trueTotal / previewTotal : 1;
+    if (scale !== 1) {
+      for (const m of clocked) {
+        m.t0 *= scale;
+        m.t1 *= scale;
+      }
     }
   }
   return { moves: clocked, seconds: clocked[clocked.length - 1].t1 };

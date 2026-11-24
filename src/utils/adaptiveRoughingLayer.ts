@@ -302,6 +302,7 @@ export function emitAdaptiveLayer(w: ToolpathWriter, layout: RoughingLayout, lay
               const ordered = forward ? leg : [...leg].reverse();
               forward = !forward;
               let path: PathPoint[];
+              const turnFrom = b === 2 ? null : { x: w.atX, y: w.atY, z: w.atZ };
               if (b === 2) {
                 path = w.leadIn(ordered, top, opts.roughingPlungeRate, feed);
               } else {
@@ -320,7 +321,11 @@ export function emitAdaptiveLayer(w: ToolpathWriter, layout: RoughingLayout, lay
                 w.gcode.push(`G1 X${f(path[i].x)} Y${f(path[i].y)}${z}${stated ? '' : ` F${Math.round(feed)}`}`);
                 stated = true;
               }
-              w.segments.push({ type: 'roughing', points: path, traverseZ: w.lastTraverseZ });
+              w.segments.push({
+                type: 'roughing',
+                points: turnFrom ? [turnFrom, ...path] : path,
+                traverseZ: turnFrom ? turnFrom.z : w.lastTraverseZ,
+              });
             }
           }
           break;

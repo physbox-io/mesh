@@ -569,6 +569,7 @@ export function generateReliefCarveGcode(
     roughingBitePercent: cut.roughingBitePercent,
     finishingRasterLines: cut.finishingRasterLines,
     toolChange: cut.toolChange,
+    ...(cut.finishingZOffsetMm !== undefined ? { finishingZOffsetMm: cut.finishingZOffsetMm } : {}),
     scaleFactor,
     reliefDepthMm: reliefDepth,
     detailMm,

@@ -134,6 +134,13 @@ export interface SurfaceMachiningResult {
   finishingRasterLines: number;
   /** Whether the job stops for a tool change between the two passes. */
   toolChange: boolean;
+  /**
+   * Z height (in nominal stock coordinates, negative below the top face) of the
+   * shelf the operator re-zeros Z onto at the tool change, when non-zero.
+   * Post-M6 G-code Z words are shifted by `-finishingZOffsetMm`, so live work
+   * Z during finishing maps back to nominal preview Z via `wpos.z + finishingZOffsetMm`.
+   */
+  finishingZOffsetMm?: number;
   /** Decimated toolpath polylines for the 3D preview. */
   segments: ToolpathSegment[];
 }

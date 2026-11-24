@@ -127,8 +127,9 @@ export function fillToolpathColours(
       colours[o + 3] = tr; colours[o + 4] = tg; colours[o + 5] = tb;
       continue;
     }
-    // Endpoint 1
-    let t = invSpan > 0 ? 1 - Math.abs(m.z1) * invSpan : 1;
+    // Endpoint 1 — clamp cuts above Z=0 (e.g. plunge start) to the surface end
+    // of the ramp rather than reflecting positive Z through Math.abs.
+    let t = invSpan > 0 ? 1 - Math.max(0, -m.z1) * invSpan : 1;
     if (t < 0) t = 0;
     else if (t > 1) t = 1;
     let pos = t * rampScale;
@@ -142,7 +143,7 @@ export function fillToolpathColours(
     colours[o + 2] = a[2] + (b[2] - a[2]) * f;
 
     // Endpoint 2
-    t = invSpan > 0 ? 1 - Math.abs(m.z2) * invSpan : 1;
+    t = invSpan > 0 ? 1 - Math.max(0, -m.z2) * invSpan : 1;
     if (t < 0) t = 0;
     else if (t > 1) t = 1;
     pos = t * rampScale;

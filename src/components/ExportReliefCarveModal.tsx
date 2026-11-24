@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { X, AlertCircle, Cpu, RefreshCw, Layers, Mountain } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import { rememberReliefOptions } from '../utils/lastReliefOptions';
@@ -186,6 +186,23 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
   const sceneChoseTooling = !!carveSettings && ('finishingToolDiaMm' in carveSettings || 'roughingToolDiaMm' in carveSettings || 'finishingToolType' in carveSettings);
   const { suggest: applyRecommendedTooling } = useAutoTooling(
     result?.success ? result : null, busy, options, recommendTooling, applyTooling, sceneChoseTooling
+  );
+
+  // Pair ToolpathView's options with the result's own stock bounds (so the
+  // wireframe never shifts off-center while a resize recalculates) and pass
+  // the connected machine's motion profile instead of the default one.
+  const previewOptions = useMemo(
+    () =>
+      result?.success
+        ? {
+            ...settled,
+            stockWidthMm: result.bounds.maxX - result.bounds.minX,
+            stockDepthMm: result.bounds.maxY - result.bounds.minY,
+            stockThicknessMm: result.bounds.maxZ - result.bounds.minZ,
+            motionProfile: machineState.motion,
+          }
+        : null,
+    [settled, result, machineState.motion]
   );
 
   if (!isOpen) return null;
@@ -603,7 +620,14 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 {(busy || pending) && <span className="text-slate-400 italic">recalculating…</span>}
               </div>
 
-              <ToolpathView result={result} options={settled} machineState={machineState} />
+              {previewOptions && (
+                <ToolpathView
+                  result={result}
+                  options={previewOptions}
+                  machineState={machineState}
+                  isLiveJob={webSerialManager.matchesRunningGcode(result.gcode)}
+                />
+              )}
 
               <div className="flex items-center space-x-4 text-[11px] text-slate-500 dark:text-slate-400">
                 <span>Right-drag orbits, middle-drag pans, scroll zooms, the same as the scene view. The wireframe box is the stock.</span>

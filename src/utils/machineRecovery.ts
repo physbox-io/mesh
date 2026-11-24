@@ -110,6 +110,7 @@ export abstract class RecoveryMachine extends JobMachine {
     if (prepared.length === 0) return false;
 
     this.program = prepared;
+    this.runningGcode = program.gcode;
     const machine = program.settings?.machine;
     if (machine === 'laser' || machine === 'cnc') {
       this.programKind = { program: prepared, laser: machine === 'laser' };

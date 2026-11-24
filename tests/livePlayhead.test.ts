@@ -1,11 +1,20 @@
 import { describe, it, expect } from 'vitest';
-import { clockMoves, type ClockedMove, type TimedMove } from '../src/utils/timeEstimate';
+import { clockMoves, programTimeline, type ClockedMove, type TimedMove } from '../src/utils/timeEstimate';
 import {
   trackPlayhead,
   PLAYHEAD_START,
   BACKWARD_CONFIRM_REPORTS,
   type PlayheadState,
 } from '../src/utils/livePlayhead';
+import { californiaReliefPreset, CALIFORNIA_RELIEF_SETTINGS } from '../src/presets/californiaRelief';
+import {
+  APP_RELIEF_DEFAULTS,
+  DEFAULT_RELIEF_OPTIONS,
+  deriveReliefFeeds,
+  generateReliefCarveGcode,
+  recommendReliefTooling,
+} from '../src/utils/reliefCarveExporter';
+import { buildPreviewPath } from '../src/utils/toolpathPreviewPath';
 
 /**
  * Two roughing layers over the same 60 x 60 mm, then a tight finishing raster
@@ -124,5 +133,64 @@ describe('trackPlayhead', () => {
       state = trackPlayhead(path, 30, k * 0.2, -1, state, []);
       expect(state.index).toBe(k);
     }
+  });
+
+  it('tracks the California relief carve through roughing and post-M6 finishing without jumping passes', () => {
+    const baseOpts = { ...DEFAULT_RELIEF_OPTIONS, ...APP_RELIEF_DEFAULTS, ...CALIFORNIA_RELIEF_SETTINGS };
+    const initial = generateReliefCarveGcode(californiaReliefPreset, baseOpts);
+    expect(initial.success).toBe(true);
+
+    const rec = recommendReliefTooling({
+      reliefDepthMm: initial.reliefDepthMm,
+      detailMm: initial.detailMm,
+      planWidthMm: initial.carveBounds.maxX - initial.carveBounds.minX,
+      planDepthMm: initial.carveBounds.maxY - initial.carveBounds.minY,
+      material: baseOpts.material,
+    });
+    const feeds = deriveReliefFeeds({
+      material: baseOpts.material,
+      finishingToolDiaMm: rec.finishingToolDiaMm ?? baseOpts.finishingToolDiaMm,
+      finishingFlutes: rec.finishingFlutes ?? baseOpts.finishingFlutes,
+      roughingToolDiaMm: rec.roughingToolDiaMm ?? baseOpts.roughingToolDiaMm,
+      roughingFlutes: rec.roughingFlutes ?? baseOpts.roughingFlutes,
+      carveDepthMm: baseOpts.carveDepthMm,
+      finishingToolType: rec.finishingToolType ?? baseOpts.finishingToolType,
+    });
+    const opts = { ...baseOpts, ...rec, ...feeds };
+    const carve = generateReliefCarveGcode(californiaReliefPreset, opts);
+    expect(carve.success).toBe(true);
+    expect(carve.toolChange).toBe(true);
+    expect(carve.finishingZOffsetMm).toBeLessThan(-10);
+
+    const preview = buildPreviewPath(carve, opts);
+    const lastRough = [...preview.moves].reverse().find((m) => m.pass === 'roughing');
+    expect(lastRough).toBeDefined();
+    expect(lastRough!.t1).toBeCloseTo(carve.roughingTimeSeconds, 1);
+
+    const tl = programTimeline(carve.gcode.split('\n'), { profile: opts.motionProfile });
+    let state: PlayheadState = PLAYHEAD_START;
+    let maxErrRough = 0;
+    let maxErrFin = 0;
+    let mIdx = 0;
+    const samples = 250;
+    for (let s = 0; s <= samples; s++) {
+      const t = (s / samples) * tl.total;
+      while (mIdx + 1 < tl.moves.length && tl.moves[mIdx].t1 < t) mIdx++;
+      const m = tl.moves[mIdx];
+      const frac = m.t1 > m.t0 ? Math.min(1, Math.max(0, (t - m.t0) / (m.t1 - m.t0))) : 1;
+      const x = m.x1 + (m.x2 - m.x1) * frac;
+      const y = m.y1 + (m.y2 - m.y1) * frac;
+      const wposZ = m.z1 + (m.z2 - m.z1) * frac;
+      const progressSec = (t / tl.total) * preview.seconds;
+      const liveZ = wposZ + (carve.finishingZOffsetMm && progressSec > carve.roughingTimeSeconds + 1e-3 ? carve.finishingZOffsetMm : 0);
+      state = trackPlayhead(preview.moves, x, y, liveZ, state, [progressSec]);
+      const err = Math.abs(state.clock - t);
+      if (t <= carve.roughingTimeSeconds) maxErrRough = Math.max(maxErrRough, err);
+      else maxErrFin = Math.max(maxErrFin, err);
+    }
+
+    expect(maxErrRough).toBeLessThan(tl.total * 0.1);
+    expect(maxErrFin).toBeLessThan(tl.total * 0.12);
+    expect(state.clock / preview.seconds).toBeGreaterThan(0.95);
   });
 });
