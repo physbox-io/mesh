@@ -10,10 +10,9 @@ import { decodeImageUrl } from '../../utils/decodeImage';
 import { mergeAndNormalizeNodes, type RawNode } from '../../utils/sceneNodes';
 import { collectSceneTriangles } from '../../utils/contourSliceExporter';
 import { traceProfile } from '../../utils/profileImport';
-import { normalizeMask, viewDirection, type Mask, type View } from '../../utils/silhouette';
+import { normalizeMask, usablePhotoMask, viewDirection, type Mask, type View } from '../../utils/silhouette';
 import { bestViewOffThread } from '../../utils/silhouetteClient';
 import { renderViewportNow } from '../../utils/viewportCapture';
-import { compileSCAD } from '../../utils/openscad';
 import { settleScene } from '../../hooks/mcp/settleScene';
 import { runPictureToPart, sizeMm, type LoopProgress, type LoopReport } from '../../utils/pictureToPart';
 import type { SceneNode } from '../../types/scene';
@@ -40,23 +39,56 @@ function lean(value: unknown): unknown {
  * second: a hidden tab gets no animation frames at all, and the loop sat at
  * "matching view" until the tab came back, deaf to Stop.
  */
-const settle = (n: number, signal?: AbortSignal) => new Promise<void>((resolve) => {
-  const done = () => { clearTimeout(timer); signal?.removeEventListener('abort', done); resolve(); };
+export const settle = (n: number, signal?: AbortSignal) => new Promise<void>((resolve) => {
+  if (signal?.aborted) { resolve(); return; }
+  let rafId = 0;
+  let settled = false;
+  const done = () => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    if (rafId) cancelAnimationFrame(rafId);
+    signal?.removeEventListener('abort', done);
+    resolve();
+  };
   const timer = setTimeout(done, 250);
   signal?.addEventListener('abort', done);
-  const step = (left: number) => (left <= 0 ? done() : requestAnimationFrame(() => step(left - 1)));
+  const step = (left: number) => {
+    if (settled) return;
+    if (left <= 0) { done(); return; }
+    rafId = requestAnimationFrame(() => {
+      rafId = 0;
+      step(left - 1);
+    });
+  };
   step(n);
 });
 
+export const MAX_OUTLINE_CANVAS_SIDE = 256;
+const OUTLINE_CANVAS_PAD = 2;
+
+/** Bounded canvas dimensions + scale fitting traced mm geometry into <= 256 px preserving aspect. */
+export function fitOutlineCanvas(widthMm: number, heightMm: number): { width: number; height: number; scale: number } | null {
+  if (!(widthMm > 0) || !(heightMm > 0) || !Number.isFinite(widthMm) || !Number.isFinite(heightMm)) return null;
+  const innerMax = MAX_OUTLINE_CANVAS_SIDE - OUTLINE_CANVAS_PAD * 2;
+  const scale = innerMax / Math.max(widthMm, heightMm);
+  const width = Math.max(4, Math.min(MAX_OUTLINE_CANVAS_SIDE, Math.ceil(widthMm * scale) + OUTLINE_CANVAS_PAD * 2));
+  const height = Math.max(4, Math.min(MAX_OUTLINE_CANVAS_SIDE, Math.ceil(heightMm * scale) + OUTLINE_CANVAS_PAD * 2));
+  return { width, height, scale };
+}
+
 /**
  * The first photo's outline, normalised: the tracer's, so a part lying on a
- * sheet of paper is the part and not the sheet. Null when nothing traces.
+ * sheet of paper is the part and not the sheet. Null when nothing traces or
+ * the traced mask fails usablePhotoMask().
  */
-async function photoOutline(photo: LlmImage): Promise<Mask | null> {
+export async function photoOutline(photo: LlmImage): Promise<Mask | null> {
   try {
     const img = await decodeImageUrl(llmImageUrl(photo), 480);
     const t = traceProfile(img.data, img.width, img.height, { detail: 'normal', widthMm: 400 });
-    const W = Math.ceil(t.widthMm) + 4, H = Math.ceil(t.heightMm) + 4;
+    const fitted = fitOutlineCanvas(t.widthMm, t.heightMm);
+    if (!fitted || !t.shapes.length) return null;
+    const { width: W, height: H, scale } = fitted;
     const canvas = document.createElement('canvas');
     canvas.width = W;
     canvas.height = H;
@@ -66,7 +98,7 @@ async function photoOutline(photo: LlmImage): Promise<Mask | null> {
     const path = new Path2D();
     for (const s of t.shapes) {
       for (const loop of [s.outline, ...s.holes]) {
-        loop.forEach((q, i) => (i ? path.lineTo(q.x + W / 2, H / 2 - q.y) : path.moveTo(q.x + W / 2, H / 2 - q.y)));
+        loop.forEach((q, i) => (i ? path.lineTo(q.x * scale + W / 2, H / 2 - q.y * scale) : path.moveTo(q.x * scale + W / 2, H / 2 - q.y * scale)));
         path.closePath();
       }
     }
@@ -74,6 +106,7 @@ async function photoOutline(photo: LlmImage): Promise<Mask | null> {
     const px = ctx.getImageData(0, 0, W, H).data;
     const mask = new Uint8Array(W * H);
     for (let i = 0; i < mask.length; i++) mask[i] = px[i * 4 + 3] > 127 ? 1 : 0;
+    if (!usablePhotoMask(mask, W, H)) return null;
     return normalizeMask(mask, W, H);
   } catch {
     return null;
@@ -82,6 +115,7 @@ async function photoOutline(photo: LlmImage): Promise<Mask | null> {
 
 /** The viewport looking at the part from `view`, edges off, as a picture. */
 async function renderFrom(view: View, signal?: AbortSignal): Promise<LlmImage | null> {
+  if (signal?.aborted) return null;
   const tris = collectSceneTriangles(useStore.getState().sceneGraph).tris;
   if (tris.length < 9) return null;
   const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
@@ -104,6 +138,7 @@ async function renderFrom(view: View, signal?: AbortSignal): Promise<LlmImage | 
     if (before.colliders) useViewQuality.getState().setShowColliders(false);
     store.setCameraOverride({ position: [centre[0] + d[0] * dist, centre[1] + d[1] * dist, centre[2] + d[2] * dist], target: centre });
     await settle(3, signal);
+    if (signal?.aborted) return null;
     const canvas = renderViewportNow();
     return canvas && canvas.width ? drawableToLlmImage(canvas, canvas.width, canvas.height, 1024) : null;
   } finally {
@@ -114,23 +149,6 @@ async function renderFrom(view: View, signal?: AbortSignal): Promise<LlmImage | 
   }
 }
 
-/** SCAD bodies left without a mesh after the build, with what the compiler said. */
-async function scadFailures(nodes: SceneNode[]): Promise<string[]> {
-  const out: string[] = [];
-  const walk = async (list: SceneNode[]) => {
-    for (const n of list) {
-      if (n.scad && !(n.geoms ?? []).some((g) => (g.renderVertices?.length ?? g.vertices?.length ?? 0) > 0)) {
-        let why = 'it compiled to nothing';
-        try { await compileSCAD(n.scad); } catch (e) { why = ((e as Error)?.message || String(e)).slice(0, 300); }
-        out.push(`${n.name || n.id}: ${why}`);
-      }
-      await walk(n.children ?? []);
-    }
-  };
-  await walk(nodes);
-  return out;
-}
-
 export function usePictureToPart(sceneSystem: string) {
   const [progress, setProgress] = useState<LoopProgress | null>(null);
   const abort = useRef<AbortController | null>(null);
@@ -138,35 +156,51 @@ export function usePictureToPart(sceneSystem: string) {
   useEffect(() => () => abort.current?.abort(), []);
 
   const run = useCallback(async (request: string, photos: LlmImage[], maxRounds?: number): Promise<LoopReport> => {
+    abort.current?.abort();
     const ctl = new AbortController();
     abort.current = ctl;
     setProgress({ round: 1, maxRounds: maxRounds ?? 5, stage: 'building', rounds: [] });
+    let expectedNodes: SceneNode[] | null = null;
+    let isFirstApply = true;
+    const externallyEdited = () => expectedNodes !== null && useStore.getState().sceneGraph.nodes !== expectedNodes;
     try {
       const photoMask = photos.length ? await photoOutline(photos[0]) : null;
       return await runPictureToPart({ request, photos, photoMask, sceneSystem, maxRounds }, {
         llm: (system, user, images) => callLlm({ system, user, images, signal: ctl.signal }),
         async apply(nodes: RawNode[]) {
+          if (externallyEdited()) {
+            ctl.abort();
+            return { ok: false, error: 'The scene was modified externally.' };
+          }
           const normalized = mergeAndNormalizeNodes(nodes, [], true);
           if (!normalized.length) return { ok: false, error: 'The nodes were empty once normalised.' };
-          const res = await settleScene(normalized as SceneNode[], { replacesScene: false, waitForColliders: false });
+          const replacesScene = isFirstApply;
+          isFirstApply = false;
+          const res = await settleScene(normalized as SceneNode[], { replacesScene, waitForColliders: false });
+          expectedNodes = useStore.getState().sceneGraph.nodes;
+          if (res.scadErrors?.length) {
+            const failed = res.scadErrors.map((f) => `${f.name || f.id}: ${f.error.slice(0, 300)}`);
+            return { ok: false, error: `OpenSCAD did not compile ${failed.join('; ')}` };
+          }
           if (!res.ok) return { ok: false, error: res.error };
-          const failed = await scadFailures(useStore.getState().sceneGraph.nodes || []);
-          if (failed.length) return { ok: false, error: `OpenSCAD did not compile ${failed.join('; ')}` };
           if (!sizeMm(collectSceneTriangles(useStore.getState().sceneGraph).tris)) {
             return { ok: false, error: 'It built nothing solid.' };
           }
           return { ok: true };
         },
+        sceneChanged: externallyEdited,
         partNodes: () => lean(useStore.getState().sceneGraph.nodes) as RawNode[],
         partTriangles: () => collectSceneTriangles(useStore.getState().sceneGraph).tris,
         render: (view) => renderFrom(view, ctl.signal),
-        bestView: bestViewOffThread,
-        onProgress: setProgress,
+        bestView: (tris, photo, near, signal) => bestViewOffThread(tris, photo, near, signal ?? ctl.signal),
+        onProgress: (p) => { if (abort.current === ctl) setProgress(p); },
         signal: ctl.signal,
       });
     } finally {
-      abort.current = null;
-      setProgress(null);
+      if (abort.current === ctl) {
+        abort.current = null;
+        setProgress(null);
+      }
     }
   }, [sceneSystem]);
 

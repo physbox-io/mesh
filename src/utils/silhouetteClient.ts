@@ -12,6 +12,8 @@ interface QueuedView {
   tris: Float32Array;
   photo: Uint8Array;
   near?: View;
+  signal?: AbortSignal;
+  onAbort?: () => void;
   resolve: (m: ViewMatch | null) => void;
   reject: (e: Error) => void;
 }
@@ -20,6 +22,13 @@ let worker: Worker | null = null;
 let seq = 0;
 let active: (QueuedView & { timer: ReturnType<typeof setTimeout> }) | null = null;
 const queued: QueuedView[] = [];
+
+function detachAbort(job: QueuedView): void {
+  if (job.signal && job.onAbort) {
+    job.signal.removeEventListener('abort', job.onAbort);
+    job.onAbort = undefined;
+  }
+}
 
 function dropWorker(w: Worker | null): void {
   if (w) {
@@ -36,9 +45,14 @@ function failAll(error: string): void {
     clearTimeout(active.timer);
     const done = active;
     active = null;
+    detachAbort(done);
     done.reject(new Error(error));
   }
-  while (queued.length > 0) queued.shift()!.reject(new Error(error));
+  while (queued.length > 0) {
+    const q = queued.shift()!;
+    detachAbort(q);
+    q.reject(new Error(error));
+  }
 }
 
 function ensureWorker(): Worker | null {
@@ -53,6 +67,7 @@ function ensureWorker(): Worker | null {
       const done = active;
       active = null;
       clearTimeout(done.timer);
+      detachAbort(done);
       if (msg.type === 'BEST_VIEW_DONE') done.resolve(msg.match);
       else done.reject(new Error(msg.error));
       pump();
@@ -75,8 +90,14 @@ function ensureWorker(): Worker | null {
 function pump(): void {
   while (!active && queued.length > 0) {
     const next = queued.shift()!;
+    if (next.signal?.aborted) {
+      detachAbort(next);
+      next.resolve(null);
+      continue;
+    }
     const w = ensureWorker();
     if (!w) {
+      detachAbort(next);
       try {
         next.resolve(bestView(next.tris, next.photo, next.near));
       } catch (err) {
@@ -88,6 +109,7 @@ function pump(): void {
       if (active?.id !== next.id) return;
       const wedged = active;
       active = null;
+      detachAbort(wedged);
       dropWorker(w);
       wedged.reject(new Error('The view search took too long.'));
       pump();
@@ -109,17 +131,45 @@ function pump(): void {
     } catch (err) {
       clearTimeout(timer);
       active = null;
+      detachAbort(next);
       dropWorker(w);
       next.reject(err instanceof Error ? err : new Error(String(err)));
     }
   }
 }
 
-export function bestViewOffThread(tris: ArrayLike<number>, photo: Mask, near?: View): Promise<ViewMatch | null> {
+export function bestViewOffThread(
+  tris: ArrayLike<number>,
+  photo: Mask,
+  near?: View,
+  signal?: AbortSignal,
+): Promise<ViewMatch | null> {
+  if (signal?.aborted) return Promise.resolve(null);
   if (typeof Worker === 'undefined') return Promise.resolve(bestView(tris, photo, near));
   const id = ++seq;
   return new Promise((resolve, reject) => {
-    queued.push({ id, tris: Float32Array.from(tris), photo: photo.slice(), near, resolve, reject });
+    const job: QueuedView = { id, tris: Float32Array.from(tris), photo: photo.slice(), near, signal, resolve, reject };
+    if (signal) {
+      const onAbort = () => {
+        detachAbort(job);
+        const idx = queued.findIndex((q) => q.id === id);
+        if (idx >= 0) {
+          queued.splice(idx, 1);
+          resolve(null);
+          return;
+        }
+        if (active?.id === id) {
+          clearTimeout(active.timer);
+          active = null;
+          dropWorker(worker);
+          resolve(null);
+          pump();
+        }
+      };
+      job.onAbort = onAbort;
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+    queued.push(job);
     pump();
   });
 }

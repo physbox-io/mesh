@@ -42,7 +42,9 @@ export interface PartLoopDeps {
   /** The viewport turned to look from `view`, as a picture for the critic. */
   render(view: View): Promise<LlmImage | null>;
   /** The photo-direction search; silhouette.bestView unless given (the app runs it on a worker). */
-  bestView?(tris: ArrayLike<number>, photo: Mask, near?: View): Promise<ViewMatch | null>;
+  bestView?(tris: ArrayLike<number>, photo: Mask, near?: View, signal?: AbortSignal): Promise<ViewMatch | null>;
+  /** Returns true when the live scene was mutated externally since the loop's last apply(). */
+  sceneChanged?(): boolean;
   onProgress?(p: LoopProgress): void;
   signal?: AbortSignal;
 }
@@ -204,9 +206,11 @@ export async function runPictureToPart(opts: LoopOptions, deps: PartLoopDeps): P
   const rounds: RoundReport[] = [];
   const builderSystem = `${opts.sceneSystem}\n${BUILDER_RULES}`;
   const aborted = () => !!deps.signal?.aborted;
+  const externallyChanged = () => !!deps.sceneChanged?.();
+  const stopped = () => aborted() || externallyChanged();
   const progress = (round: number, stage: LoopProgress['stage']) =>
     deps.onProgress?.({ round, maxRounds, stage, rounds: [...rounds] });
-  const searchView = deps.bestView ?? (async (t: ArrayLike<number>, m: Mask, n?: View) => bestView(t, m, n));
+  const searchView = deps.bestView ?? (async (t: ArrayLike<number>, m: Mask, n?: View, signal?: AbortSignal) => (signal?.aborted ? null : bestView(t, m, n)));
   const request = opts.request || 'Build the part shown in the picture.';
 
   let photoMask = opts.photoMask;
@@ -222,12 +226,13 @@ export async function runPictureToPart(opts: LoopOptions, deps: PartLoopDeps): P
   let stale = 0;
 
   const finish = async (stoppedBecause: LoopReport['stoppedBecause'], error?: string): Promise<LoopReport> => {
-    // Whatever is in the scene at the end is the round the report names.
-    if (best && !sceneIsBest) {
+    // Whatever is in the scene at the end is the round the report names,
+    // unless the user externally edited the scene (never clobber their work).
+    if (best && !sceneIsBest && !externallyChanged()) {
       await deps.apply(best.nodes);
       sceneIsBest = true;
     }
-    if (best) await deps.render(best.view).catch(() => null);
+    if (best && stoppedBecause !== 'stopped') await deps.render(best.view).catch(() => null);
     progress(rounds.length, 'done');
     const kept = best?.build ?? builtUnchecked;
     return {
@@ -244,7 +249,7 @@ export async function runPictureToPart(opts: LoopOptions, deps: PartLoopDeps): P
   };
 
   for (let round = 1; round <= maxRounds; round++) {
-    if (aborted()) return finish('stopped');
+    if (stopped()) return finish('stopped');
 
     // Build or revise.
     progress(round, round === 1 ? 'building' : 'revising');
@@ -262,17 +267,20 @@ export async function runPictureToPart(opts: LoopOptions, deps: PartLoopDeps): P
       try {
         reply = await deps.llm(builderSystem, attempt ? `${user}\n\nYOUR LAST REPLY FAILED: ${applyError} Return the whole part again.` : user, shown);
       } catch (e) {
-        if (aborted()) return finish('stopped');
+        if (stopped()) return finish('stopped');
         return finish('failed', (e as Error)?.message || String(e));
       }
-      if (aborted()) return finish('stopped');
+      if (stopped()) return finish('stopped');
       const parsed = parseBuild(reply.text);
       if (!parsed.nodes?.length) {
         applyError = reply.truncated ? 'The reply was cut off at the token limit before the nodes were complete.' : 'It had no "nodes" JSON.';
         continue;
       }
+      if (stopped()) return finish('stopped');
       const res = await deps.apply(parsed.nodes);
+      if (externallyChanged()) return finish('stopped');
       sceneIsBest = false;
+      if (aborted()) return finish('stopped');
       if (!res.ok) {
         applyError = res.error || 'The part did not build.';
         continue;
@@ -292,7 +300,7 @@ export async function runPictureToPart(opts: LoopOptions, deps: PartLoopDeps): P
     }
     guess = built.view ?? guess;
     overallMm = built.overallMm ?? overallMm;
-    if (aborted()) return finish('stopped');
+    if (stopped()) return finish('stopped');
 
     // Find the photo's direction and look from it.
     progress(round, 'matching view');
@@ -301,8 +309,8 @@ export async function runPictureToPart(opts: LoopOptions, deps: PartLoopDeps): P
     let overlap: number | null = null;
     let note: string | undefined;
     if (photoMask) {
-      const m = await searchView(tris, photoMask, guess).catch(() => null);
-      if (aborted()) return finish('stopped');
+      const m = await searchView(tris, photoMask, guess, deps.signal).catch(() => null);
+      if (stopped()) return finish('stopped');
       if (m && round === 1 && m.iou < TRUST_OVERLAP) {
         // Not this part's outline, or a poor split of the photo: do not let it decide.
         photoMask = null;
@@ -313,7 +321,7 @@ export async function runPictureToPart(opts: LoopOptions, deps: PartLoopDeps): P
       }
     }
     const render = await deps.render(view);
-    if (aborted()) return finish('stopped');
+    if (stopped()) return finish('stopped');
 
     // The critic (once more if its reply would not parse), and the measured check.
     progress(round, 'critic');
@@ -325,7 +333,7 @@ export async function runPictureToPart(opts: LoopOptions, deps: PartLoopDeps): P
       } catch {
         critic = null;
       }
-      if (aborted()) return finish('stopped');
+      if (stopped()) return finish('stopped');
     }
     const measured = sizeDifferences(sizeMm(tris), overallMm);
     const differences = [...measured, ...(critic?.differences ?? [])];
@@ -339,7 +347,9 @@ export async function runPictureToPart(opts: LoopOptions, deps: PartLoopDeps): P
         best = { round, score: 0, nodes: deps.partNodes(), differences, render, view, build: built };
         sceneIsBest = true;
       } else {
+        if (stopped()) return finish('stopped');
         await deps.apply(best.nodes);
+        if (externallyChanged()) return finish('stopped');
         sceneIsBest = true;
       }
       rounds.push({ round, score: 0, scoreKind, view, differences, rolledBack: best.round !== round, render, note });
@@ -351,10 +361,12 @@ export async function runPictureToPart(opts: LoopOptions, deps: PartLoopDeps): P
 
     // Keep it, or undo it.
     let rolledBack = false;
-    if (best && score < best.score) {
+    if (best && score < best.score - SCORE_EPS) {
+      if (stopped()) return finish('stopped');
       rolledBack = true;
       note = [note, `Scored ${score.toFixed(2)} against ${best.score.toFixed(2)} for round ${best.round}, so it was undone.`].filter(Boolean).join(' ');
       await deps.apply(best.nodes);
+      if (externallyChanged()) return finish('stopped');
       sceneIsBest = true;
       feedback = `${best.differences.map((d) => `- ${d}`).join('\n')}\n\nYour last revision made the match WORSE (${scoreKind} ${best.score.toFixed(2)} -> ${score.toFixed(2)}) and was undone; the nodes above are the better version. Try a different fix.`;
       stale++;
