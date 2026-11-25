@@ -479,18 +479,23 @@ export function foldSheetUnfold(
 
 /** The unfolded model's place: the net is the model at `scaleFactor`. */
 export function sheetFoldStockTransform(result: Pick<SheetUnfoldResult, 'islands'>, scaleFactor: number): StockTransform {
+  const safeScale = scaleFactor > 0 ? scaleFactor : 1;
   const lo: V3 = [Infinity, Infinity, Infinity], hi: V3 = [-Infinity, -Infinity, -Infinity];
   for (const isl of result.islands) {
     for (const f of isl.faces) {
       for (const p of f.model3DMm ?? []) {
         for (let a = 0; a < 3; a++) {
-          lo[a] = Math.min(lo[a], p[a] / scaleFactor);
-          hi[a] = Math.max(hi[a], p[a] / scaleFactor);
+          lo[a] = Math.min(lo[a], p[a] / safeScale);
+          hi[a] = Math.max(hi[a], p[a] / safeScale);
         }
       }
     }
   }
-  return { modelOriginMm: [0, 0, 0], workOriginMm: [0, 0, 0], scale: [scaleFactor, scaleFactor, scaleFactor], modelMinMm: lo, modelMaxMm: hi };
+  if (!Number.isFinite(lo[0])) {
+    lo[0] = lo[1] = lo[2] = 0;
+    hi[0] = hi[1] = hi[2] = 0;
+  }
+  return { modelOriginMm: [0, 0, 0], workOriginMm: [0, 0, 0], scale: [safeScale, safeScale, safeScale], modelMinMm: lo, modelMaxMm: hi };
 }
 
 /**

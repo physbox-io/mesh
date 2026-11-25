@@ -371,6 +371,10 @@ export function AssemblyPreview({
       disposeChildren(replayGroup);
       renderer.dispose();
       renderer.domElement.remove();
+      explodedRef.current = null;
+      replayRef.current = null;
+      cameraRef.current = null;
+      controlsRef.current = null;
     };
   }, []);
 
@@ -460,15 +464,18 @@ export function AssemblyPreview({
     // Framed on the whole part, assembled, so the view holds still across stages.
     const box = new THREE.Box3();
     for (const m of replayObjects.current.sections) {
-      (m as THREE.Mesh).geometry.computeBoundingBox();
-      box.union((m as THREE.Mesh).geometry.boundingBox!);
+      const geo = (m as THREE.Mesh).geometry;
+      geo.computeBoundingBox();
+      if (geo.boundingBox && !geo.boundingBox.isEmpty()) box.union(geo.boundingBox);
     }
-    const holder = new THREE.Object3D();
-    const helper = new THREE.Mesh(new THREE.BoxGeometry(...box.getSize(new THREE.Vector3()).toArray()));
-    helper.position.copy(box.getCenter(new THREE.Vector3()));
-    holder.add(helper);
-    frameView(holder, `replay:${sections.length}:${replay.stages.length}`);
-    helper.geometry.dispose();
+    if (!box.isEmpty()) {
+      const holder = new THREE.Object3D();
+      const helper = new THREE.Mesh(new THREE.BoxGeometry(...box.getSize(new THREE.Vector3()).toArray()));
+      helper.position.copy(box.getCenter(new THREE.Vector3()));
+      holder.add(helper);
+      frameView(holder, `replay:${sections.length}:${replay.stages.length}`);
+      helper.geometry.dispose();
+    }
   }, [replay, sections, dowel]);
 
   // Where everything is at time t.
@@ -558,18 +565,24 @@ export function AssemblyPreview({
   }, [t, replay, segments, segmentAt, sections, centres]);
 
   // Playback.
+  const tRef = useRef(t);
+  useEffect(() => { tRef.current = t; }, [t]);
   useEffect(() => {
     if (!playing || !replay) return;
     let raf = 0;
     let last = performance.now();
     const step = (now: number) => {
-      const dt = (now - last) / 1000;
+      const dt = Math.min(0.1, Math.max(0, (now - last) / 1000));
       last = now;
-      setT((prev) => {
-        const next = prev + dt;
-        if (next >= total) { setPlaying(false); return total; }
-        return next;
-      });
+      const next = tRef.current + dt;
+      if (next >= total) {
+        tRef.current = total;
+        setT(total);
+        setPlaying(false);
+        return;
+      }
+      tRef.current = next;
+      setT(next);
       raf = requestAnimationFrame(step);
     };
     raf = requestAnimationFrame(step);

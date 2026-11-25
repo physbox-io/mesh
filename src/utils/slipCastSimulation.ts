@@ -144,7 +144,7 @@ export function simulateSlipCast(wasm: ManifoldToplevel, input: SlipCastInput, w
     if (drained && piece.volume() > 0.8 * cavityBelow) warnings.push(`The casting is ${Math.round((100 * piece.volume()) / Math.max(1, cavityBelow))}% of the cavity: it casts nearly solid, not hollow.`);
     const [fx, fy, fz] = input.footMm;
     const s = 1 / Math.max(1e-6, input.scale);
-    piece = keep(piece.translate([-fx, -fy, -fz]).scale(s));
+    piece = keep(keep(piece.translate([-fx, -fy, -fz])).scale(s));
     const pb = piece.boundingBox();
     piece = keep(piece.translate([0, 0, -pb.min[2]]));
     const m = piece.getMesh();
@@ -153,6 +153,7 @@ export function simulateSlipCast(wasm: ManifoldToplevel, input: SlipCastInput, w
     const volumeMm3 = piece.volume();
     const fb = piece.boundingBox();
     const slip = castMaterial(input.slip);
+    const shrinkPct = +Math.max(0, (1 - s) * 100).toFixed(1);
     return {
       mesh: { positions, faces: new Uint32Array(m.triVerts) },
       volumeMm3: Math.round(volumeMm3),
@@ -160,7 +161,7 @@ export function simulateSlipCast(wasm: ManifoldToplevel, input: SlipCastInput, w
       wallMm: t,
       firedWallMm: +(t * s).toFixed(2),
       sizeMm: [+(fb.max[0] - fb.min[0]).toFixed(1), +(fb.max[1] - fb.min[1]).toFixed(1), +(fb.max[2] - fb.min[2]).toFixed(1)],
-      notes: [`${slip.label}, ${t} mm wall as cast, fired ${(t * s).toFixed(1)} mm after ${slip.shrinkPercent ?? 0}% shrink`],
+      notes: [`${slip.label}, ${t} mm wall as cast, fired ${(t * s).toFixed(1)} mm after ${shrinkPct}% shrink`],
       warnings,
     };
   } finally {

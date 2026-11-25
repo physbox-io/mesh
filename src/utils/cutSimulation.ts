@@ -235,6 +235,8 @@ export function simulateMilling(gcode: string, opts: SimulateOptions): CutResult
   // `z` is where the tip is against the stock; a program's Z words are against
   // the Z0 of the last touch-off, `workZ0`.
   let x = 0, y = 0, z = 5, mode = 0, workZ0 = 0;
+  let absoluteMode = true;
+  let unitScale = 1;
   const lines = gcode.split('\n');
   const every = Math.max(1, Math.floor(lines.length / 100));
   for (let n = 0; n < lines.length; n++) {
@@ -247,19 +249,32 @@ export function simulateMilling(gcode: string, opts: SimulateOptions): CutResult
       const fitted = cutterFor(toolNo);
       if (fitted) workZ0 = touchHeight(x, y, fitted);
     }
-    let nx = x, ny = y, nz = z, motion = false;
-    for (const [, key, v] of code.matchAll(/([GXYZ])\s*(-?\d*\.?\d+)/g)) {
+    let nx = x, ny = y, nz = z, motion = false, nonModalBypass = false;
+    let xWord: number | null = null, yWord: number | null = null, zWord: number | null = null;
+    for (const [, key, v] of code.matchAll(/([GXYZ])\s*([+-]?\d*\.?\d+)/g)) {
       const val = parseFloat(v);
+      if (!Number.isFinite(val)) continue;
       if (key === 'G') {
-        if (val === 0 || val === 1) { mode = val; motion = true; }
-        else if (val === 2 || val === 3) mode = -1; // arcs: not simulated
+        if (v.includes('.')) continue;
+        const g = Math.round(val);
+        if (g === 0 || g === 1) { mode = g; motion = true; }
+        else if (g === 2 || g === 3) mode = -1; // arcs: not simulated
+        else if (g === 90) absoluteMode = true;
+        else if (g === 91) absoluteMode = false;
+        else if (g === 20) unitScale = 25.4;
+        else if (g === 21) unitScale = 1;
+        else if (g === 53 || g === 10 || g === 28 || g === 30 || g === 92 || g === 4) nonModalBypass = true;
       } else {
         motion = true;
-        if (key === 'X') nx = val;
-        else if (key === 'Y') ny = val;
-        else nz = val + workZ0;
+        if (key === 'X') xWord = val * unitScale;
+        else if (key === 'Y') yWord = val * unitScale;
+        else zWord = val * unitScale;
       }
     }
+    if (nonModalBypass) continue;
+    if (xWord !== null) nx = absoluteMode ? xWord : x + xWord;
+    if (yWord !== null) ny = absoluteMode ? yWord : y + yWord;
+    if (zWord !== null) nz = absoluteMode ? zWord + workZ0 : z + zWord;
     if (motion && mode >= 0 && (nx !== x || ny !== y || nz !== z)) {
       const cutter = cutterFor(toolNo);
       if (cutter) {

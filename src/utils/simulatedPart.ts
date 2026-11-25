@@ -332,17 +332,18 @@ export function simulatedBody(
   const world = new Float64Array(p.length);
   if (opts.placement === 'overlay') {
     const { workOriginMm: w, modelOriginMm: m, scale: s, rotation: r } = transform;
+    const sx = s[0] || 1, sy = s[1] || 1, sz = s[2] || 1;
     for (let v = 0; v < count; v++) {
       // Un-scale into the turned model's frame, then turn back.
-      const a = (p[v * 3] - w[0]) / s[0];
-      const b = (p[v * 3 + 1] - w[1]) / s[1];
-      const c = (p[v * 3 + 2] - w[2]) / s[2];
+      const a = (p[v * 3] - w[0]) / sx;
+      const b = (p[v * 3 + 1] - w[1]) / sy;
+      const c = (p[v * 3 + 2] - w[2]) / sz;
       // The inverse of a rotation is its transpose.
       world[v * 3] = (r ? r[0] * a + r[3] * b + r[6] * c : a) + m[0];
       world[v * 3 + 1] = (r ? r[1] * a + r[4] * b + r[7] * c : b) + m[1];
       world[v * 3 + 2] = (r ? r[2] * a + r[5] * b + r[8] * c : c) + m[2];
     }
-  } else {
+  } else if (count > 0) {
     // Turned back the way the model stands, at the size it is cut; or, for a
     // step of the job, turned as the block stands for its setup.
     const r = transform.rotation;
@@ -387,6 +388,10 @@ export function simulatedBody(
   for (let i = 0; i < world.length; i++) {
     lo[i % 3] = Math.min(lo[i % 3], world[i]);
     hi[i % 3] = Math.max(hi[i % 3], world[i]);
+  }
+  if (!Number.isFinite(lo[0])) {
+    lo.fill(0);
+    hi.fill(0);
   }
   const origin = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]];
   const renderVertices: number[] = new Array(world.length);

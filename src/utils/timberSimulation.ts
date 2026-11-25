@@ -412,6 +412,10 @@ export function timberSimulationRequest(
     lo[i % 3] = Math.min(lo[i % 3], world[i]);
     hi[i % 3] = Math.max(hi[i % 3], world[i]);
   }
+  if (!Number.isFinite(lo[0])) {
+    lo[0] = lo[1] = lo[2] = 0;
+    hi[0] = hi[1] = hi[2] = 0;
+  }
   const transform: StockTransform = { modelOriginMm: [0, 0, 0], workOriginMm: [0, 0, 0], scale: [1, 1, 1], modelMinMm: lo, modelMaxMm: hi };
   const worstGap = sim.joints.reduce<TimberJointFit | null>((w, j) => (!w || j.shoulderGapMm > w.shoulderGapMm ? j : w), null);
   const tight = sim.joints.filter((j) => j.slackWidthMm < -0.05 || j.slackThicknessMm < -0.05);

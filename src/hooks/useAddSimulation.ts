@@ -197,7 +197,9 @@ export async function addSimulationToScene(
       `- ${mm3(sheets.volumeMm3)} of material in the parts`,
       ...(req.sheets.routerRadiusMm
         ? [Math.abs(lost) > 0.5
-          ? `- The ${(req.sheets.routerRadiusMm * 2).toFixed(2)} mm bit leaves ${Math.round(-lost)} mm² more than drawn, in inside corners and slots it cannot enter`
+          ? lost < 0
+            ? `- The ${(req.sheets.routerRadiusMm * 2).toFixed(2)} mm bit leaves ${Math.round(-lost)} mm² more than drawn, in inside corners and slots it cannot enter`
+            : `- The ${(req.sheets.routerRadiusMm * 2).toFixed(2)} mm bit removes ${Math.round(lost)} mm² more than drawn`
           : '- The bit reaches every corner as drawn']
         : []),
     );
