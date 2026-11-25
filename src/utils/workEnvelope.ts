@@ -332,7 +332,9 @@ export function measureGcodeBounds(gcode: string): JobExtent | null {
 
     if (nonModalBypass) continue;
     if (lineMotion !== null) modalMotion = lineMotion;
-    if (xVal === null && yVal === null && zVal === null) continue;
+    const cmd = lineMotion ?? modalMotion ?? 'G0';
+    const isArcWithCenter = (cmd === 'G2' || cmd === 'G3') && (iVal !== null || jVal !== null);
+    if (xVal === null && yVal === null && zVal === null && !isArcWithCenter) continue;
 
     if (xVal !== null) xVal *= unitScale;
     if (yVal !== null) yVal *= unitScale;
@@ -341,12 +343,11 @@ export function measureGcodeBounds(gcode: string): JobExtent | null {
     if (jVal !== null) jVal *= unitScale;
     if (rVal !== null) rVal *= unitScale;
 
-    const cmd = lineMotion ?? modalMotion ?? 'G0';
     const nx = xVal !== null ? (absoluteMode ? xVal : curX + xVal) : curX;
     const ny = yVal !== null ? (absoluteMode ? yVal : curY + yVal) : curY;
     const nz = zVal !== null ? (absoluteMode ? zVal : curZ + zVal) : curZ;
 
-    if (xVal !== null || yVal !== null) {
+    if (xVal !== null || yVal !== null || isArcWithCenter) {
       if ((cmd === 'G2' || cmd === 'G3') && (iVal !== null || jVal !== null || rVal !== null)) {
         includeXY(curX, curY);
         includeXY(nx, ny);

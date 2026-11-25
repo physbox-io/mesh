@@ -1,7 +1,7 @@
 // Touch-plate zeroing and bed probing, gated on a proved probe circuit.
 
 import { normalizeGrid, type ProbeGrid } from '@physbox-io/machining';
-import { DATUM_NOT_CONFIRMED } from './machineCore';
+import { DATUM_NOT_CONFIRMED, QUICK_REPLY_TIMEOUT_MS } from './machineCore';
 import { SetupMachine } from './machineSetup';
 
 /**
@@ -24,6 +24,7 @@ export abstract class ProbingMachine extends SetupMachine {
    * set — under G90 a `Z-20` on a machine zeroed high is a 20 mm dive past it.
    */
   public async probePoint(searchDepthMm = ZERO_SEARCH_MM, feedrate = 50, timeoutMs = 120000): Promise<number | null> {
+    this.refuseWhileJobHoldsMachine('probe');
     if (!this.transport || !this.state.connected) return null;
     this.assertProbeCircuit();
     void timeoutMs;
@@ -111,7 +112,7 @@ export abstract class ProbingMachine extends SetupMachine {
       this.updateState({ status: 'PROBING' });
     }
     try {
-      await this.sendAndWait('G21 G90');
+      await this.sendAndWait('G21 G90', QUICK_REPLY_TIMEOUT_MS);
       const contactZ = await this.probeOnce(searchDepthMm, feedrate);
 
       if (contactZ === null) {
@@ -215,7 +216,7 @@ export abstract class ProbingMachine extends SetupMachine {
       const PROBE_LIFT_MM = 5; // relative lift after each contact, kept for the next hop
       const PROBE_FEED = 50; // slow, so the probe has time to stop the move
 
-      await this.sendAndWait('G21 G90');
+      await this.sendAndWait('G21 G90', QUICK_REPLY_TIMEOUT_MS);
 
       // The first hop has no lift behind it, so a tool left on the stock would
       // drag there. Relative like every other Z move here, and only off a datum
@@ -223,11 +224,13 @@ export abstract class ProbingMachine extends SetupMachine {
       await this.awaitStatus();
       // With no datum the gap is unknown, so the tool goes up one hop's lift
       // from wherever it stands (short of the top of travel, where that is
-      // known) and the first stab searches that much further down.
+      // known) and the first stab searches that much further down. Even with a
+      // datum, clamp to headroom so a tall fixture cannot lift into the top switch.
       let firstSearchExtra = 0;
       const top = this.state.hasHomed ? this.zTravelTop() : null;
       const room = top === null ? Infinity : top - 1 - this.state.mpos.z;
-      const short = this.state.needsZZero ? Math.min(PROBE_LIFT_MM, room) : PROBE_LIFT_MM - this.state.wpos.z;
+      const rawShort = this.state.needsZZero ? PROBE_LIFT_MM : PROBE_LIFT_MM - this.state.wpos.z;
+      const short = Math.min(rawShort, room);
       if (short > 0.001) {
         await this.sendAndWait(`G91 G0 Z${short.toFixed(3)}`);
         await this.sendAndWait('G90');

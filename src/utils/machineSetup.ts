@@ -1,7 +1,7 @@
 // Getting the work set up: zeroing by hand, jogging, homing, framing, and lifting clear.
 
 import type { FrameJobOptions } from '@physbox-io/machining';
-import { DATUM_NOT_CONFIRMED } from './machineCore';
+import { DATUM_NOT_CONFIRMED, QUICK_REPLY_TIMEOUT_MS } from './machineCore';
 import { GuideSpotMachine } from './machineGuideSpot';
 
 /**
@@ -54,7 +54,7 @@ export abstract class SetupMachine extends GuideSpotMachine {
     if (at.y !== undefined) words.push(`Y${(at.y + (bitSide.y ?? -1) * paperMm).toFixed(3)}`);
     if (at.z !== undefined) words.push(`Z${(at.z + paperMm).toFixed(3)}`);
     if (words.length === 0) return { success: false, message: 'No axis given.' };
-    await this.sendAndWait('G21 G90');
+    await this.sendAndWait('G21 G90', QUICK_REPLY_TIMEOUT_MS);
     if (!(await this.writeDatum(`G10 L20 P1 ${words.join(' ')}`))) {
       return { success: false, message: DATUM_NOT_CONFIRMED };
     }
@@ -125,7 +125,7 @@ export abstract class SetupMachine extends GuideSpotMachine {
     if (!this.state.connected) {
       return { success: false, message: 'Not connected to a machine.' };
     }
-    await this.sendAndWait('G21 G90');
+    await this.sendAndWait('G21 G90', QUICK_REPLY_TIMEOUT_MS);
     if (!(await this.writeDatum(`G10 L20 P1 Z${offsetMm.toFixed(3)}`))) {
       return { success: false, message: DATUM_NOT_CONFIRMED };
     }
@@ -150,7 +150,10 @@ export abstract class SetupMachine extends GuideSpotMachine {
    */
   public async zeroAllHere(): Promise<void> {
     this.refuseWhileJobHoldsMachine('zero the axes');
-    await this.sendLine('G10 L20 P1 X0 Y0 Z0');
+    if (!this.state.connected) throw new Error('Not connected to a machine.');
+    if (!(await this.writeDatum('G10 L20 P1 X0 Y0 Z0'))) {
+      throw new Error(DATUM_NOT_CONFIRMED);
+    }
     this.recordZDatum();
     this.recordXYDatum();
     this.jobPeakWorkZ = null;
@@ -195,6 +198,7 @@ export abstract class SetupMachine extends GuideSpotMachine {
     const top = this.zTravelTop();
 
     if (this.state.hasHomed && top !== null) {
+      await this.sendLine('G21');
       await this.sendLine(`G53 G0 Z${(top - RETRACT_BELOW_PULLOFF_MM).toFixed(3)}`);
       return true;
     }
@@ -202,6 +206,7 @@ export abstract class SetupMachine extends GuideSpotMachine {
     const currentZ = this.state.wpos.z;
     const target = Math.max(currentZ, this.jobPeakWorkZ ?? -Infinity);
     if (target > currentZ + 0.001) {
+      await this.sendLine('G21');
       await this.sendLine(`G90 G0 Z${target.toFixed(3)}`);
     }
     // The datum is the stock top for every program this app writes, so a tool

@@ -14,6 +14,8 @@ const END_OF_JOB_DRAIN_MS = 10 * 60 * 1000;
 
 /** Running a program: start, stream, the pauses it asks for, resume from them, finish. */
 export abstract class JobMachine extends ProbingMachine {
+  /** True while `returnLaserModeAfterJob` is waiting on `G4 P0` before restoring `$32`. */
+  private drainingLaserMode = false;
   /**
    * Runs a program, whichever way this connection runs programs.
    *
@@ -59,7 +61,6 @@ export abstract class JobMachine extends ProbingMachine {
       this.updateState({ lastError: 'A job is already running or paused. Cancel it before starting another.' });
       return null;
     }
-    this.jobContext = { name: options.name, settings: options.settings ?? null };
     if (!this.transport || !this.state.connected) {
       this.updateState({ lastError: 'No machine is connected, so there was nothing to send the job to.' });
       return null;
@@ -81,17 +82,24 @@ export abstract class JobMachine extends ProbingMachine {
 
     /*
      * The checks `startJob` makes before streaming, made here for a job the
-     * box will stream. The package's travel check lives in `streamProgram`,
-     * which a handed-over job never reaches, so a Tekno Box ran programs that
-     * went past the end of an axis that the same machine on a cable refused.
-     * Before the setup bookkeeping below, which a refused job must not touch.
-     * The box streams it, so there is no moment here to borrow `$32` in.
+     * box will stream. The package's travel and position checks live in
+     * `streamProgram`, which a handed-over job never reaches, so a Tekno Box
+     * ran programs with a lost position or past the end of an axis that the
+     * same machine on a cable refused. Before the setup bookkeeping below,
+     * which a refused job must not touch. The box streams it, so there is no
+     * moment here to borrow `$32` in — refuse either mismatch up front.
      */
     if (this.transport.runJob) {
+      const laserOffRefusal =
+        laser && this.state.grblSettings[32] === 0
+          ? 'Laser mode is off ($32=0), which leaves the beam on through every rapid. Send $32=1 before running a laser job.'
+          : null;
       const refusal =
+        this.positionBlockedReason() ??
         this.travelBlockedReason(codes) ??
         this.spindleBlockedReason(codes, laser) ??
-        this.laserModeBlockedReason(!laser);
+        this.laserModeBlockedReason(!laser) ??
+        laserOffRefusal;
       if (refusal) {
         this.updateState({ lastError: refusal });
         return { delivered: false, message: refusal };
@@ -103,12 +111,11 @@ export abstract class JobMachine extends ProbingMachine {
       this.updateState({ lastError: setupRefusal });
       return null;
     }
-    this.runningSetup = options.setup ?? null;
-    // The turn it was waiting for has been made, and its zeros checked.
-    if (options.setup && this.state.setupPending) this.updateState({ setupPending: null });
 
     if (this.transport.runJob) {
       let result: { delivered: boolean; message: string };
+      // Hold off concurrent starts while the handoff request is in flight.
+      this.starting = true;
       try {
         result = await this.transport.runJob(gcode, options);
       } catch (err: unknown) {
@@ -119,12 +126,16 @@ export abstract class JobMachine extends ProbingMachine {
           err instanceof Error ? err.message : 'The job could not be sent to the machine.';
         this.updateState({ status: 'IDLE', lastError: message });
         return { delivered: false, message };
+      } finally {
+        this.starting = false;
       }
       // The device owns the clock now. What comes back arrives as progress over
       // the relay rather than being counted out here.
       // Nothing streams from here, so there is no line to read progress off.
       this.timeline = null;
       if (result.delivered) {
+        this.jobContext = { name: options.name, settings: options.settings ?? null };
+        this.runningSetup = options.setup ?? null;
         // A running job like any other to everything but the streamer: the
         // reports keep it RUNNING, Pause and a disarm stop it, nothing starts
         // over it and nothing moves the machine by hand under it. The last
@@ -139,7 +150,14 @@ export abstract class JobMachine extends ProbingMachine {
         this.beginHandedOverJob(options.origin === 'mcp' ? 'agent' : undefined);
       }
       this.updateState({
-        ...(result.delivered ? { resume: null, park: null, lastCompletedJob: null } : {}),
+        ...(result.delivered
+          ? {
+              resume: null,
+              park: null,
+              lastCompletedJob: null,
+              ...(options.setup && this.state.setupPending ? { setupPending: null } : {}),
+            }
+          : {}),
         status: result.delivered ? 'RUNNING' : 'IDLE',
         estimatedSeconds: options.estimatedSeconds ?? null,
         elapsedSeconds: 0,
@@ -159,7 +177,11 @@ export abstract class JobMachine extends ProbingMachine {
       return result;
     }
 
-    void this.startPrepared(gcode, prepared, laser, options.estimatedSeconds);
+    void this.startPrepared(gcode, prepared, laser, options.estimatedSeconds, {
+      name: options.name,
+      settings: options.settings ?? null,
+      setup: options.setup,
+    });
     return null;
   }
 
@@ -178,7 +200,8 @@ export abstract class JobMachine extends ProbingMachine {
     gcode: string,
     prepared: JobLine[],
     laser: boolean,
-    estimatedSeconds?: number
+    estimatedSeconds?: number,
+    meta?: { name?: string; settings?: Record<string, unknown> | null; setup?: JobSetup }
   ): Promise<void> {
     if (!this.state.connected) return;
     if (this.isJobRunning || this.isPaused || this.starting) return; // see runJob
@@ -193,6 +216,11 @@ export abstract class JobMachine extends ProbingMachine {
     if (refusal) {
       this.updateState({ lastError: refusal });
       return;
+    }
+
+    if (meta) {
+      this.jobContext = { name: meta.name, settings: meta.settings ?? null };
+      this.runningSetup = meta.setup ?? null;
     }
 
     this.jobStartedAt = Date.now();
@@ -221,6 +249,8 @@ export abstract class JobMachine extends ProbingMachine {
       resume: null,
       park: null,
       lastCompletedJob: null,
+      // The turn it was waiting for has been made, and its zeros checked.
+      ...(meta?.setup && this.state.setupPending ? { setupPending: null } : {}),
       // needsZZero is left as-is deliberately: `runJob` has already refused to
       // reach here while Z is untrusted, and clearing it just because a program
       // started would be assuming the operator re-zeroed rather than checking.
@@ -285,8 +315,11 @@ export abstract class JobMachine extends ProbingMachine {
         if (this.state.status === 'RUNNING') this.updateState({ status: 'IDLE', ...ifRefused });
       }
       this.releaseStreamWaiters();
-      // However the job went. `starting` held off the other ways back until now.
-      if (!this.isJobRunning && this.state.status !== 'PAUSED_PARKED') void this.restoreLaserMode();
+      // However the job went. `starting` held off the other ways back until now;
+      // a job that finished normally drains with `G4 P0` first (`drainingLaserMode`).
+      if (!this.isJobRunning && !this.drainingLaserMode && this.state.status !== 'PAUSED_PARKED') {
+        void this.restoreLaserMode();
+      }
     }
   }
 
@@ -331,11 +364,14 @@ export abstract class JobMachine extends ProbingMachine {
    */
   protected async returnLaserModeAfterJob(): Promise<void> {
     if (this.laserModeHome === null) return;
+    this.drainingLaserMode = true;
     try {
       await this.sendLine('G4 P0', { timeoutMs: END_OF_JOB_DRAIN_MS });
     } catch {
       // Stopped some other way, which brings its own chance to restore it.
       return;
+    } finally {
+      this.drainingLaserMode = false;
     }
     if (!this.isJobRunning && !this.starting) await this.restoreLaserMode();
   }
@@ -488,8 +524,10 @@ export abstract class JobMachine extends ProbingMachine {
         });
         return;
       }
+      if (!this.isPaused || this.state.status !== type) return;
     }
     await this.sendLine('G90'); // Absolute, whichever way the lift was made
+    if (!this.isPaused || this.state.status !== type) return;
     // A tool change stays where the program brought it: an exporter that parks
     // chooses that spot, over stock Z can be taken from again.
     if (type !== 'PAUSED_TOOL') await this.sendLine('G0 X0.000 Y0.000'); // Where the work can be reached
@@ -659,7 +697,7 @@ export abstract class JobMachine extends ProbingMachine {
     });
     for (const line of prepareJobLines(plan.preamble.join('\n'))) {
       if (!this.isPaused) return;
-      await this.sendAndWait(line.code);
+      await this.sendLine(line.code);
     }
   }
 }

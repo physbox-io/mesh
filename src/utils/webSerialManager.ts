@@ -164,7 +164,7 @@ class WebSerialManager extends RecoveryMachine {
    * stated where it is enforced.
    */
   private async applyRemoteCommands(commands: RemoteCommand[]): Promise<void> {
-    if (!commands?.length || !this.isRunning()) return;
+    if (!commands?.length || (!this.isRunning() && !this.starting)) return;
 
     for (const c of commands) {
       try {

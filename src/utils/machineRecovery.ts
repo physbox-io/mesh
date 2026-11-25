@@ -182,9 +182,10 @@ export abstract class RecoveryMachine extends JobMachine {
       return { ok: false, message: blocked };
     }
 
+    const laser = this.jobIsLaser(options?.isLaser);
     const plan = planResume(this.program.map((l) => l.code), fromLine, {
       ...options,
-      isLaser: this.jobIsLaser(options?.isLaser),
+      isLaser: laser,
       currentZ: this.state.wpos.z,
       arrivingAtPause: this.lineIsPause(fromLine),
     });
@@ -196,9 +197,13 @@ export abstract class RecoveryMachine extends JobMachine {
     const preamble = [...prefix, ...prepareJobLines(plan.preamble.join('\n'))];
     const tail = this.program.slice(plan.fromLine);
     // From wherever the tool was jogged to, the rest of the job still has to
-    // fit the machine.
-    const offTheBed = this.travelBlockedReason([...preamble, ...tail].map((l) => l.code));
-    if (offTheBed) return { ok: false, message: offTheBed };
+    // fit the machine and stay within the connected controller's spindle ceiling.
+    const fullCodes = [...preamble, ...tail].map((l) => l.code);
+    const refusal = this.travelBlockedReason(fullCodes) ?? this.spindleBlockedReason(fullCodes, laser);
+    if (refusal) {
+      this.updateState({ lastError: refusal });
+      return { ok: false, message: refusal };
+    }
 
     const offer: ResumePoint = this.state.resume ?? {
       fromLine: plan.fromLine,
@@ -225,11 +230,13 @@ export abstract class RecoveryMachine extends JobMachine {
       ...this.beginCutTracking(plan.fromLine),
       totalLines: this.programLength(),
       resume: null,
+      park: null,
       pauseMessage: undefined,
+      lastError: undefined,
       lastCompletedJob: null,
     });
 
-    void this.beginStreaming([...preamble.map((l) => l.code), ...tail.map((l) => l.code)], { resume: offer });
+    void this.beginStreaming(fullCodes, { resume: offer });
 
     return {
       ok: true,
@@ -445,8 +452,12 @@ export abstract class RecoveryMachine extends JobMachine {
 
     // The preamble's retract is clamped to the live Z, so read it from now.
     await this.awaitStatus();
-    this.updateState({ park: null, pauseMessage: undefined });
-    return this.resumeFromLine(park.fromLine, options).ok;
+    // An alarm, disconnect or discard during the status wait leaves nothing to resume.
+    const currentPark = this.state.park;
+    if (!currentPark || this.state.status !== 'PAUSED_PARKED') return false;
+    // `resumeFromLine` clears `park` only after travel/spindle checks pass, so a
+    // refusal leaves the park intact and the machine never strands in PAUSED_PARKED.
+    return this.resumeFromLine(currentPark.fromLine, options).ok;
   }
 
   /**

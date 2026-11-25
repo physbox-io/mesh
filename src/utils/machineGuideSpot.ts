@@ -72,13 +72,27 @@ export abstract class GuideSpotMachine extends MachineCore {
      * moment it goes out. `$32` is only accepted in Idle, which the state check
      * above has already established.
      */
+    // Wait for any background `$32` restore to finish so it cannot overwrite
+    // our borrow immediately after we turn the spot on.
+    if (this.laserModeRestoring) {
+      await this.laserModeRestoring;
+      const now = this.getState();
+      if (!now.connected || this.isJobRunning || this.starting || now.status === 'ALARM') return;
+    }
+
     if (this.laserModeEnabled()) {
       // A parked job's borrow may already want it at 0 afterwards.
       const home = this.laserModeHome ?? 1;
+      const prevHome = this.laserModeHome;
       // Written down before the setting is changed, not after: the case this
       // covers is the page disappearing between the two.
       writeLaserModeBorrowed(home === 1 ? 1 : null);
-      await this.sendLine('$32=0');
+      try {
+        await this.sendLine('$32=0');
+      } catch (err) {
+        writeLaserModeBorrowed(prevHome);
+        throw err;
+      }
       this.noteLaserMode(0);
       this.laserModeHome = home === 1 ? 1 : null;
     }
