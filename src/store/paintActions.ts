@@ -35,7 +35,7 @@ export interface PaintActions {
    */
   setGeomTextures: (nodeId: string, geomName: string, textures: SurfaceTexture[] | undefined) => void;
   /** Replace a geom's knife seams (SceneGeom.faceSplits). One undo step; no recompile. */
-  setGeomFaceSplits: (nodeId: string, geomName: string, splits: FaceSplit[] | undefined) => void;
+  setGeomFaceSplits: (nodeId: string, geomName: string, splits: FaceSplit[] | undefined, recordUndo?: boolean) => void;
   /** Sets a body's base colour — one geom by name, or all of them. */
   setGeomColor: (nodeId: string, geomName: string | undefined, rgba: number[]) => void;
   /** Takes the paint off every geom of the scene. */
@@ -105,10 +105,10 @@ export function paintActions({ set, get }: SliceDeps): PaintActions {
       set({ sceneGraph: newScene });
     },
 
-    setGeomFaceSplits: (nodeId, geomName, splits) => {
+    setGeomFaceSplits: (nodeId, geomName, splits, recordUndo = true) => {
       const existing = findNode(get().sceneGraph.nodes, nodeId);
       if (!existing?.geoms?.some((geom: SceneGeom) => geom.name === geomName)) return;
-      get().prepareForDiscreteChange();
+      if (recordUndo) get().prepareForDiscreteChange();
       const newScene = cloneSceneGraph(get().sceneGraph);
       const geom = findNode(newScene.nodes, nodeId)?.geoms?.find((g: SceneGeom) => g.name === geomName);
       if (!geom) return;

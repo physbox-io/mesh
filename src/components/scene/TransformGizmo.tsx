@@ -52,7 +52,7 @@ import { metresPerPixel } from '../../utils/cameraScale';
 import { getStickyRotation } from '../../utils/geom';
 import { solveMate, solveAlignAboutAxis, type MateFeature, type MateSolution, type AlignSolution } from '../../utils/mateSnap';
 import { bodyFeatures, neighbourFeatures, transformFeatures, documentAxes, graphAxes } from '../../utils/mateFeatures';
-import { bodyPoseOf, readBodyPoseInto, toParentFrame, type BodyPoseCache } from './bodyPose';
+import { bodyPoseOf, readBodyPoseInto, toParentFrame, toParentQuat, type BodyPoseCache } from './bodyPose';
 import { setGizmoBusy } from './gizmoBusy';
 import { ensureModifierKeys, modifiers } from '../../utils/modifierKeys';
 
@@ -194,6 +194,20 @@ const originOf = (state: Drag, position: THREE.Vector3): THREE.Vector3 =>
 /** How far the handles have been turned from where they started. */
 const turnOf = (state: Drag, quaternion: THREE.Quaternion): THREE.Quaternion =>
   quaternion.clone().multiply(state.startQuat.clone().invert());
+
+/**
+ * Whether two orientations differ by more than `eps` radians.
+ * Handles quaternion double-cover (`q` vs `-q`) and non-finite inputs safely.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function hasRotationDelta(
+  startQuat: THREE.Quaternion,
+  currentQuat: THREE.Quaternion,
+  eps = 1e-6,
+): boolean {
+  const angle = startQuat.angleTo(currentQuat);
+  return Number.isFinite(angle) && angle > eps;
+}
 
 /**
  * Which ring is being dragged, as a direction in the frame the drag works in.
@@ -463,6 +477,7 @@ export const TransformGizmo = () => {
   const controlsRef = useRef<{ axis?: string | null } | null>(null);
   const [proxyMounted, setProxyMounted] = useState(false);
   const drag = useRef<Drag | null>(null);
+  const gizmoBusyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Alt and Shift are read at the moment of a pointer move rather than
   // subscribed to, so picking one up mid-drag takes effect on the next move.
   const pointer = useRef({ x: 0, y: 0 });
@@ -696,7 +711,11 @@ export const TransformGizmo = () => {
     setGestureStatus(null);
     // Cleared a tick late, because the click synthesised after a mouse-up on a
     // handle is what would otherwise clear the selection.
-    setTimeout(() => setGizmoBusy(false), 0);
+    if (gizmoBusyTimer.current !== null) clearTimeout(gizmoBusyTimer.current);
+    gizmoBusyTimer.current = setTimeout(() => {
+      gizmoBusyTimer.current = null;
+      setGizmoBusy(false);
+    }, 0);
   }, [setGestureStatus]);
 
   /** Put a drag back where it started, and end it without telling the store. */
@@ -722,6 +741,11 @@ export const TransformGizmo = () => {
     const proxy = proxyRef.current;
     const target = node;
     if (!proxy || !target) return;
+    if (drag.current) cancel();
+    if (gizmoBusyTimer.current !== null) {
+      clearTimeout(gizmoBusyTimer.current);
+      gizmoBusyTimer.current = null;
+    }
 
     useStore.getState().flushPendingUndo();
     setGizmoBusy(true);
@@ -830,7 +854,7 @@ export const TransformGizmo = () => {
       gatheredAt: here,
       gatherRadius,
     };
-  }, [camera, gl, groundZFor, groupsFor, node, scene]);
+  }, [camera, cancel, gl, groundZFor, groupsFor, node, scene]);
 
   /**
    * Re-gather the stationary features when the drag has left where they were
@@ -1079,6 +1103,12 @@ export const TransformGizmo = () => {
       return;
     }
 
+    const liveTarget = findNode(store.sceneGraph?.nodes ?? [], state.nodeId);
+    if (!liveTarget) {
+      finish(state);
+      return;
+    }
+
     if (state.mode === 'translate') {
       // `pos` is the body origin, like qpos — so the drag is a delta on where
       // the origin was, not the handle position.
@@ -1086,15 +1116,16 @@ export const TransformGizmo = () => {
       const to: [number, number, number] = [moved.x, moved.y, moved.z];
       // A click that did not drag is a click, not a move — and a no-op
       // `updateNodePos` would still cost a rebuild and an undo entry.
-      if (to.some((v, i) => Math.abs(v - state.originStart[i]) > 1e-6)) {
+      if (to.every(Number.isFinite) && to.some((v, i) => Math.abs(v - state.originStart[i]) > 1e-6)) {
         // `pos` is parent-relative and a free joint's qpos is global, so the
         // same point goes to the two of them in two different frames.
         store.updateNodePos(state.nodeId, toParentFrame(state.nodeId, to));
+        store.flushPendingUndo();
         if (state.joint) {
           getPhysicsWorkerClient().setQpos(state.joint, 0, to);
         }
       }
-    } else if (!turnOf(state, proxy.quaternion).equals(new THREE.Quaternion())) {
+    } else if (hasRotationDelta(state.startQuat, proxy.quaternion)) {
       /*
        * WHICH EULER ORDER depends on what the body is made of, because the app
        * has two and they disagree.
@@ -1116,18 +1147,22 @@ export const TransformGizmo = () => {
        * They collapse into a single rebuild: `updateNodeRotation` asks the
        * recompile to settle for exactly this reason.
        */
-      const baked = !!node?.geoms?.length && node.geoms.every((g) => g.type === 'mesh');
-      const euler = new THREE.Euler().setFromQuaternion(bodyQuatOf(state, proxy.quaternion), baked ? 'ZYX' : 'XYZ');
+      const baked = !!liveTarget.geoms?.length && liveTarget.geoms.every((g) => g.type === 'mesh');
+      const worldQuat = bodyQuatOf(state, proxy.quaternion);
+      const localQuat = toParentQuat(state.nodeId, worldQuat);
+      const euler = new THREE.Euler().setFromQuaternion(localQuat, baked ? 'ZYX' : 'XYZ');
       const degrees = [euler.x, euler.y, euler.z].map((rad) => {
         const deg = THREE.MathUtils.radToDeg(rad);
         return ((deg % 360) + 360) % 360; // The sidebar's sliders run 0–360.
       });
-      ([0, 1, 2] as const).forEach((axis) => store.updateNodeRotation(state.nodeId, axis, degrees[axis]));
-      // As with a move: the scene graph now agrees, so put the live sim there
-      // too rather than waiting for the rebuild to show the turn.
-      if (state.joint) {
-        const q = bodyQuatOf(state, proxy.quaternion);
-        getPhysicsWorkerClient().setQpos(state.joint, 3, [q.w, q.x, q.y, q.z]);
+      if (degrees.every(Number.isFinite)) {
+        ([0, 1, 2] as const).forEach((axis) => store.updateNodeRotation(state.nodeId, axis, degrees[axis]));
+        store.flushPendingUndo();
+        // As with a move: the scene graph now agrees, so put the live sim there
+        // too rather than waiting for the rebuild to show the turn.
+        if (state.joint) {
+          getPhysicsWorkerClient().setQpos(state.joint, 3, [worldQuat.w, worldQuat.x, worldQuat.y, worldQuat.z]);
+        }
       }
     }
 
@@ -1135,7 +1170,7 @@ export const TransformGizmo = () => {
     // the drag ends, whatever the body was turned to.
     settling.current = { pos: proxy.position.clone(), quat: new THREE.Quaternion() };
     finish(state);
-  }, [finish, node]);
+  }, [finish]);
 
   const handleMouseUp = commit;
 
@@ -1165,10 +1200,12 @@ export const TransformGizmo = () => {
     if (!state || !spin || !proxy) return;
 
     let angle = bearing(x, y) - spin.from;
+    if (!Number.isFinite(angle)) return;
     if (modifiers().shift) {
       const step = THREE.MathUtils.degToRad(ROTATION_SNAP_DEG);
       angle = Math.round(angle / step) * step;
     }
+    if (Math.abs(angle) > 1e-6) state.moved = true;
     const axis = new THREE.Vector3(spin.axis === 'x' ? 1 : 0, spin.axis === 'y' ? 1 : 0, spin.axis === 'z' ? 1 : 0);
     // Turned about the WORLD axis, not the body's own: "rotate about Z" means
     // the Z the orientation legend shows, which is what X/Y/Z name here.
@@ -1284,15 +1321,20 @@ export const TransformGizmo = () => {
       event.preventDefault();
       event.stopPropagation();
     };
+    const onBlur = () => {
+      if (modal.current) live.current.cancel();
+    };
     window.addEventListener('pointermove', move, true);
     window.addEventListener('pointerdown', down, true);
     window.addEventListener('pointerup', swallow, true);
     window.addEventListener('contextmenu', swallow, true);
+    window.addEventListener('blur', onBlur);
     return () => {
       window.removeEventListener('pointermove', move, true);
       window.removeEventListener('pointerdown', down, true);
       window.removeEventListener('pointerup', swallow, true);
       window.removeEventListener('contextmenu', swallow, true);
+      window.removeEventListener('blur', onBlur);
     };
   }, []);
 
@@ -1301,8 +1343,20 @@ export const TransformGizmo = () => {
   // applied, and the canvas gets its clicks back. Without this the app is left
   // unable to deselect anything.
   useEffect(() => {
-    if (suppressed) cancel();
-  }, [suppressed, cancel]);
+    if (suppressed || (drag.current && drag.current.nodeId !== selectedNodeId)) cancel();
+  }, [suppressed, selectedNodeId, cancel]);
+
+  // Ensure unmounting mid-drag never leaves gizmoBusy stuck or ghosts orphaned.
+  useEffect(() => () => {
+    if (gizmoBusyTimer.current !== null) {
+      clearTimeout(gizmoBusyTimer.current);
+      gizmoBusyTimer.current = null;
+    }
+    if (drag.current) {
+      live.current.cancel();
+      setGizmoBusy(false);
+    }
+  }, []);
 
   if (suppressed || !node) return null;
 

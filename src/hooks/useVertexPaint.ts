@@ -66,12 +66,22 @@ export interface VertexPaintResult {
   cursorRef: React.RefObject<THREE.Mesh | null>;
 }
 
+/**
+ * Computes a positive finite mean scale factor from an object's world scale,
+ * safe for mirrored (negative scale), collapsed (zero), or non-finite transforms.
+ */
+export function resolveBrushScale(worldScale: THREE.Vector3): number {
+  const mean = (Math.abs(worldScale.x) + Math.abs(worldScale.y) + Math.abs(worldScale.z)) / 3;
+  return Number.isFinite(mean) && mean > 1e-9 ? mean : 1;
+}
+
 export function useVertexPaint({
   nodeId, name, geometry, baseColor, layer, res, enabled, setOrbitEnabled, onStrokeStart,
 }: VertexPaintOptions): VertexPaintResult {
   const canvasRef = useRef<PaintCanvas | null>(null);
   const cursorRef = useRef<THREE.Mesh | null>(null);
   const dirtyRef = useRef(false);
+  const strokeActiveRef = useRef(false);
   const lastPoint = useRef<THREE.Vector3 | null>(null);
 
   const vertexCount = geometry?.getAttribute('position')?.count ?? 0;
@@ -89,7 +99,7 @@ export function useVertexPaint({
     canvasRef.current = canvas;
 
     let attr = geometry.getAttribute('color') as THREE.BufferAttribute | undefined;
-    if (!attr || attr.count !== vertexCount) {
+    if (!attr || attr.count !== vertexCount || attr.itemSize !== 3 || !(attr.array instanceof Float32Array)) {
       attr = new THREE.BufferAttribute(new Float32Array(vertexCount * 3), 3);
       geometry.setAttribute('color', attr);
     }
@@ -128,7 +138,7 @@ export function useVertexPaint({
     // its local space is not to scale. The mean is what keeps a 6 mm brush
     // roughly 6 mm across on one; on everything else the scale is uniform and
     // this is exact.
-    const scale = (worldScale.x + worldScale.y + worldScale.z) / 3 || 1;
+    const scale = resolveBrushScale(worldScale);
     return { point, scale };
   }, []);
 
@@ -157,10 +167,11 @@ export function useVertexPaint({
     }
     cursor.visible = true;
     cursor.position.copy(point);
-    if (normal) {
+    if (normal && normal.lengthSq() > 1e-12) {
       cursor.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal.clone().normalize());
     }
-    const size = Math.max(1e-4, useStore.getState().paintRadius / scale);
+    const rawRadius = useStore.getState().paintRadius;
+    const size = Math.max(1e-4, (Number.isFinite(rawRadius) ? rawRadius : 0.008) / scale);
     cursor.scale.set(size, size, size);
   }, []);
 
@@ -170,11 +181,12 @@ export function useVertexPaint({
     const canvas = canvasRef.current;
     dirtyRef.current = false;
     if (!canvas) return;
-    useStore.getState().setGeomPaint(nodeId, name, layerFromCanvas(canvas));
-    // One undo step per stroke, as the paint help promises. Left to the
-    // history's 800 ms debounce, strokes laid down quickly merged into one,
-    // and Ctrl+Z took several back at once.
-    useStore.getState().flushPendingUndo();
+    const store = useStore.getState();
+    // Flush any preceding paint interaction (e.g. clearAllPaint) so this stroke
+    // always gets its own atomic undo entry, then flush immediately after.
+    store.flushPendingUndo();
+    store.setGeomPaint(nodeId, name, layerFromCanvas(canvas));
+    store.flushPendingUndo();
   }, [nodeId, name]);
 
   // A stroke can end anywhere — off the body, off the canvas, outside the
@@ -184,6 +196,10 @@ export function useVertexPaint({
     if (!enabled) return;
     const end = () => {
       lastPoint.current = null;
+      if (strokeActiveRef.current) {
+        strokeActiveRef.current = false;
+        setOrbitEnabled(true);
+      }
       commit();
     };
     window.addEventListener('pointerup', end);
@@ -197,7 +213,7 @@ export function useVertexPaint({
       // the stroke away.
       end();
     };
-  }, [enabled, commit]);
+  }, [enabled, commit, setOrbitEnabled]);
 
   const handlers = useMemo(() => {
     if (!enabled || !geometry || !nodeId) return {};
@@ -221,6 +237,7 @@ export function useVertexPaint({
         }
 
         onStrokeStart();
+        strokeActiveRef.current = true;
         // On a touch screen the drag that paints is the drag that orbits, so
         // without this the model spins away from under the brush.
         setOrbitEnabled(false);
@@ -242,8 +259,11 @@ export function useVertexPaint({
         const erase = !!(event.nativeEvent?.ctrlKey || event.nativeEvent?.metaKey);
         // Interpolate along the drag so a fast stroke is a line rather than a
         // row of dots.
-        const spacing = Math.max(1e-5, (useStore.getState().paintRadius / scale) * SPACING_FRACTION);
+        const rawRadius = useStore.getState().paintRadius;
+        const radius = Number.isFinite(rawRadius) && rawRadius > 0 ? rawRadius : 0.008;
+        const spacing = Math.max(1e-5, (radius / scale) * SPACING_FRACTION);
         const travelled = point.distanceTo(previous);
+        if (!Number.isFinite(travelled)) return;
         const steps = Math.min(64, Math.floor(travelled / spacing));
         for (let i = 1; i <= steps; i++) {
           stamp(previous.clone().lerp(point, i / steps), scale, erase);

@@ -157,6 +157,25 @@ export function toParentFrame(nodeId: string, world: [number, number, number]): 
   return [local.x, local.y, local.z];
 }
 
+/**
+ * A world orientation, expressed in the frame a body's `euler` is written in.
+ *
+ * Like `toParentFrame` for positions: a top-level body hangs off worldbody so
+ * its orientation passes straight through, whereas a nested child of a rotated
+ * parent must have the parent's world rotation factored out before decomposing
+ * into `node.euler`.
+ */
+export function toParentQuat(nodeId: string, world: THREE.Quaternion): THREE.Quaternion {
+  const parent = parentBodyOf(useStore.getState().sceneGraph?.nodes ?? [], nodeId);
+  if (!parent) return world.clone();
+  const pose = bodyPoseOf(parent.id, parent.pos);
+  if (!pose.live) return world.clone();
+  const parentQuat = new THREE.Quaternion().setFromRotationMatrix(
+    new THREE.Matrix4().setFromMatrix3(pose.rot),
+  );
+  return parentQuat.invert().multiply(world).normalize();
+}
+
 /** Moves smaller than these are contact settling, not someone moving a part. */
 const MOVED_M = 0.0002;
 const TURNED_RAD = THREE.MathUtils.degToRad(0.5);

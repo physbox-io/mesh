@@ -63,6 +63,29 @@ function parentNode(nodes: SceneNode[], id: string, parent: SceneNode | null = n
 
 type Axis = 'x' | 'y' | 'z';
 
+/**
+ * Normal of the drag plane facing the camera through a target point.
+ * When constrained to `axis`, returns a plane containing `axis` and facing
+ * the camera as squarely as possible; falls back to a perpendicular axis when
+ * looking straight down `axis` (never parallel to `axis`).
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function axisPlaneNormal(eye: THREE.Vector3, axis: Axis | null): THREE.Vector3 | null {
+  if (!Number.isFinite(eye.x) || !Number.isFinite(eye.y) || !Number.isFinite(eye.z)) return null;
+  let normal: THREE.Vector3;
+  if (axis) {
+    const along = new THREE.Vector3(axis === 'x' ? 1 : 0, axis === 'y' ? 1 : 0, axis === 'z' ? 1 : 0);
+    normal = eye.clone().sub(along.clone().multiplyScalar(eye.dot(along)));
+    if (normal.lengthSq() < 1e-9) {
+      normal.set(axis === 'z' ? 1 : 0, 0, axis === 'z' ? 0 : 1);
+    }
+  } else {
+    normal = eye.clone();
+    if (normal.lengthSq() < 1e-12) return null;
+  }
+  return normal.normalize();
+}
+
 /** What a group looked like before the gesture touched it. */
 interface Held {
   object: THREE.Object3D;
@@ -414,8 +437,9 @@ export const ObjectGestureController = () => {
    * every number here is a MuJoCo world coordinate and can be handed to the
    * store as it stands.
    */
-  const rayIn = useCallback((parent: THREE.Object3D, x: number, y: number) => {
+  const rayIn = useCallback((parent: THREE.Object3D, x: number, y: number): THREE.Ray | null => {
     const rect = gl.domElement.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0) || !Number.isFinite(x) || !Number.isFinite(y)) return null;
     const caster = new THREE.Raycaster();
     caster.setFromCamera(
       new THREE.Vector2(((x - rect.left) / rect.width) * 2 - 1, -(((y - rect.top) / rect.height) * 2 - 1)),
@@ -523,16 +547,10 @@ export const ObjectGestureController = () => {
    */
   const planeHit = useCallback((parent: THREE.Object3D, x: number, y: number, through: THREE.Vector3, axis: Axis | null) => {
     const ray = rayIn(parent, x, y);
+    if (!ray) return null;
     const eye = ray.origin.clone().sub(through);
-    let normal: THREE.Vector3;
-    if (axis) {
-      const along = new THREE.Vector3(axis === 'x' ? 1 : 0, axis === 'y' ? 1 : 0, axis === 'z' ? 1 : 0);
-      normal = eye.clone().sub(along.clone().multiplyScalar(eye.dot(along)));
-      if (normal.lengthSq() < 1e-9) normal.set(0, 0, 1); // looking down the axis
-    } else {
-      normal = eye.clone();
-    }
-    normal.normalize();
+    const normal = axisPlaneNormal(eye, axis);
+    if (!normal) return null;
     const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, through);
     return ray.intersectPlane(plane, new THREE.Vector3());
   }, [rayIn]);
@@ -577,17 +595,19 @@ export const ObjectGestureController = () => {
         // An open surface has no inside: the pointer can raise a boss from
         // it, and pushing in stops at the face.
         const ray = rayIn(parent, pointer.current.x, pointer.current.y);
-        const toEye = ray.origin.clone().sub(face.at);
-        const across = toEye.sub(face.normal.clone().multiplyScalar(toEye.dot(face.normal)));
-        if (across.lengthSq() > 1e-12) {
-          const hit = ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(across.normalize(), face.at), new THREE.Vector3());
-          if (hit) {
-            face.depth = face.startDepth + hit.sub(face.at).dot(face.normal) - face.from;
-            face.sinking = !region.closed && face.depth < 0;
-            if (face.sinking) face.depth = 0;
-            // Past the far side of the part is right through, and stays so
-            // however much further the pointer goes.
-            face.through = face.thickness > 0 && -face.depth >= face.thickness;
+        if (ray) {
+          const toEye = ray.origin.clone().sub(face.at);
+          const across = toEye.sub(face.normal.clone().multiplyScalar(toEye.dot(face.normal)));
+          if (across.lengthSq() > 1e-12) {
+            const hit = ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(across.normalize(), face.at), new THREE.Vector3());
+            if (hit) {
+              face.depth = face.startDepth + hit.sub(face.at).dot(face.normal) - face.from;
+              face.sinking = !region.closed && face.depth < 0;
+              if (face.sinking) face.depth = 0;
+              // Past the far side of the part is right through, and stays so
+              // however much further the pointer goes.
+              face.through = face.thickness > 0 && -face.depth >= face.thickness;
+            }
           }
         }
       }
@@ -659,6 +679,7 @@ export const ObjectGestureController = () => {
       const node = findNode(useStore.getState().sceneGraph.nodes, state.nodeId);
       if (!node) return;
       const ray = rayIn(parent, pointer.current.x, pointer.current.y);
+      if (!ray) return;
       const pose = bodyPoseOf(state.nodeId, node.pos);
       const toBody = pose.rot.clone().transpose();
       const origin = ray.origin.clone().sub(pose.pos).applyMatrix3(toBody);
@@ -877,6 +898,7 @@ export const ObjectGestureController = () => {
       clear();
       // Previewed by rebuilding as it went, so a cancel has to rebuild back.
       if (!keep && hw.shown !== hw.start) hw.apply(hw.sizes[hw.start]);
+      useStore.getState().flushPendingUndo();
       return;
     }
     if (kind === 'face' && state.face) {
@@ -920,16 +942,22 @@ export const ObjectGestureController = () => {
     clear(!(keep && kind === 'move'));
     if (kind === 'moveCut') {
       if (!keep || !state.spot || state.geomIndex === undefined) return;
+      if (!findNode(useStore.getState().sceneGraph.nodes, nodeId)) return;
       useStore.getState().moveCutTo(nodeId, state.geomIndex, state.spot);
       return;
     }
     if (kind === 'move') {
       const to = state.to;
       if (!keep || !to || !state.startPos) return;
+      if (!to.every(Number.isFinite)) return;
       if (to.every((v, i) => Math.abs(v - state.startPos![i]) < 1e-6)) return;
+      const store = useStore.getState();
+      if (!findNode(store.sceneGraph.nodes, nodeId)) return;
+      store.flushPendingUndo();
       // `pos` is relative to the parent body; `to` is where the pointer left
       // it, in the world. See toParentFrame.
-      useStore.getState().updateNodePos(nodeId, toParentFrame(nodeId, to));
+      store.updateNodePos(nodeId, toParentFrame(nodeId, to));
+      store.flushPendingUndo();
       // The scene graph now agrees with where the body is; put the live sim
       // there too, since updateNodePos alone would wait for a reset.
       if (state.joint) {
@@ -938,6 +966,7 @@ export const ObjectGestureController = () => {
       return;
     }
     if (!keep || Math.abs(factor - 1) < 0.001) return;
+    if (!findNode(useStore.getState().sceneGraph.nodes, nodeId)) return;
     if (kind === 'scale') {
       const per = (a: Axis) => (axis === null || axis === a ? factor : 1);
       scaleNodeTree(nodeId, per('x'), per('y'), per('z'));
@@ -966,6 +995,7 @@ export const ObjectGestureController = () => {
     const pose = bodyPoseOf(node.id, node.pos);
     const toBody = pose.rot.clone().transpose();
     const ray = rayIn(parent, pointer.current.x, pointer.current.y);
+    if (!ray) return null;
     const origin = ray.origin.clone().sub(pose.pos).applyMatrix3(toBody);
     const direction = ray.direction.clone().applyMatrix3(toBody).normalize();
     let region = flatFaceAt(node, origin.toArray(), direction.toArray());
@@ -1046,7 +1076,7 @@ export const ObjectGestureController = () => {
     const nodeId = store.selectedNodeId;
     // The lattice and sculpt tools have their own S and I, on the thing being
     // edited rather than on the body as a whole.
-    if (!nodeId || store.latticeNodeId || store.sculptNodeId || store.paintMode) return;
+    if (!nodeId || store.latticeNodeId || store.sculptNodeId || store.paintMode || store.multiSelectMode || store.draggedNodeId) return;
     // Measuring is a mode of its own, and it has the pointer.
     if (store.measureMode) return;
     const groups = groupsFor(nodeId);
@@ -1074,6 +1104,7 @@ export const ObjectGestureController = () => {
           : null;
     if (part && !sizing) return;
     if (sizing) {
+      store.flushPendingUndo();
       const start = Math.max(0, sizing.info.sizes.indexOf(sizing.size));
       gesture.current = {
         kind: 'hardwareSize', nodeId, centre: { x: 0, y: 0 }, pivot: new THREE.Vector3(), held: [], ghosts: [],
@@ -1144,9 +1175,11 @@ export const ObjectGestureController = () => {
       const parent = groups[0].parent;
       // `node` was found above, for the cut check.
       if (!parent || !node) return;
-      // The body's own position, not the bounding box centre: that is the
-      // number being changed, and a mesh's box centre is somewhere else.
-      const startPos: [number, number, number] = [node.pos[0], node.pos[1], node.pos[2]];
+      // The body's live world origin, not its bounding box centre and not its
+      // parent-relative authored `pos`: `groundZ`, `setQpos`, and `toParentFrame`
+      // all operate in MuJoCo world coordinates.
+      const liveOrigin = bodyPoseOf(node.id, node.pos).pos;
+      const startPos: [number, number, number] = [liveOrigin.x, liveOrigin.y, liveOrigin.z];
       const through = new THREE.Vector3(...startPos);
       const from = planeHit(parent, pointer.current.x, pointer.current.y, through, null);
       if (!from) return;
@@ -1205,11 +1238,14 @@ export const ObjectGestureController = () => {
       // before the ghosts exist, so the ray cannot land on one of them.
       const rect = gl.domElement.getBoundingClientRect();
       const caster = new THREE.Raycaster();
-      caster.setFromCamera(new THREE.Vector2(
-        ((pointer.current.x - rect.left) / rect.width) * 2 - 1,
-        -(((pointer.current.y - rect.top) / rect.height) * 2 - 1),
-      ), camera);
-      const hit = caster.intersectObjects(groups, true).find((h) => h.face && (h.object as THREE.Mesh).isMesh);
+      const hasRect = rect.width > 0 && rect.height > 0;
+      if (hasRect) {
+        caster.setFromCamera(new THREE.Vector2(
+          ((pointer.current.x - rect.left) / rect.width) * 2 - 1,
+          -(((pointer.current.y - rect.top) / rect.height) * 2 - 1),
+        ), camera);
+      }
+      const hit = hasRect ? caster.intersectObjects(groups, true).find((h) => h.face && (h.object as THREE.Mesh).isMesh) : undefined;
       let aim: { axis: 0 | 1 | 2; side: 1 | -1 };
       if (hit && parent) {
         const normal = hit.face!.normal.clone().transformDirection(hit.object.matrixWorld)
@@ -1407,19 +1443,45 @@ export const ObjectGestureController = () => {
       event.preventDefault();
       event.stopPropagation();
     };
+    const onBlur = () => {
+      if (gesture.current) handlers.current.end(false);
+    };
     window.addEventListener('pointermove', move, true);
     window.addEventListener('pointerdown', down, true);
     window.addEventListener('pointerup', swallow, true);
     window.addEventListener('contextmenu', swallow, true);
+    window.addEventListener('blur', onBlur);
     return () => {
       cancelAnimationFrame(glowFrame);
+      window.clearTimeout(flashTimer.current);
       window.removeEventListener('pointermove', move, true);
       window.removeEventListener('pointerdown', down, true);
       window.removeEventListener('pointerup', swallow, true);
       window.removeEventListener('contextmenu', swallow, true);
+      window.removeEventListener('blur', onBlur);
       handlers.current.clear();
     };
   }, []);
+
+  // Cancel any running gesture if simulation starts, selection changes, the
+  // target node disappears, or another exclusive tool takes over.
+  useEffect(() => useStore.subscribe((state) => {
+    const running = gesture.current;
+    if (!running) return;
+    if (
+      state.isPlaying ||
+      state.selectedNodeId !== running.nodeId ||
+      state.paintMode ||
+      state.measureMode !== null ||
+      state.latticeNodeId !== null ||
+      state.sculptNodeId !== null ||
+      state.multiSelectMode ||
+      state.draggedNodeId !== null ||
+      !findNode(state.sceneGraph?.nodes ?? [], running.nodeId)
+    ) {
+      handlers.current.end(false);
+    }
+  }), []);
 
   // The knife is a pointer tool like these, mounted with them.
   return <FaceKnife />;

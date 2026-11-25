@@ -7,6 +7,32 @@ import type { SceneNode } from '../../types/scene';
 /** How far the pointer has to move before a press is a box rather than a click, px. */
 const DRAG_PX = 5;
 
+/**
+ * Whether a marquee drag covers enough screen distance to commit a selection.
+ * Rejects zero-size or sub-threshold drags (including dragging out and back
+ * to the origin) and non-finite coordinates.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function isValidMarqueeDrag(
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  minPx = DRAG_PX,
+): boolean {
+  if (!Number.isFinite(x0) || !Number.isFinite(y0) || !Number.isFinite(x1) || !Number.isFinite(y1)) {
+    return false;
+  }
+  return Math.hypot(x1 - x0, y1 - y0) >= minPx;
+}
+
+function isFiniteBox(box: THREE.Box3): boolean {
+  return (
+    Number.isFinite(box.min.x) && Number.isFinite(box.min.y) && Number.isFinite(box.min.z) &&
+    Number.isFinite(box.max.x) && Number.isFinite(box.max.y) && Number.isFinite(box.max.z)
+  );
+}
+
 /** True when every material on a mesh is hidden or fully transparent. */
 function isMaterialHidden(material: THREE.Material | THREE.Material[] | undefined): boolean {
   if (!material) return false;
@@ -58,7 +84,7 @@ export function collectVisibleBodyBounds(
       if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
       if (mesh.geometry.boundingBox && !mesh.geometry.boundingBox.isEmpty()) {
         meshBox.copy(mesh.geometry.boundingBox).applyMatrix4(mesh.matrixWorld);
-        if (!meshBox.isEmpty()) {
+        if (!meshBox.isEmpty() && isFiniteBox(meshBox)) {
           centreOf.set(currentOwner, (centreOf.get(currentOwner) ?? new THREE.Box3()).union(meshBox));
         }
       }
@@ -96,6 +122,7 @@ export function MarqueeSelect() {
     if (!on) return;
     const canvas = gl.domElement;
     let start: { x: number; y: number } | null = null;
+    let activePointerId: number | null = null;
     let box: HTMLDivElement | null = null;
     let swallowClick = false;
     let swallowTimer: ReturnType<typeof setTimeout> | null = null;
@@ -114,6 +141,7 @@ export function MarqueeSelect() {
         box = null;
       }
       start = null;
+      activePointerId = null;
     };
 
     const rectOf = (e: PointerEvent) => {
@@ -123,12 +151,13 @@ export function MarqueeSelect() {
     };
 
     const down = (e: PointerEvent) => {
-      if (e.button !== 0 || e.target !== canvas) return;
+      if (e.button !== 0 || e.target !== canvas || activePointerId !== null) return;
       start = { x: e.clientX, y: e.clientY };
+      activePointerId = e.pointerId;
     };
     const move = (e: PointerEvent) => {
-      if (!start) return;
-      if (!box && Math.hypot(e.clientX - start.x, e.clientY - start.y) < DRAG_PX) return;
+      if (!start || e.pointerId !== activePointerId) return;
+      if (!box && !isValidMarqueeDrag(start.x, start.y, e.clientX, e.clientY)) return;
       if (!box) {
         box = document.createElement('div');
         box.style.cssText = 'position:fixed;z-index:40;pointer-events:none;border:1px solid #10b981;background:rgba(16,185,129,0.12);border-radius:2px';
@@ -138,11 +167,12 @@ export function MarqueeSelect() {
       Object.assign(box.style, { left: `${r.x0}px`, top: `${r.y0}px`, width: `${r.x1 - r.x0}px`, height: `${r.y1 - r.y0}px` });
     };
     const up = (e: PointerEvent) => {
-      if (!start) return;
-      if (box) {
-        const r = rectOf(e);
-        box.remove();
-        box = null;
+      if (!start || e.pointerId !== activePointerId || e.button !== 0) return;
+      const hadBox = box !== null;
+      const r = rectOf(e);
+      const valid = hadBox && isValidMarqueeDrag(start.x, start.y, e.clientX, e.clientY);
+      cancelDrag();
+      if (hadBox) {
         clearSwallow();
         swallowClick = true;
         // Clear on the next macrotask so releasing off-canvas (where no
@@ -151,9 +181,21 @@ export function MarqueeSelect() {
           swallowClick = false;
           swallowTimer = null;
         }, 0);
-        useStore.getState().selectMany(bodiesIn(r), e.shiftKey);
+        if (valid) {
+          useStore.getState().selectMany(bodiesIn(r), e.shiftKey || e.ctrlKey || e.metaKey);
+        }
       }
-      start = null;
+    };
+    const onPointerCancel = (e: PointerEvent) => {
+      if (activePointerId !== null && e.pointerId !== activePointerId) return;
+      cancelDrag();
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && start) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        cancelDrag();
+      }
     };
     const click = (e: MouseEvent) => {
       if (!swallowClick) return;
@@ -186,7 +228,8 @@ export function MarqueeSelect() {
     window.addEventListener('pointerdown', down, true);
     window.addEventListener('pointermove', move, true);
     window.addEventListener('pointerup', up, true);
-    window.addEventListener('pointercancel', cancelDrag, true);
+    window.addEventListener('pointercancel', onPointerCancel, true);
+    window.addEventListener('keydown', onKeyDown, true);
     window.addEventListener('blur', cancelDrag);
     window.addEventListener('click', click, true);
     return () => {
@@ -195,7 +238,8 @@ export function MarqueeSelect() {
       window.removeEventListener('pointerdown', down, true);
       window.removeEventListener('pointermove', move, true);
       window.removeEventListener('pointerup', up, true);
-      window.removeEventListener('pointercancel', cancelDrag, true);
+      window.removeEventListener('pointercancel', onPointerCancel, true);
+      window.removeEventListener('keydown', onKeyDown, true);
       window.removeEventListener('blur', cancelDrag);
       window.removeEventListener('click', click, true);
     };

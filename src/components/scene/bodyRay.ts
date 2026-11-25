@@ -28,6 +28,9 @@ export function bodyParent(scene: THREE.Object3D, nodeId: string): THREE.Object3
 /** The ray through a screen point, in `parent`'s own frame. */
 export function rayInParent(parent: THREE.Object3D, camera: THREE.Camera, canvas: HTMLElement, x: number, y: number): THREE.Ray {
   const rect = canvas.getBoundingClientRect();
+  if (!(rect.width > 0) || !(rect.height > 0) || !Number.isFinite(x) || !Number.isFinite(y)) {
+    return new THREE.Ray(new THREE.Vector3(NaN, NaN, NaN), new THREE.Vector3(NaN, NaN, NaN));
+  }
   const caster = new THREE.Raycaster();
   caster.setFromCamera(new THREE.Vector2(((x - rect.left) / rect.width) * 2 - 1, -(((y - rect.top) / rect.height) * 2 - 1)), camera);
   const inverse = new THREE.Matrix4().copy(parent.matrixWorld).invert();

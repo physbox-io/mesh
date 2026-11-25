@@ -572,7 +572,17 @@ export function closestPointOnTriangleBary(
     return { d2: qx * qx + qy * qy + qz * qz, wa: 0, wb: 1 - w, wc: w };
   }
 
-  const denom = 1 / (va + vb + vc);
+  const sum = va + vb + vc;
+  if (!Number.isFinite(sum) || Math.abs(sum) <= 1e-24) {
+    // Degenerate / zero-area triangle: fall back to the nearest vertex.
+    const da = apx * apx + apy * apy + apz * apz;
+    const db = bpx * bpx + bpy * bpy + bpz * bpz;
+    const dc = cpx * cpx + cpy * cpy + cpz * cpz;
+    if (da <= db && da <= dc) return { d2: da, wa: 1, wb: 0, wc: 0 };
+    if (db <= dc) return { d2: db, wa: 0, wb: 1, wc: 0 };
+    return { d2: dc, wa: 0, wb: 0, wc: 1 };
+  }
+  const denom = 1 / sum;
   const v = vb * denom;
   const w = vc * denom;
   const u = 1 - v - w;
@@ -597,12 +607,20 @@ export function applyDab(
   { x, y, z, radius, color, flow, erase, hardness = 0 }: DabOptions,
   faces?: ArrayLike<number> | null,
 ): { lo: number; hi: number } | null {
+  if (
+    !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z) ||
+    !Number.isFinite(radius) || radius <= 0 ||
+    !Number.isFinite(flow) || flow <= 0
+  ) {
+    return null;
+  }
+  const safeHardness = Number.isFinite(hardness) ? hardness : 0;
   const r2 = radius * radius;
   let lo = -1;
   let hi = -1;
 
   const paintVertex = (v: number, amount: number) => {
-    if (amount <= 0 || v < 0 || v >= canvas.count) return;
+    if (!Number.isFinite(amount) || amount <= 0 || v < 0 || v >= canvas.count) return;
     const o = v * 4;
     const a = canvas.data[o + 3];
 
@@ -642,7 +660,7 @@ export function applyDab(
     // an even band instead of a row of visible rims.
     // Hardness holds the middle at full strength and fits the same falloff
     // into what is left of the radius.
-    const core = Math.min(0.95, Math.max(0, hardness));
+    const core = Math.min(0.95, Math.max(0, safeHardness));
     const u = core > 0 ? Math.max(0, (Math.sqrt(d2) / radius - core) / (1 - core)) : 0;
     const t = core > 0 ? 1 - u * u : 1 - d2 / r2;
     const amount = Math.min(1, Math.max(0, t * t * flow));

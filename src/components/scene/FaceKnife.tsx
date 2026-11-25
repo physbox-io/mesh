@@ -74,21 +74,43 @@ const MATERIALS = {
 } as const;
 
 /** Where a plane crosses a surface's triangles, as segments in the surface's frame. */
-function planeSection(positions: ArrayLike<number>, faces: ArrayLike<number>, at: THREE.Vector3, n: THREE.Vector3): number[] {
+// eslint-disable-next-line react-refresh/only-export-components
+export function planeSection(positions: ArrayLike<number>, faces: ArrayLike<number>, at: THREE.Vector3, n: THREE.Vector3): number[] {
   const out: number[] = [];
+  if (
+    !Number.isFinite(at.x) || !Number.isFinite(at.y) || !Number.isFinite(at.z) ||
+    !Number.isFinite(n.x) || !Number.isFinite(n.y) || !Number.isFinite(n.z) ||
+    n.lengthSq() < 1e-18
+  ) {
+    return out;
+  }
+  const vertCount = Math.floor(positions.length / 3);
   const p = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
   const d = [0, 0, 0];
+  const planeOffset = n.dot(at);
   for (let f = 0; f + 2 < faces.length; f += 3) {
+    let valid = true;
     for (let k = 0; k < 3; k++) {
-      p[k].fromArray(positions as number[], 3 * faces[f + k]);
-      d[k] = n.dot(p[k]) - n.dot(at);
+      const idx = faces[f + k];
+      if (!Number.isInteger(idx) || idx < 0 || idx >= vertCount) { valid = false; break; }
+      p[k].fromArray(positions as number[], 3 * idx);
+      if (!Number.isFinite(p[k].x) || !Number.isFinite(p[k].y) || !Number.isFinite(p[k].z)) { valid = false; break; }
+      d[k] = n.dot(p[k]) - planeOffset;
     }
+    if (!valid) continue;
     const hits: THREE.Vector3[] = [];
     for (let k = 0; k < 3; k++) {
       const a = d[k], b = d[(k + 1) % 3];
-      if ((a < 0 && b >= 0) || (a >= 0 && b < 0)) hits.push(p[k].clone().lerp(p[(k + 1) % 3], a / (a - b)));
+      if ((a < 0 && b >= 0) || (a >= 0 && b < 0)) {
+        const denom = a - b;
+        if (Math.abs(denom) > 1e-18) {
+          hits.push(p[k].clone().lerp(p[(k + 1) % 3], a / denom));
+        }
+      }
     }
-    if (hits.length === 2) out.push(...hits[0].toArray(), ...hits[1].toArray());
+    if (hits.length === 2 && hits[0].distanceToSquared(hits[1]) > 1e-18) {
+      out.push(...hits[0].toArray(), ...hits[1].toArray());
+    }
   }
   return out;
 }
@@ -118,6 +140,8 @@ export const FaceKnife = () => {
   const layer = useRef<THREE.Group | null>(null);
   const overlay = useRef<{ svg: SVGSVGElement; line: SVGLineElement; dot: SVGCircleElement } | null>(null);
   const frame = useRef(0);
+  const mounted = useRef(true);
+  const flashTimer = useRef<number | undefined>(undefined);
 
   const selected = useCallback((): { node: SceneNode; parent: THREE.Object3D } | null => {
     const store = useStore.getState();
@@ -179,11 +203,13 @@ export const FaceKnife = () => {
       const centre = centreOf(node);
       if (centre) {
         const c = toScreen(node, parent)(centre);
-        const ux = (x1 - x0) / length, uy = (y1 - y0) / length;
-        const off = (c.x - x0) * -uy + (c.y - y0) * ux;
-        if (Math.abs(off) < CENTRE_SNAP_PX) {
-          x0 += -uy * off; y0 += ux * off; x1 += -uy * off; y1 += ux * off;
-          throughCentre = true;
+        if (c.front && Number.isFinite(c.x) && Number.isFinite(c.y)) {
+          const ux = (x1 - x0) / length, uy = (y1 - y0) / length;
+          const off = (c.x - x0) * -uy + (c.y - y0) * ux;
+          if (Math.abs(off) < CENTRE_SNAP_PX) {
+            x0 += -uy * off; y0 += ux * off; x1 += -uy * off; y1 += ux * off;
+            throughCentre = true;
+          }
         }
       }
     }
@@ -198,7 +224,8 @@ export const FaceKnife = () => {
     const o2 = new THREE.Vector3().fromArray(b.origin), d2 = new THREE.Vector3().fromArray(b.direction);
     // Through both rays: d1 × d2 for a perspective eye, d × (o2 − o1) for an orthographic one.
     const normal = d1.clone().cross(o2.clone().add(d2).sub(o1));
-    if (normal.lengthSq() < 1e-18) return null;
+    const lenSq = normal.lengthSq();
+    if (!Number.isFinite(lenSq) || lenSq < 1e-18) return null;
     normal.normalize();
     const centre = centreOf(node) ?? o1;
     const at = centre.clone().addScaledVector(normal, -normal.dot(centre.clone().sub(o1)));
@@ -361,7 +388,8 @@ export const FaceKnife = () => {
 
   const flash = useCallback((text: string) => {
     setGestureStatus(text);
-    window.setTimeout(() => {
+    window.clearTimeout(flashTimer.current);
+    flashTimer.current = window.setTimeout(() => {
       if (useStore.getState().gestureStatus === text) setGestureStatus(armed.current ? idleStatus(separate.current) : null);
     }, 3500);
   }, [setGestureStatus]);
@@ -390,15 +418,15 @@ export const FaceKnife = () => {
       try {
         const { soups, absorbed } = knifeSoups(node);
         const result = await cutAlongPlaneOffThread(soups, cut.at.toArray(), cut.normal.toArray());
-        if (!result.ok) { flash(result.error); return; }
+        if (!result.ok) { if (mounted.current && armed.current) flash(result.error); return; }
         const liveStore = useStore.getState();
         const liveNode = findNodeById(liveStore.sceneGraph.nodes, node.id);
-        if (liveStore.isPlaying || !liveNode) return;
+        if (!mounted.current || !armed.current || liveStore.isPlaying || liveStore.selectedNodeId !== node.id || !liveNode) return;
         const carry = carryAcrossCut(liveNode, result.sections, cut.at.toArray(), cut.normal.toArray());
         liveStore.splitBodyForPrint(node.id, result.sections, absorbed, { plain: true, carry });
         flash(`Cut into ${result.sections.length} pieces`);
       } catch (err) {
-        flash(err instanceof Error ? err.message : 'Knife cut failed');
+        if (mounted.current && armed.current) flash(err instanceof Error ? err.message : 'Knife cut failed');
       } finally {
         busy.current = false;
       }
@@ -412,13 +440,15 @@ export const FaceKnife = () => {
     }
     let made = 0;
     // Kept only where it divides something: a line along an edge leaves no seam.
+    // Record undo only on the first geom so a multi-geom stroke is one undo step.
     for (const [geomName, added] of byGeom) {
       const liveNode = findNodeById(useStore.getState().sceneGraph.nodes, node.id);
       const own = liveNode?.geoms?.find((g) => g.name === geomName);
       if (!own) continue;
-      useStore.getState().setGeomFaceSplits(node.id, geomName, [...(own.faceSplits ?? []), ...added]);
+      useStore.getState().setGeomFaceSplits(node.id, geomName, [...(own.faceSplits ?? []), ...added], made === 0);
       made += added.length;
     }
+    if (made > 0) useStore.getState().flushPendingUndo();
     if (!made) flash('Draw the line across the part to split its face');
   }, [cutOf, flash, seamAt, selected, setGestureStatus, snapped]);
 
@@ -448,7 +478,7 @@ export const FaceKnife = () => {
       }
       if (key !== 'k' || event.metaKey || event.ctrlKey || event.altKey) return;
       const store = useStore.getState();
-      if (store.isPlaying || store.latticeNodeId || store.sculptNodeId || store.paintMode || store.measureMode || store.gestureStatus) return;
+      if (store.isPlaying || store.latticeNodeId || store.sculptNodeId || store.paintMode || store.measureMode || store.multiSelectMode || store.draggedNodeId || store.gestureStatus) return;
       if (!store.selectedNodeId) return;
       event.preventDefault();
       arm();
@@ -492,9 +522,15 @@ export const FaceKnife = () => {
       // The seam under the pointer before the drag may be gone, or a new one there now.
       const onCanvas = event.target === gl.domElement;
       void finish(d).then(() => {
+        if (!mounted.current || !armed.current) return;
         hot.current = onCanvas ? seamAt(event.clientX, event.clientY) : null;
         schedule();
       });
+    };
+    const cancelDrag = () => {
+      if (!drag.current) return;
+      drag.current = null;
+      schedule();
     };
     // A click that is the end of a line is not a selection.
     const swallowClick = (event: MouseEvent) => {
@@ -509,6 +545,8 @@ export const FaceKnife = () => {
     window.addEventListener('pointerdown', down, true);
     window.addEventListener('pointermove', move, true);
     window.addEventListener('pointerup', up, true);
+    window.addEventListener('pointercancel', cancelDrag, true);
+    window.addEventListener('blur', cancelDrag);
     window.addEventListener('click', swallowClick, true);
     return () => {
       window.removeEventListener('keydown', onKey, true);
@@ -517,28 +555,51 @@ export const FaceKnife = () => {
       window.removeEventListener('pointerdown', down, true);
       window.removeEventListener('pointermove', move, true);
       window.removeEventListener('pointerup', up, true);
+      window.removeEventListener('pointercancel', cancelDrag, true);
+      window.removeEventListener('blur', cancelDrag);
       window.removeEventListener('click', swallowClick, true);
     };
   }, [arm, disarm, finish, gl, schedule, seamAt]);
 
-  // Put away when the part it is cutting stops being the selection, or the
-  // simulation starts; redrawn when the part changes under it (a seam added
-  // or taken off, an undo).
+  // Put away when the part it is cutting stops being the selection, another
+  // exclusive tool activates, or the simulation starts; redrawn when the part
+  // changes under it (a seam added or taken off, an undo).
   useEffect(() => useStore.subscribe((state, prev) => {
     if (!armed.current) return;
-    if (state.selectedNodeId !== prev.selectedNodeId || (state.isPlaying && !prev.isPlaying)) disarm();
-    else if (state.sceneGraph !== prev.sceneGraph) schedule();
+    if (
+      state.selectedNodeId !== prev.selectedNodeId ||
+      (state.isPlaying && !prev.isPlaying) ||
+      state.paintMode ||
+      state.measureMode !== null ||
+      state.latticeNodeId !== null ||
+      state.sculptNodeId !== null ||
+      state.multiSelectMode
+    ) {
+      disarm();
+    } else if (state.sceneGraph !== prev.sceneGraph) {
+      schedule();
+    }
   }), [disarm, schedule]);
 
-  useEffect(() => () => {
-    cancelAnimationFrame(frame.current);
-    if (layer.current) {
-      layer.current.removeFromParent();
-      disposeLineGroup(layer.current);
-      layer.current = null;
-    }
-    overlay.current?.svg.remove();
-    overlay.current = null;
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      window.clearTimeout(flashTimer.current);
+      cancelAnimationFrame(frame.current);
+      if (armed.current) {
+        armed.current = false;
+        drag.current = null;
+        useStore.getState().setGestureStatus(null);
+      }
+      if (layer.current) {
+        layer.current.removeFromParent();
+        disposeLineGroup(layer.current);
+        layer.current = null;
+      }
+      overlay.current?.svg.remove();
+      overlay.current = null;
+    };
   }, []);
 
   return null;
