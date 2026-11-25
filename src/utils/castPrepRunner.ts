@@ -146,7 +146,8 @@ export async function runCastPrep(opts: CastPrepOptions): Promise<CastPrepReport
       for (let i = 0; i < roundable.length; i++) {
         const id = roundable[i];
         const nodes = store().sceneGraph.nodes;
-        const node = findNode(nodes, id)!;
+        const node = findNode(nodes, id);
+        if (!node) continue;
         store().setCastPrepBusy(`Finding edges · ${i + 1}/${roundable.length}`);
         try {
           const found = await bodyEdges(node, bodyUp(nodes, id));

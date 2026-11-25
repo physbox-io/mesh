@@ -57,7 +57,7 @@ import { workerStoppedError } from './staleBuild';
 import { isSiliconeMold, pourBoxIn, pourSelection } from './pourTarget';
 import { pourBoxOptionsFor } from './pourBoxScene';
 import { mcpMoldSubject } from './moldSubject';
-import { metalChain, siliconeChain, type ChainPiece, type ChainResult, type MetalChain, type SiliconeChain } from './castChain';
+import { deviationMm, masterSoup, metalChain, siliconeChain, type ChainPiece, type ChainResult, type MetalChain, type SiliconeChain } from './castChain';
 import { addMetalChain, addSiliconeChain } from './castChainActions';
 import { DEFAULT_TAB_DRAFT, DEFAULT_TAB_MATERIAL, materialFitsTab, tabMaterials } from './moldTabs';
 import { lastCastOptions, type CastOptions } from './castPatternExporter';
@@ -99,6 +99,7 @@ export class MoldWorkerClient {
   private queue: MoldQueuedJob[] = [];
   /** The scene the worker already holds, so a slider drag sends options alone. */
   private sceneSent: SceneGraph | null = null;
+  private lastScene: SceneGraph | null = null;
   private lastResult: ReturnType<typeof generateMoldMeshes> | null = null;
   /** Why the worker died, until a request that carries its own inputs starts another. */
   private stopped: Promise<Error> | null = null;
@@ -220,6 +221,7 @@ export class MoldWorkerClient {
     if (!this.worker) {
       const wasm = await loadManifold().catch(() => null);
       const result = generateMoldMeshes(scene, options, wasm);
+      this.lastScene = scene;
       this.lastResult = result;
       return {
         summary: moldSummary(result),
@@ -280,7 +282,26 @@ export class MoldWorkerClient {
           cavityComponents: 0,
         };
       }
-      return simulateCastFromMoldResult(this.lastResult, options);
+      const castResult = await simulateCastFromMoldResult(this.lastResult, options);
+      if (measure && castResult.success && this.lastScene) {
+        const measured = options?.trimChannels
+          ? castResult
+          : await simulateCastFromMoldResult(this.lastResult, { ...options, trimChannels: true });
+        if (measured.success) {
+          const faces = measured.mesh.faces;
+          const pos = measured.mesh.positions;
+          const soup = new Float64Array(faces.length * 3);
+          for (let i = 0; i < faces.length; i++) {
+            const o = faces[i] * 3;
+            const d = i * 3;
+            soup[d] = pos[o];
+            soup[d + 1] = pos[o + 1];
+            soup[d + 2] = pos[o + 2];
+          }
+          castResult.deviation = deviationMm(soup, masterSoup(await loadManifold(), this.lastScene)) ?? undefined;
+        }
+      }
+      return castResult;
     }
     // The mold the dead worker held is gone with it.
     if (this.stopped) throw await this.stopped;
@@ -308,6 +329,7 @@ export class MoldWorkerClient {
     this.queue = [];
     this.running = null;
     this.sceneSent = null;
+    this.lastScene = null;
     this.lastResult = null;
     this.stopped = null;
     const err = new MoldSupersededError();

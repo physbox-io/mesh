@@ -164,7 +164,7 @@ export async function planSlipMold(scene: SceneGraph, ids: string[], options: Pa
     ]);
     return buildSlipMold(await loadManifold(), masterSoupMm(scene, ids), options);
   }
-  const slot = ids.join('\0');
+  const slot = [...ids].sort().join('\0');
   for (let i = queued.length - 1; i >= 0; i--) {
     const q = queued[i];
     if (q.kind === 'plan' && q.slot === slot) {

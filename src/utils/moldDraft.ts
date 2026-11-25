@@ -82,7 +82,8 @@ function limitSlope(depth: Float64Array, grid: Grid, cot: number, deepen: boolea
  */
 export function applyDraft(depth: Float64Array, grid: Grid, draftDeg: number, mode: DraftMode = 'remove'): Float64Array {
   if (!(draftDeg > 0)) return depth;
-  const tan = Math.tan((draftDeg * Math.PI) / 180);
+  const clamped = Math.min(89, draftDeg);
+  const tan = Math.tan((clamped * Math.PI) / 180);
   if (mode !== 'centre') return limitSlope(depth, grid, 1 / tan, mode === 'add');
   // A wall from 0 to D: half the taper cut back, half grown out, averaged,
   // stands at (z - D/2) tan(angle) off where it was, which is the pivot wanted.

@@ -1369,23 +1369,34 @@ function build(
   // Grown about the middle of its foot, so it still stands where it stood.
   const b0 = built.part.boundingBox();
   const foot: [number, number, number] = [(b0.min[0] + b0.max[0]) / 2, (b0.min[1] + b0.max[1]) / 2, b0.min[2]];
-  const part = built.part.translate([-foot[0], -foot[1], -foot[2]]).scale(scale).translate(foot);
-  free(built.part);
+  const shifted = built.part.translate([-foot[0], -foot[1], -foot[2]]);
+  const scaled = shifted.scale(scale);
+  const part = scaled.translate(foot);
+  free(built.part, shifted, scaled);
   const pb = part.boundingBox();
   const zMin = pb.min[2], zTop = pb.max[2];
   if (zTop - zMin < 2) { free(part); throw new Error('The part is under 2 mm tall: there is nothing to slip cast.'); }
 
   // --- The cavity -------------------------------------------------------------
-  let filled = part;
-  const fill = o.fillInside ? insideFill(wasm, part, zMin, zTop) : null;
-  if (fill) filled = part.add(fill);
+  let filled: Manifold = part;
+  let fill: Manifold | null = null;
+  let inside: Manifold | null = null;
+  let sp: ReturnType<typeof spare>;
+  try {
+    fill = o.fillInside ? insideFill(wasm, part, zMin, zTop) : null;
+    if (fill) filled = part.add(fill);
+    const zBlockTop = zTop + Math.max(5, o.spareHeightMm);
+    const spareAt = o.spareAtMm && o.spareAtMm.every(Number.isFinite) ? o.spareAtMm : null;
+    // The inside itself: the fill less the part (a fill slab borrows the part's
+    // outlines next to a filled slice, so it holds lumps of wall too).
+    inside = fill ? fill.subtract(part) : null;
+    sp = spare(wasm, filled, inside, zTop, zBlockTop, Math.max(5, o.spareDiaMm), spareAt, part.volume());
+    free(fill, inside, filled !== part ? part : null);
+  } catch (err) {
+    free(fill, inside, filled, filled !== part ? part : null);
+    throw err;
+  }
   const zBlockTop = zTop + Math.max(5, o.spareHeightMm);
-  const spareAt = o.spareAtMm && o.spareAtMm.every(Number.isFinite) ? o.spareAtMm : null;
-  // The inside itself: the fill less the part (a fill slab borrows the part's
-  // outlines next to a filled slice, so it holds lumps of wall too).
-  const inside = fill ? fill.subtract(part) : null;
-  const sp = spare(wasm, filled, inside, zTop, zBlockTop, Math.max(5, o.spareDiaMm), spareAt, part.volume());
-  free(fill, inside, filled !== part ? part : null);
   warnings.push(...sp.warnings);
   const axis = sp.centre;
 
@@ -1428,7 +1439,13 @@ function build(
   // measured on the drafted part.
   const draftDeg = Math.max(0, Math.min(15, o.draftDeg));
   if (draftDeg > 0) {
-    const drafted = draftForPieces(wasm, filled, axis, k, split.theta, draftDeg, plugContours ? (x, y) => insideContours(plugContours, x, y) : null);
+    let drafted: Manifold;
+    try {
+      drafted = draftForPieces(wasm, filled, axis, k, split.theta, draftDeg, plugContours ? (x, y) => insideContours(plugContours, x, y) : null);
+    } catch (err) {
+      free(filled, sp.spare, plugTop);
+      throw err;
+    }
     free(filled);
     filled = drafted;
     const again = scoreSplit(surfaceSamples(filled), axis, k, split.theta, overBase);

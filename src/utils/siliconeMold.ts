@@ -622,152 +622,157 @@ export function buildPourBox(wasm: ManifoldToplevel, masterSoup: ArrayLike<numbe
   }
 
   const segs = 96;
-  let plan: CrossSection;
-  if (o.shape === 'round') {
-    let r = 0;
-    for (const [x, y] of points) r = Math.max(r, Math.hypot(x - cx, y - cy));
-    plan = wasm.CrossSection.circle(r, segs).translate(cx, cy);
-  } else if (o.shape === 'box') {
-    plan = wasm.CrossSection.square([xMax - xMin, yMax - yMin], true).translate(cx, cy);
-  } else {
-    plan = wasm.CrossSection.hull([points]);
-  }
-
-  // Given the silicone to hand, the cover is as thick as it allows: the bore
-  // to the fill line less the master, solved for the cover.
-  const siliconeId = isSiliconeId(o.silicone) ? o.silicone : 'platinum';
-  if (o.siliconeBudgetG && o.siliconeBudgetG > 0) {
-    const budget = o.siliconeBudgetG;
-    const masterAll = soupVolumeBelow(wasm, masterSoup, zTop + 1) ?? 0;
-    const gramsFor = (t: number) => {
-      const ring = plan.offset(t, 'Round', 2, segs);
-      const mm3 = Math.max(0, ring.area() * (zTop + t - zMin) - masterAll);
-      ring.delete();
-      return castWeightG(siliconeId, mm3);
-    };
-    if (gramsFor(MIN_COVER_MM) > budget) {
-      cover = MIN_COVER_MM;
-      warnings.push(`Even ${MIN_COVER_MM} mm of silicone round the master takes about ${Math.round(gramsFor(MIN_COVER_MM))} g, over the ${Math.round(budget)} g budget: the box is planned at ${MIN_COVER_MM} mm.`);
+  const allocated: (Manifold | CrossSection)[] = [];
+  const track = <T extends Manifold | CrossSection>(x: T): T => (allocated.push(x), x);
+  try {
+    let plan: CrossSection;
+    if (o.shape === 'round') {
+      let r = 0;
+      for (const [x, y] of points) r = Math.max(r, Math.hypot(x - cx, y - cy));
+      plan = track(wasm.CrossSection.circle(Math.max(0.1, r), segs).translate(cx, cy));
+    } else if (o.shape === 'box') {
+      plan = track(wasm.CrossSection.square([Math.max(0.1, xMax - xMin), Math.max(0.1, yMax - yMin)], true).translate(cx, cy));
     } else {
-      let lo = MIN_COVER_MM, hi = MAX_COVER_MM;
-      if (gramsFor(hi) <= budget) lo = hi;
-      else for (let i = 0; i < 14; i++) { const mid = (lo + hi) / 2; if (gramsFor(mid) <= budget) lo = mid; else hi = mid; }
-      cover = Math.floor(lo * 2) / 2;
+      plan = track(wasm.CrossSection.hull([points]));
     }
-  }
-  const inner = plan.offset(cover, 'Round', 2, segs);
-  const outer = inner.offset(wall, 'Round', 2, segs);
-  const grooveOuter = outer.offset(clear, 'Round', 2, segs);
-  const grooveInner = inner.offset(-clear, 'Round', 2, segs);
-  const baseOutline = grooveOuter.offset(Math.max(1, o.rimMm), 'Round', 2, segs);
 
-  const fillZ = zTop + cover;
-  const sleeveBottom = zMin - groove;
-  const sleeveTop = fillZ + Math.max(0, o.freeboardMm);
-
-  const ring = outer.subtract(inner);
-  const sleeveM = ring.extrude(sleeveTop - sleeveBottom).translate([0, 0, sleeveBottom]);
-  const plate = baseOutline.extrude(o.baseMm).translate([0, 0, zMin - o.baseMm]);
-  const grooveRing = grooveOuter.subtract(grooveInner);
-  // A hair past the plate's top, so the cut is clean through that face.
-  const grooveCut = grooveRing.extrude(groove + 0.01).translate([0, 0, zMin - groove]);
-  const baseM = plate.subtract(grooveCut);
-
-  let hole: PourBox['hole'];
-  if (o.hole) {
-    const [hx, hy] = o.holeAtMm ?? topAt;
-    const diaMm = Math.max(0.5, o.holeDiaMm ?? HOLE_DIA_MM[o.hole]);
-    const centreZ = topZAt(masterSoup, hx, hy);
-    if (centreZ === null) throw new Error(`The hole at ${hx.toFixed(1)}, ${hy.toFixed(1)} mm is not over the master: pick a point on it.`);
-    // On a sloped top the pin goes down to the lowest point under its rim, so
-    // no silicone runs in under it and closes the hole; if the rim overhangs a
-    // cliff or hollow bore (drop > diaMm, or misses the master), keep the pin
-    // on the rim rather than plunging into a cup's floor, and warn on pour holes.
-    let footZ = centreZ;
-    let overhangSamples = 0;
-    for (let k = 0; k < 12; k++) {
-      const a = (k / 12) * 2 * Math.PI;
-      const z = topZAt(masterSoup, hx + (diaMm / 2) * Math.cos(a), hy + (diaMm / 2) * Math.sin(a));
-      if (z === null || centreZ - z > diaMm) {
-        overhangSamples++;
+    // Given the silicone to hand, the cover is as thick as it allows: the bore
+    // to the fill line less the master, solved for the cover.
+    const siliconeId = isSiliconeId(o.silicone) ? o.silicone : 'platinum';
+    if (o.siliconeBudgetG && o.siliconeBudgetG > 0) {
+      const budget = o.siliconeBudgetG;
+      const masterAll = soupVolumeBelow(wasm, masterSoup, zTop + 1) ?? 0;
+      const gramsFor = (t: number) => {
+        const ring = plan.offset(t, 'Round', 2, segs);
+        const mm3 = Math.max(0, ring.area() * (zTop + t - zMin) - masterAll);
+        ring.delete();
+        return castWeightG(siliconeId, mm3);
+      };
+      if (gramsFor(MIN_COVER_MM) > budget) {
+        cover = MIN_COVER_MM;
+        warnings.push(`Even ${MIN_COVER_MM} mm of silicone round the master takes about ${Math.round(gramsFor(MIN_COVER_MM))} g, over the ${Math.round(budget)} g budget: the box is planned at ${MIN_COVER_MM} mm.`);
       } else {
-        footZ = Math.min(footZ, z);
+        let lo = MIN_COVER_MM, hi = MAX_COVER_MM;
+        if (gramsFor(hi) <= budget) lo = hi;
+        else for (let i = 0; i < 14; i++) { const mid = (lo + hi) / 2; if (gramsFor(mid) <= budget) lo = mid; else hi = mid; }
+        cover = Math.floor(lo * 2) / 2;
       }
     }
-    hole = {
-      footMm: [hx, hy, footZ - 0.5],
-      lengthMm: fillZ + 1 - (footZ - 0.5),
-      diaMm,
-      purpose: o.hole,
+    const inner = track(plan.offset(cover, 'Round', 2, segs));
+    const outer = track(inner.offset(wall, 'Round', 2, segs));
+    const grooveOuter = track(outer.offset(clear, 'Round', 2, segs));
+    const grooveInner = track(inner.offset(-clear, 'Round', 2, segs));
+    const baseOutline = track(grooveOuter.offset(Math.max(1, o.rimMm), 'Round', 2, segs));
+
+    const fillZ = zTop + cover;
+    const sleeveBottom = zMin - groove;
+    const sleeveTop = fillZ + Math.max(0, o.freeboardMm);
+
+    const ring = track(outer.subtract(inner));
+    const sleeveM = track(track(ring.extrude(sleeveTop - sleeveBottom)).translate([0, 0, sleeveBottom]));
+    const plate = track(track(baseOutline.extrude(o.baseMm)).translate([0, 0, zMin - o.baseMm]));
+    const grooveRing = track(grooveOuter.subtract(grooveInner));
+    // A hair past the plate's top, so the cut is clean through that face.
+    const grooveCut = track(track(grooveRing.extrude(groove + 0.01)).translate([0, 0, zMin - groove]));
+    const baseM = track(plate.subtract(grooveCut));
+
+    let hole: PourBox['hole'];
+    if (o.hole) {
+      const [hx, hy] = o.holeAtMm ?? topAt;
+      const diaMm = Math.max(0.5, o.holeDiaMm ?? HOLE_DIA_MM[o.hole]);
+      const centreZ = topZAt(masterSoup, hx, hy);
+      if (centreZ === null) throw new Error(`The hole at ${hx.toFixed(1)}, ${hy.toFixed(1)} mm is not over the master: pick a point on it.`);
+      // On a sloped top the pin goes down to the lowest point under its rim, so
+      // no silicone runs in under it and closes the hole; if the rim overhangs a
+      // cliff or hollow bore (drop > diaMm, or misses the master), keep the pin
+      // on the rim rather than plunging into a cup's floor, and warn on pour holes.
+      let footZ = centreZ;
+      let overhangSamples = 0;
+      for (let k = 0; k < 12; k++) {
+        const a = (k / 12) * 2 * Math.PI;
+        const z = topZAt(masterSoup, hx + (diaMm / 2) * Math.cos(a), hy + (diaMm / 2) * Math.sin(a));
+        if (z === null || centreZ - z > diaMm) {
+          overhangSamples++;
+        } else {
+          footZ = Math.min(footZ, z);
+        }
+      }
+      hole = {
+        footMm: [hx, hy, footZ - 0.5],
+        lengthMm: fillZ + 1 - (footZ - 0.5),
+        diaMm,
+        purpose: o.hole,
+      };
+      if (o.hole === 'pour' && diaMm < MIN_POUR_HOLE_MM) {
+        warnings.push(`Pour hole diameter (${diaMm} mm) is below the ${MIN_POUR_HOLE_MM} mm minimum.`);
+      }
+      if (o.hole === 'pour' && overhangSamples > 0) {
+        warnings.push(
+          `The ⌀${diaMm} mm pour hole at (${hx.toFixed(1)}, ${hy.toFixed(1)}) mm is wider than the narrow rim or ledge under it, ` +
+          `which pinches the pour opening or trims the rim: move hole_at_mm onto a wider face, or pour from the master's foot instead.`,
+        );
+      }
+      if (o.hole === 'pour') {
+        // Resin poured through the hole fills the master's shape from the
+        // bottom; every other high point holds its air unless vented.
+        const others = trappedAirInSoup(Float64Array.from(masterSoup), fillZ + 1, undefined, [{ x: hx, y: hy, r: diaMm / 2 + 1 }]);
+        if (others.length) {
+          warnings.push(`${OTHER_PEAKS_PREFIX} ${others.length} other high point${others.length === 1 ? '' : 's'} of the master (${others.slice(0, 3).map((p) => `(${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)} mm)`).join(', ')}${others.length > 3 ? ' and more' : ''}): each needs a vent through the silicone, or the hole moved over it (hole_at_mm).`);
+        }
+      }
+      if (o.hole !== 'pour' && Math.PI * (diaMm / 2) ** 2 > MAX_PLUGGED_MM2) {
+        warnings.push(`${o.hole} hole diameter (${diaMm} mm) exceeds ${MAX_PLUGGED_DIA_MM} mm max for a plugged hole; reduce diameter or switch to a pour hole.`);
+      }
+    }
+
+    // Silicone: the sleeve's bore up to the fill line, less the master, less the
+    // pin below the line. The same sum build_mold.py made by hand; the pour
+    // simulation of the result agrees with it (tests/siliconeMold.test.ts).
+    const bore = inner.area() * (fillZ - zMin);
+    const masterVol = soupVolumeBelow(wasm, masterSoup, fillZ);
+    if (masterVol === null) warnings.push('The master is not a closed solid, so its volume is not known and the silicone figure counts it as empty space. Repair it first (physics_repair_mesh) for a true figure.');
+    const pinVol = hole ? Math.PI * (hole.diaMm / 2) ** 2 * (fillZ - hole.footMm[2] - 0.5) : 0;
+    const siliconeMm3 = Math.max(0, bore - (masterVol ?? 0) - pinVol);
+    const silicone = siliconeId;
+    const grams = castWeightG(silicone, siliconeMm3);
+    const parts = mixGrams(silicone, grams);
+
+    if (zTop - zMin < 1) warnings.push('The master is less than 1 mm tall.');
+
+    const sleeveMesh = meshOf(sleeveM);
+    const oneSleeveBed = centredBedMesh(sleeveM);
+    const sleeveParts: PourSleevePart[] = o.splitSleeve
+      ? buildSplitPourSleeve(wasm, inner, outer, wall, clear, zMin, sleeveBottom, sleeveTop)
+      : [{ key: 'sleeve', label: 'sleeve', role: 'sleeve', mesh: oneSleeveBed.mesh, assembled: sleeveMesh, release: [0, 0, 0], sizeMm: oneSleeveBed.sizeMm }];
+
+    return {
+      base: meshOf(baseM),
+      sleeve: sleeveMesh,
+      sleeveParts,
+      ...(hole ? { hole } : {}),
+      report: {
+        coverMm: cover,
+        splitSleeve: Boolean(o.splitSleeve),
+        fillHeightMm: +(fillZ - zMin).toFixed(2),
+        fillZMm: +fillZ.toFixed(3),
+        pourDepthMm: +(fillZ - (clear > 0 ? sleeveBottom : zMin)).toFixed(2),
+        sleeveHeightMm: +(sleeveTop - sleeveBottom).toFixed(2),
+        grooveMm: +groove.toFixed(2),
+        sleeveFootprintMm: extent(outer),
+        baseFootprintMm: extent(baseOutline),
+        siliconeMm3: Math.round(siliconeMm3),
+        siliconeG: Math.round(grams),
+        partAG: Math.round(parts?.a ?? grams),
+        partBG: Math.round(parts?.b ?? 0),
+        siliconeName: castMaterial(silicone).label,
+        silicone,
+        ...(hole ? { holeTopMm: [+hole.footMm[0].toFixed(2), +hole.footMm[1].toFixed(2), +(fillZ + 1).toFixed(2)] as [number, number, number] } : {}),
+        warnings,
+      },
     };
-    if (o.hole === 'pour' && diaMm < MIN_POUR_HOLE_MM) {
-      warnings.push(`Pour hole diameter (${diaMm} mm) is below the ${MIN_POUR_HOLE_MM} mm minimum.`);
-    }
-    if (o.hole === 'pour' && overhangSamples > 0) {
-      warnings.push(
-        `The ⌀${diaMm} mm pour hole at (${hx.toFixed(1)}, ${hy.toFixed(1)}) mm is wider than the narrow rim or ledge under it, ` +
-        `which pinches the pour opening or trims the rim: move hole_at_mm onto a wider face, or pour from the master's foot instead.`,
-      );
-    }
-    if (o.hole === 'pour') {
-      // Resin poured through the hole fills the master's shape from the
-      // bottom; every other high point holds its air unless vented.
-      const others = trappedAirInSoup(Float64Array.from(masterSoup), fillZ + 1, undefined, [{ x: hx, y: hy, r: diaMm / 2 + 1 }]);
-      if (others.length) {
-        warnings.push(`${OTHER_PEAKS_PREFIX} ${others.length} other high point${others.length === 1 ? '' : 's'} of the master (${others.slice(0, 3).map((p) => `(${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)} mm)`).join(', ')}${others.length > 3 ? ' and more' : ''}): each needs a vent through the silicone, or the hole moved over it (hole_at_mm).`);
-      }
-    }
-    if (o.hole !== 'pour' && Math.PI * (diaMm / 2) ** 2 > MAX_PLUGGED_MM2) {
-      warnings.push(`${o.hole} hole diameter (${diaMm} mm) exceeds ${MAX_PLUGGED_DIA_MM} mm max for a plugged hole; reduce diameter or switch to a pour hole.`);
+  } finally {
+    for (const x of new Set(allocated)) {
+      try { x.delete(); } catch { /* already freed */ }
     }
   }
-
-  // Silicone: the sleeve's bore up to the fill line, less the master, less the
-  // pin below the line. The same sum build_mold.py made by hand; the pour
-  // simulation of the result agrees with it (tests/siliconeMold.test.ts).
-  const bore = inner.area() * (fillZ - zMin);
-  const masterVol = soupVolumeBelow(wasm, masterSoup, fillZ);
-  if (masterVol === null) warnings.push('The master is not a closed solid, so its volume is not known and the silicone figure counts it as empty space. Repair it first (physics_repair_mesh) for a true figure.');
-  const pinVol = hole ? Math.PI * (hole.diaMm / 2) ** 2 * (fillZ - hole.footMm[2] - 0.5) : 0;
-  const siliconeMm3 = Math.max(0, bore - (masterVol ?? 0) - pinVol);
-  const silicone = siliconeId;
-  const grams = castWeightG(silicone, siliconeMm3);
-  const parts = mixGrams(silicone, grams);
-
-  if (zTop - zMin < 1) warnings.push('The master is less than 1 mm tall.');
-
-  const sleeveMesh = meshOf(sleeveM);
-  const oneSleeveBed = centredBedMesh(sleeveM);
-  const sleeveParts: PourSleevePart[] = o.splitSleeve
-    ? buildSplitPourSleeve(wasm, inner, outer, wall, clear, zMin, sleeveBottom, sleeveTop)
-    : [{ key: 'sleeve', label: 'sleeve', role: 'sleeve', mesh: oneSleeveBed.mesh, assembled: sleeveMesh, release: [0, 0, 0], sizeMm: oneSleeveBed.sizeMm }];
-
-  const result: PourBox = {
-    base: meshOf(baseM),
-    sleeve: sleeveMesh,
-    sleeveParts,
-    ...(hole ? { hole } : {}),
-    report: {
-      coverMm: cover,
-      splitSleeve: Boolean(o.splitSleeve),
-      fillHeightMm: +(fillZ - zMin).toFixed(2),
-      fillZMm: +fillZ.toFixed(3),
-      pourDepthMm: +(fillZ - (clear > 0 ? sleeveBottom : zMin)).toFixed(2),
-      sleeveHeightMm: +(sleeveTop - sleeveBottom).toFixed(2),
-      grooveMm: +groove.toFixed(2),
-      sleeveFootprintMm: extent(outer),
-      baseFootprintMm: extent(baseOutline),
-      siliconeMm3: Math.round(siliconeMm3),
-      siliconeG: Math.round(grams),
-      partAG: Math.round(parts?.a ?? grams),
-      partBG: Math.round(parts?.b ?? 0),
-      siliconeName: castMaterial(silicone).label,
-      silicone,
-      ...(hole ? { holeTopMm: [+hole.footMm[0].toFixed(2), +hole.footMm[1].toFixed(2), +(fillZ + 1).toFixed(2)] as [number, number, number] } : {}),
-      warnings,
-    },
-  };
-  for (const x of [plan, inner, outer, grooveOuter, grooveInner, baseOutline, ring, grooveRing]) x.delete();
-  for (const x of [sleeveM, plate, grooveCut, baseM]) x.delete();
-  return result;
 }

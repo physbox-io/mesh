@@ -66,14 +66,16 @@ export const SiliconeBoxPanel: React.FC<SiliconeBoxPanelProps> = ({ onClose, ids
     if (value !== undefined) setOptions((prev) => ({ ...prev, [key]: value }));
   };
 
+  const sceneGraph = useStore((s) => s.sceneGraph);
+
   useEffect(() => {
     if (!active) return;
     let live = true;
-    planPourBox(useStore.getState().sceneGraph, ids, settled)
+    planPourBox(sceneGraph, ids, settled)
       .then((b) => { if (live) { setBox(b); setFailure(null); } })
       .catch((e: Error) => { if (live) { setBox(null); setFailure(e.message); } });
     return () => { live = false; };
-  }, [ids, settled, active]);
+  }, [sceneGraph, ids, settled, active]);
 
   const busy = settled !== options;
 
@@ -117,7 +119,6 @@ export const SiliconeBoxPanel: React.FC<SiliconeBoxPanelProps> = ({ onClose, ids
     };
   });
 
-  const sceneGraph = useStore((s) => s.sceneGraph);
   const partVolumeMl = useMemo(() => {
     const sub = moldSubject(sceneGraph, ids);
     return Math.abs(soupVolume(collectSceneTriangles(sub.scene).tris)) * 1e6;

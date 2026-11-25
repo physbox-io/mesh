@@ -81,11 +81,14 @@ export function SlipMoldPreview({ mold, cast, mode, busy }: {
       if (box.isEmpty()) return;
       const centre = box.getCenter(new THREE.Vector3());
       const size = box.getSize(new THREE.Vector3()).length();
-      const dir = camera.position.clone().sub(controls.target).normalize();
+      const dir = camera.position.clone().sub(controls.target);
+      if (dir.lengthSq() < 1e-12) dir.set(200, -300, 220);
+      dir.normalize();
       controls.target.copy(centre);
-      camera.position.copy(centre).addScaledVector(dir, size * 1.25);
-      camera.near = size / 100;
-      camera.far = size * 20;
+      const dist = Math.max(10, size * 1.25);
+      camera.position.copy(centre).addScaledVector(dir, dist);
+      camera.near = Math.max(0.1, size / 100);
+      camera.far = Math.max(100, size * 20);
       camera.updateProjectionMatrix();
     };
 

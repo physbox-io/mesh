@@ -45,9 +45,9 @@ export const PourPanel: React.FC<PourPanelProps> = ({ onClose, moldNode, apart, 
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState(true);
   // A master in its pour box fills to the box's fill line, from the top.
-  const [box] = useState(() => pourBoxIn(moldNode));
+  const box = useMemo(() => pourBoxIn(moldNode), [moldNode]);
   // Silicone sticks to a mold that was poured in silicone, so none is offered.
-  const [siliconeMold] = useState(() => isSiliconeMold(moldNode));
+  const siliconeMold = useMemo(() => isSiliconeMold(moldNode), [moldNode]);
   const moldMeta = moldNode.simulation?.mold;
   const moldLiner = moldMeta?.liner;
   const closedMold = Boolean(moldMeta?.laidOpen);

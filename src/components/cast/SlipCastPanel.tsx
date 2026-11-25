@@ -67,14 +67,15 @@ export const SlipCastPanel: React.FC<SlipCastPanelProps> = ({ onClose, ids, name
   };
   const key = JSON.stringify(settled);
 
+  const sceneGraph = useStore((s) => s.sceneGraph);
   useEffect(() => {
     if (!active) return;
     let live = true;
-    planSlipMold(useStore.getState().sceneGraph, ids, JSON.parse(key) as SlipMoldOptions)
+    planSlipMold(sceneGraph, ids, JSON.parse(key) as SlipMoldOptions)
       .then((m) => { if (live) setPlanned({ key, mold: m, failure: null }); })
       .catch((e: Error) => { if (live) setPlanned({ key, mold: null, failure: e.message }); });
     return () => { live = false; };
-  }, [ids, key, active]);
+  }, [sceneGraph, ids, key, active]);
 
   // What the part itself asks of a slip casting, as the MCP reply says it.
   const [partWarnings, setPartWarnings] = useState<string[]>([]);
@@ -114,6 +115,7 @@ export const SlipCastPanel: React.FC<SlipCastPanelProps> = ({ onClose, ids, name
   const handleAdd = async () => {
     if (!mold) return;
     setAdding(true);
+    setAddError(null);
     try {
       await addSlipMoldToScene(ids, settled, mold);
       onClose();
