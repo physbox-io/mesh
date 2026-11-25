@@ -37,6 +37,7 @@ type QueuedJob =
       id: number;
       kind: 'hubs';
       breakdown: PipeFrameBreakdownResult;
+      includeStandard?: boolean;
       what: string;
       resolve: (v: SceneNode[]) => void;
       reject: (e: Error) => void;
@@ -147,7 +148,7 @@ function pump(): void {
           options: next.options,
         };
       } else {
-        req = { type: 'HUBS', id: next.id, breakdown: next.breakdown };
+        req = { type: 'HUBS', id: next.id, breakdown: next.breakdown, includeStandard: next.includeStandard };
       }
       w.postMessage(req);
       return;
@@ -185,13 +186,16 @@ export async function frameBodyOffThread(scene: SceneGraph, bodyId: string, opti
 }
 
 /** buildAllCustomHubNodes, off the main thread. */
-export async function buildHubsOffThread(breakdown: PipeFrameBreakdownResult): Promise<SceneNode[]> {
+export async function buildHubsOffThread(
+  breakdown: PipeFrameBreakdownResult,
+  includeStandard = false,
+): Promise<SceneNode[]> {
   if (typeof Worker === 'undefined') {
     const { buildAllCustomHubNodes } = await import('./tubeAndWireExporter');
-    return buildAllCustomHubNodes(breakdown);
+    return buildAllCustomHubNodes(breakdown, includeStandard);
   }
   return new Promise<SceneNode[]>((resolve, reject) => {
-    queued.push({ id: ++seq, kind: 'hubs', breakdown, what: 'Building the hubs', resolve, reject });
+    queued.push({ id: ++seq, kind: 'hubs', breakdown, includeStandard, what: 'Building the hubs', resolve, reject });
     pump();
   });
 }

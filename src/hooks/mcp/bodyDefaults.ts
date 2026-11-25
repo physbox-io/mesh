@@ -33,6 +33,7 @@ import { tuneMembraneToPitch } from '../../utils/membraneAcoustics';
 import { tuneResonatorTubeToPitch } from '../../utils/resonatorAcoustics';
 import { geomSizeProblem } from '../../utils/geomSize';
 import { withoutNulls } from '../../utils/withoutNulls';
+import { applyFlexureToNode, type FlexureDesignInput } from '../../utils/flexure';
 import { clampBodyForm } from '../../utils/cloth/bodyForm';
 import type { BodyFormMeasurements } from '../../types/cloth';
 
@@ -859,6 +860,10 @@ export const fillBodyDefaults = (
       const spec = parseTuneTo(bAny.tuneTo, bAny.drillNodalHole);
       out = applyTuneTo(node, spec);
       if (node.acousticString || node.acousticMembrane) retuneWithScene.set(out, spec);
+    }
+    if (isPlainObject(bAny.flexure)) {
+      const applied = applyFlexureToNode(out, bAny.flexure as FlexureDesignInput);
+      if (applied) out = applied.node;
     }
     checkIncomingBody(out, resolvedJoints.length > 0);
     if (declarativeOps) opsMap.set(id, declarativeOps);

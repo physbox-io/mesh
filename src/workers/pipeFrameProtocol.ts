@@ -13,7 +13,7 @@ export interface FrameOutcome { nodes: SceneNode[]; skeleton: BuiltSkeleton; add
 export type PipeFrameRequest =
   | { type: 'WARM' }
   | { type: 'FRAME'; id: number; scene?: SceneGraph; bodyId: string; options: FrameOptions }
-  | { type: 'HUBS'; id: number; breakdown: PipeFrameBreakdownResult };
+  | { type: 'HUBS'; id: number; breakdown: PipeFrameBreakdownResult; includeStandard?: boolean };
 
 export type PipeFrameResponse =
   | { type: 'FRAME_DONE'; id: number; outcome: FrameOutcome }

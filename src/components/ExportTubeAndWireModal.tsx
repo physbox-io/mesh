@@ -58,6 +58,7 @@ export function ExportTubeAndWireModal({
     const [fitClearanceMm, setFitClearanceMm] = useState<number>(DEFAULT_PIPE_FRAME_OPTIONS.fitClearanceMm);
     const [crossBoltHoleMm, setCrossBoltHoleMm] = useState<number>(DEFAULT_PIPE_FRAME_OPTIONS.crossBoltHoleMm);
     const [stockLengthMm, setStockLengthMm] = useState<number>(DEFAULT_PIPE_FRAME_OPTIONS.stockLengthMm ?? 3048);
+    const [printStandardFittings, setPrintStandardFittings] = useState<boolean>(false);
 
     const pipeOptions: Partial<PipeFrameOptions> = useMemo(() => ({
         pipeStandardId,
@@ -162,7 +163,7 @@ export function ExportTubeAndWireModal({
         const startNodes = useStore.getState().sceneGraph.nodes;
         setAddingHubs(true);
         try {
-            const hubNodes = await buildHubsOffThread(breakdown);
+            const hubNodes = await buildHubsOffThread(breakdown, printStandardFittings);
             if (!mountedRef.current) return;
             const state = useStore.getState();
             if (state.sceneGraph.nodes !== startNodes) {
@@ -381,13 +382,22 @@ export function ExportTubeAndWireModal({
                                             />
                                         </div>
                                     </div>
+                                    <label className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300 cursor-pointer select-none">
+                                        <input
+                                            type="checkbox"
+                                            checked={printStandardFittings}
+                                            onChange={(e) => setPrintStandardFittings(e.target.checked)}
+                                            className="rounded border-slate-300 dark:border-slate-600 text-amber-600 focus:ring-amber-500"
+                                        />
+                                        <span>3D print standard elbows &amp; tees too (all {breakdown.hubs.filter((h) => h.ports.length >= 2).length} joints)</span>
+                                    </label>
                                     <button
                                         onClick={() => void handleAddHubs()}
                                         disabled={!hasMultiPortHubs || addingHubs || framing}
                                         className="w-full py-1.5 px-3 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:text-slate-400 dark:disabled:text-slate-500 text-xs font-semibold text-white flex items-center justify-center gap-2 transition-colors"
                                     >
                                         <Wrench className={`w-3.5 h-3.5 ${addingHubs ? 'animate-pulse' : ''}`} />
-                                        {addingHubs ? 'Building Hubs…' : 'Add 3D-Printed Hubs'}
+                                        {addingHubs ? 'Building Hubs…' : printStandardFittings ? 'Add All 3D-Printed Fittings' : 'Add 3D-Printed Hubs'}
                                     </button>
                                 </div>
 
