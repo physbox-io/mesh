@@ -288,6 +288,13 @@ function safeClamp(v: number | undefined | null, fallback: number, lo: number, h
   return x < lo ? lo : x > hi ? hi : x;
 }
 
+function getNyquistSafe(ctx: { sampleRate?: number } | null | undefined): number {
+  const sr = ctx?.sampleRate && Number.isFinite(ctx.sampleRate) && ctx.sampleRate > 0
+    ? ctx.sampleRate
+    : 48000;
+  return sr * 0.475;
+}
+
 /**
  * Clamps any filter or oscillator frequency to `[minHz, 0.475 * ctx.sampleRate]`,
  * preventing WebAudio `RangeError`/`TypeError` or unstable Nyquist poles on
@@ -299,10 +306,7 @@ export function clampAudioFreq(
   fallback = 440,
   minHz = 15,
 ): number {
-  const sr = ctx?.sampleRate && Number.isFinite(ctx.sampleRate) && ctx.sampleRate > 0
-    ? ctx.sampleRate
-    : 48000;
-  const nyquistSafe = Math.max(minHz + 10, sr * 0.475);
+  const nyquistSafe = Math.max(minHz + 10, getNyquistSafe(ctx));
   return safeClamp(hz, fallback, minHz, nyquistSafe);
 }
 
@@ -1050,10 +1054,11 @@ export function postWorkletWindUpdate(ctx: AudioContext, voices: WorkletWindVoic
     const bellLp2Hz = clampAudioFreq(ctx, bellLp1Hz * 1.38, 1650, 100);
     slot.lastPitchHz = pitchHz;
 
+    let warmStartHz = bellLp1Hz;
     if (isFreshAttack) {
       slot.osc.frequency.cancelScheduledValues(now);
       slot.osc.frequency.setValueAtTime(pitchHz, now);
-      const warmStartHz = clampAudioFreq(
+      warmStartHz = clampAudioFreq(
         ctx,
         coh > 0.2 ? Math.max(260, bellLp1Hz * 0.55) : Math.max(420, pitchHz * 1.45),
         420,
@@ -1092,6 +1097,7 @@ export function postWorkletWindUpdate(ctx: AudioContext, voices: WorkletWindVoic
       slot.noiseGain.gain.setValueAtTime(Math.max(noiseGainVal, amp * 0.08), now);
       slot.noiseGain.gain.setTargetAtTime(noiseGainVal, now + 0.014, 0.016);
     } else {
+      slot.noiseGain.gain.cancelScheduledValues(now);
       slot.noiseGain.gain.setTargetAtTime(noiseGainVal, now, 0.012);
     }
 
@@ -1101,11 +1107,26 @@ export function postWorkletWindUpdate(ctx: AudioContext, voices: WorkletWindVoic
     slot.vibDepth.gain.setTargetAtTime(pitchHz * vibFrac, now, 0.025);
 
     const squelchRate = safeClamp(solved.squelchRateHz, 12.0, 5.0, 48.0);
-    // Floor guard: keep a-rate squelch sweep strictly <= 0.42 * min(formantHz, bellLp1Hz) so filter frequency never crosses 0 Hz!
-    const maxSafeSquelch = 0.42 * Math.min(formantHz, bellLp1Hz);
+    // Floor & Nyquist headroom guard: keep a-rate squelch sweep strictly within (0, nyquistSafe] for both target filters
+    const nyquistSafe = getNyquistSafe(ctx);
+    const minWindFilterHz = isFreshAttack
+      ? Math.min(formantHz, bellLp1Hz, warmStartHz)
+      : Math.min(formantHz, bellLp1Hz);
+    const maxWindFilterHz = isFreshAttack
+      ? Math.max(formantHz, bellLp1Hz, warmStartHz)
+      : Math.max(formantHz, bellLp1Hz);
+    const maxSafeSquelch = Math.min(
+      0.42 * minWindFilterHz,
+      Math.max(0, nyquistSafe - maxWindFilterHz),
+    );
     const safeSquelchSweep = safeClamp(solved.squelchSweepHz, 0, 0, maxSafeSquelch);
     slot.squelchOsc.frequency.setTargetAtTime(squelchRate, now, 0.025);
-    slot.squelchDepth.gain.setTargetAtTime(safeSquelchSweep, now, 0.020);
+    if (isFreshAttack) {
+      slot.squelchDepth.gain.cancelScheduledValues(now);
+      slot.squelchDepth.gain.setValueAtTime(safeSquelchSweep, now);
+    } else {
+      slot.squelchDepth.gain.setTargetAtTime(safeSquelchSweep, now, 0.020);
+    }
 
     // Hot-swap simulated 3D Vibro-Acoustic Impulse Response — and cleanly disconnect when `!wantIr`!
     const wantIr = !!(v.bodyIr && v.bodyIr.length > 0 && v.bodyIrSig);
@@ -1151,6 +1172,7 @@ export function postWorkletWindUpdate(ctx: AudioContext, voices: WorkletWindVoic
         slot.bellLowpass2.frequency.setTargetAtTime(clampAudioFreq(ctx, tuckHz * 1.25, 500, 100), now, 0.010);
         slot.driveGain.gain.setTargetAtTime(0.45, now, 0.010);
         slot.voiceGain.gain.setTargetAtTime(0, now, 0.010);
+        slot.noiseGain.gain.cancelScheduledValues(now);
         slot.noiseGain.gain.setTargetAtTime(0, now, 0.008);
         slot.puffDepth.gain.setTargetAtTime(0, now, 0.008);
         slot.vibDepth.gain.setTargetAtTime(0, now, 0.012);
@@ -1520,11 +1542,6 @@ export function postWorkletBowedUpdate(ctx: AudioContext, voices: WorkletBowedVo
 
     if (isFreshAttack) {
       slot.activeSinceTime = now;
-      // If stealing a slot still inside its release tail, zero voiceGain cleanly before snapping pitch
-      if (isNewId && now < slot.releaseUntilTime) {
-        slot.voiceGain.gain.cancelScheduledValues(now);
-        slot.voiceGain.gain.setValueAtTime(0, now);
-      }
       slot.osc.frequency.cancelScheduledValues(now);
       slot.osc.frequency.setValueAtTime(pitchHz, now);
       slot.osc2.frequency.cancelScheduledValues(now);
@@ -1549,6 +1566,10 @@ export function postWorkletBowedUpdate(ctx: AudioContext, voices: WorkletBowedVo
 
     const gainTau = isFreshAttack ? 0.024 : 0.016;
     slot.voiceGain.gain.cancelScheduledValues(now);
+    // If stealing a slot still inside its release tail, zero voiceGain cleanly before ramping to the new note
+    if (isFreshAttack && isNewId && now < slot.releaseUntilTime) {
+      slot.voiceGain.gain.setValueAtTime(0, now);
+    }
     slot.voiceGain.gain.setTargetAtTime(amplitude, now, gainTau);
     slot.rosinFilter.frequency.setTargetAtTime(rosinCenterHz, now, 0.018);
     const attackChiff = isFreshAttack ? 1.25 : 1.0;
@@ -1990,8 +2011,11 @@ export function postWorkletAeroUpdate(ctx: AudioContext, voices: SpatialAeroSynt
     );
     const noiseGainVal = safeClamp(v.noiseGain, 0, 0, 1.0);
     if (isFresh) {
+      slot.strouhalFilter.frequency.cancelScheduledValues(now);
       slot.strouhalFilter.frequency.setValueAtTime(strouhalHz, now);
+      slot.strouhalFilter.Q.cancelScheduledValues(now);
       slot.strouhalFilter.Q.setValueAtTime(strouhalQ, now);
+      slot.aeroLowpass.frequency.cancelScheduledValues(now);
       slot.aeroLowpass.frequency.setValueAtTime(aeroLpHz, now);
     } else {
       slot.strouhalFilter.frequency.setTargetAtTime(strouhalHz, now, 0.028);
@@ -2006,23 +2030,47 @@ export function postWorkletAeroUpdate(ctx: AudioContext, voices: SpatialAeroSynt
     const baseNoiseGain = hasBillowAm ? noiseGainVal * (1 - 0.44 * amDepth) : noiseGainVal;
     slot.noiseGain.gain.setTargetAtTime(baseNoiseGain, now, 0.020);
 
+    // Floor & Nyquist headroom guard for combined A-rate modulation (amFreqDepth + gustFormantDepth)
+    // feeding both strouhalFilter.frequency and aeroLowpass.frequency
+    const nyquistSafe = getNyquistSafe(ctx);
+    const minAeroFilterHz = Math.min(strouhalHz, aeroLpHz);
+    const maxAeroFilterHz = Math.max(strouhalHz, aeroLpHz);
+    const maxCombinedAeroModHz = Math.min(
+      0.42 * minAeroFilterHz,
+      Math.max(0, nyquistSafe - maxAeroFilterHz),
+    );
+    const hasGustFormant = !v.tonalActive && noiseGainVal > 0.001;
+    const rawAmFreqDepth = hasBillowAm ? strouhalHz * 0.24 * amDepth : 0;
+    const rawGustFormantDepth = hasGustFormant ? strouhalHz * 0.18 : 0;
+    const rawCombinedMod = rawAmFreqDepth + rawGustFormantDepth;
+    const aeroModScale =
+      rawCombinedMod > maxCombinedAeroModHz && rawCombinedMod > 0
+        ? maxCombinedAeroModHz / rawCombinedMod
+        : 1;
+    const safeAmFreqDepth = rawAmFreqDepth * aeroModScale;
+    const safeGustFormantDepth = rawGustFormantDepth * aeroModScale;
+
     if (hasBillowAm) {
       slot.amOsc.frequency.setTargetAtTime(amRate, now, 0.025);
       slot.amDepth.gain.setTargetAtTime(noiseGainVal * amDepth * 0.50, now, 0.020);
-      // Synchronized formant bloom on each billow/blade-pass crest (kept <= 0.24 * strouhalHz for strict pole safety)
-      slot.amFreqDepth.gain.setTargetAtTime(strouhalHz * 0.24 * amDepth, now, 0.025);
     } else {
       slot.amDepth.gain.setTargetAtTime(0, now, 0.016);
-      slot.amFreqDepth.gain.setTargetAtTime(0, now, 0.016);
     }
 
-    // Organic outdoor breeze LFO swell on non-propeller wind voices
-    if (!v.tonalActive && noiseGainVal > 0.001) {
-      slot.gustFormantDepth.gain.setTargetAtTime(strouhalHz * 0.18, now, 0.045);
+    if (hasGustFormant) {
       slot.gustGainDepth.gain.setTargetAtTime(baseNoiseGain * 0.22, now, 0.045);
     } else {
-      slot.gustFormantDepth.gain.setTargetAtTime(0, now, 0.020);
       slot.gustGainDepth.gain.setTargetAtTime(0, now, 0.020);
+    }
+
+    if (isFresh) {
+      slot.amFreqDepth.gain.cancelScheduledValues(now);
+      slot.amFreqDepth.gain.setValueAtTime(safeAmFreqDepth, now);
+      slot.gustFormantDepth.gain.cancelScheduledValues(now);
+      slot.gustFormantDepth.gain.setValueAtTime(safeGustFormantDepth, now);
+    } else {
+      slot.amFreqDepth.gain.setTargetAtTime(safeAmFreqDepth, now, hasBillowAm ? 0.025 : 0.016);
+      slot.gustFormantDepth.gain.setTargetAtTime(safeGustFormantDepth, now, hasGustFormant ? 0.045 : 0.020);
     }
 
     // 3. Band-Limited Cloth Fold / Weave Swish (modulated by billow AM, zero high-kHz white hiss!)

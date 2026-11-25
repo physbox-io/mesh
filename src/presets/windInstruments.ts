@@ -382,10 +382,10 @@ export const windInstrumentsPreset: SceneGraph = (() => {
       breathKPa: 0,
       embouchureHz: 260,
       toneholeJoints: [
-        { jointName: 'clarinet_key_1', axialFraction: 0.609, diameterMm: 10.5 },
-        { jointName: 'clarinet_key_2', axialFraction: 0.6856, diameterMm: 10.5 },
-        { jointName: 'clarinet_key_3', axialFraction: 0.724, diameterMm: 11.0 },
-        { jointName: 'clarinet_key_4', axialFraction: 0.810, diameterMm: 11.5 },
+        { jointName: 'clarinet_key_1', axialFraction: 0.585, diameterMm: 12.0 },
+        { jointName: 'clarinet_key_2', axialFraction: 0.655, diameterMm: 9.2 },
+        { jointName: 'clarinet_key_3', axialFraction: 0.684, diameterMm: 10.0 },
+        { jointName: 'clarinet_key_4', axialFraction: 0.775, diameterMm: 11.2 },
       ],
     },
     script: `// Beethoven — "Ode to Joy" (Phrase 1 on Clarinet in G major, plus low G3 octave pedal on final cadence!)

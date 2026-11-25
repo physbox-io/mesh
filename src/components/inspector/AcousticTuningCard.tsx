@@ -93,6 +93,19 @@ function listHingeJoints(nodes: SceneNode[], out: { body: string; joint: string 
   return out;
 }
 
+function safeMembraneSpec(spec: AcousticMembraneSpec): AcousticMembraneSpec {
+  const material: MembraneMaterialId =
+    spec.material && spec.material in MEMBRANE_MATERIALS ? spec.material : 'coated_film';
+  const tensionNPerM = Number.isFinite(spec.tensionNPerM) ? spec.tensionNPerM : 1800;
+  const thicknessMm = Number.isFinite(spec.thicknessMm) ? spec.thicknessMm : 0.25;
+  return {
+    ...spec,
+    material,
+    tensionNPerM,
+    thicknessMm,
+  };
+}
+
 const selectClass =
   'w-full px-1.5 py-1 text-xs border border-slate-200 dark:border-slate-700 rounded bg-white dark:bg-slate-950 text-slate-700 dark:text-slate-200 cursor-pointer';
 const labelClass = 'text-[9px] font-semibold uppercase tracking-wider text-slate-400';
@@ -144,6 +157,7 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
   const role = roleOf(node);
   const stringSpec = node.acousticString ? safeStringSpec(node.acousticString) : null;
   const windSpec = node.windInstrument ? safeWindSpec(node.windInstrument) : null;
+  const membraneSpec = node.acousticMembrane ? safeMembraneSpec(node.acousticMembrane) : null;
 
   const stringEval = useMemo(
     () => (node.acousticString ? stringReadout(node, sceneGraph.nodes) : null),
@@ -190,7 +204,11 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
       return { fundamentalHz: membraneEval.profile.fundamentalHz, overtoneRatio: membraneEval.overtoneRatio, regime: 'plate' as const };
     }
     if (tubeColumn && node.resonatorTube) {
-      const ratio = tubeColumn.overtonesHz[0] && tubeColumn.fundamentalHz > 0 ? tubeColumn.overtonesHz[0] / tubeColumn.fundamentalHz : 3;
+      const fallbackRatio = tubeColumn.endCondition === 'open_open' ? 2 : 3;
+      const ratio =
+        tubeColumn.overtonesHz[1] && tubeColumn.fundamentalHz > 0
+          ? tubeColumn.overtonesHz[1] / tubeColumn.fundamentalHz
+          : fallbackRatio;
       return { fundamentalHz: tubeColumn.fundamentalHz, overtoneRatio: ratio, regime: 'tube' as const };
     }
     const p = estimateBodyModes(node);
@@ -219,7 +237,8 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
         : null,
     [node, sceneGraph.nodes, bow],
   );
-  const [bowActive, setBowActive] = useState(false);
+  const [bowActiveId, setBowActiveId] = useState<string | null>(null);
+  const bowActive = bowActiveId === node.id;
   const bowStartedAtRef = useRef(0);
   const bowStopTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const windTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -228,7 +247,14 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
 
   const [targetNote, setTargetNote] = useState<string>('A4');
   const [drillNodalHole, setDrillNodalHole] = useState<boolean>(false);
-  const [summary, setSummary] = useState<string | null>(null);
+  const [summaryState, setSummaryState] = useState<{ id: string; text: string } | null>(null);
+  const summary = summaryState && summaryState.id === node.id ? summaryState.text : null;
+  const setSummary = useCallback(
+    (text: string | null) => {
+      setSummaryState(text === null ? null : { id: node.id, text });
+    },
+    [node.id],
+  );
 
   const setBow = useCallback(
     (patch: Partial<BowPreviewSettings>) => {
@@ -245,7 +271,7 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
     const wait = Math.max(0, 450 - (performance.now() - bowStartedAtRef.current));
     bowStopTimerRef.current = setTimeout(() => {
       bowActiveRef.current = false;
-      setBowActive(false);
+      setBowActiveId(null);
       silenceBowedVoices();
       releaseAcousticAudition();
     }, wait);
@@ -257,8 +283,8 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
     bowStartedAtRef.current = performance.now();
     bowActiveRef.current = true;
     holdAcousticAudition(1500);
-    setBowActive(true);
-  }, []);
+    setBowActiveId(node.id);
+  }, [node.id]);
 
   // While a Bow audition is held, every slider move re-solves and restreams the voice.
   useEffect(() => {
@@ -276,12 +302,14 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
       if (windTimerRef.current) clearTimeout(windTimerRef.current);
       if (bowActiveRef.current) {
         bowActiveRef.current = false;
+        setBowActiveId(null);
         silenceBowedVoices();
       }
       if (windActiveRef.current) {
         windActiveRef.current = false;
         silenceWindVoices();
       }
+      setSummaryState(null);
       releaseAcousticAudition();
     };
   }, [node.id]);
@@ -328,28 +356,51 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
     }, 850);
   };
 
-  const handleMembraneStrike = (impulseNs: number) => {
-    unlockAudioContext();
-    const res = solveMembraneImpact(node, sceneGraph.nodes, { impulseNs });
-    if (!res) return;
+  const playMembraneAudition = (
+    res: NonNullable<ReturnType<typeof solveMembraneImpact>>,
+    impulseNs: number,
+  ) => {
+    const glideFrac = res.pitchGlide.initialRatio > 0.0004 ? res.pitchGlide.initialRatio : undefined;
+    const glideTau = glideFrac ? res.pitchGlide.glideTauSec : undefined;
+    const voices = res.voices.map((v) => ({
+      ...v,
+      ...(glideFrac !== undefined ? { pitchDroopFrac: glideFrac, pitchDroopTauSec: glideTau } : {}),
+    }));
     playModalImpact(res.evaluation.profile, impulseNs, false, {
       tauC: res.tauC,
       effectiveBrightness: res.effectiveBrightness,
       radiationScale: res.radiationScale,
-      voices: res.voices,
+      voices,
       bodyIr: res.bodyIr,
+      ...(res.snareRattle
+        ? {
+            snare: {
+              gain: res.snareRattle.gain,
+              decaySec: res.snareRattle.decaySec,
+              centerHz: res.snareRattle.bandpassHz,
+            },
+          }
+        : {}),
     });
+  };
+
+  const handleMembraneStrike = (impulseNs: number) => {
+    unlockAudioContext();
+    const res = solveMembraneImpact(node, sceneGraph.nodes, { impulseNs });
+    if (!res) return;
+    playMembraneAudition(res, impulseNs);
   };
 
   const handleRingTube = () => {
     if (!tubeColumn) return;
     unlockAudioContext();
     const f0 = tubeColumn.fundamentalHz;
-    const partials = [f0, ...tubeColumn.overtonesHz].slice(0, 6);
+    const fallbackRatio = tubeColumn.endCondition === 'open_open' ? 2 : 3;
+    const partials = (tubeColumn.overtonesHz.length > 0 ? tubeColumn.overtonesHz : [f0]).slice(0, 6);
     playModalImpact(
       {
         fundamentalHz: f0,
-        overtoneRatio: partials[1] && f0 > 0 ? partials[1] / f0 : 3,
+        overtoneRatio: partials[1] && f0 > 0 ? partials[1] / f0 : fallbackRatio,
         regime: 'tube',
         material: { label: 'Air column', density: 1.2, modulusGPa: 0.0001, qualityQ: tubeColumn.qualityQ, brightness: 0.4 },
         contactDurationSec: 0.0007,
@@ -365,13 +416,51 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
     const prof = estimateBodyModes(node, true);
     const impulseNs = 2.2;
     const env = solveVonKarmanPlateImpact(prof, node, impulseNs, prof.contactDurationSec);
-    const cascade = env ? env.cascadeVoices.map((v) => ({ freqHz: v.freqHz, gain: v.peakGain * 0.6, decaySec: v.decaySec })) : [];
+    type ImpactOverride = NonNullable<Parameters<typeof playModalImpact>[3]>;
+    let voices: ImpactOverride['voices'] = prof.modes.map((v) => ({ ...v }));
+    let crashShimmer: ImpactOverride['crashShimmer'];
+    if (env?.active) {
+      voices = voices.map((v) => ({
+        ...v,
+        decaySec: +Math.max(0.020, v.decaySec * env.lowModeDecayScale).toFixed(4),
+        ...(Math.abs(env.pitchGlideRatio) > 0.0005
+          ? {
+              pitchDroopFrac: env.pitchGlideRatio,
+              pitchDroopTauSec: env.glideTauSec,
+            }
+          : {}),
+      }));
+      for (const cv of env.cascadeVoices) {
+        voices.push({
+          freqHz: cv.freqHz,
+          gain: cv.peakGain,
+          decaySec: cv.decaySec,
+          bloomDelaySec: +(cv.bloomAttackSec * 0.25).toFixed(4),
+          bloomAttackSec: +(cv.bloomAttackSec * 0.75).toFixed(4),
+          ...(Math.abs(env.pitchGlideCents) > 1
+            ? {
+                pitchGlideCents: +(env.pitchGlideCents * 0.65).toFixed(2),
+                pitchDroopTauSec: env.glideTauSec,
+              }
+            : {}),
+        });
+      }
+      if (env.shimmerPeakGain > 0.005) {
+        crashShimmer = {
+          gain: env.shimmerPeakGain,
+          bloomSec: env.shimmerBloomSec,
+          decaySec: env.shimmerDecaySec,
+          highpassHz: Math.max(1800, Math.round(env.shimmerBandHz * 0.65)),
+        };
+      }
+    }
     playModalImpact(prof, impulseNs, false, {
       tauC: prof.contactDurationSec,
       effectiveBrightness: prof.material.brightness,
       radiationScale: 1.15,
-      voices: [...prof.modes, ...cascade],
+      voices,
       bodyIr: prof.bodyIr,
+      ...(crashShimmer ? { crashShimmer } : {}),
     });
   };
 
@@ -444,13 +533,7 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
     if (res.node.acousticMembrane) {
       const res2 = solveMembraneImpact(res.node, nextNodes, { impulseNs: 0.35 });
       if (res2) {
-        playModalImpact(res2.evaluation.profile, 0.35, false, {
-          tauC: res2.tauC,
-          effectiveBrightness: res2.effectiveBrightness,
-          radiationScale: res2.radiationScale,
-          voices: res2.voices,
-          bodyIr: res2.bodyIr,
-        });
+        playMembraneAudition(res2, 0.35);
       }
       return;
     }
@@ -483,8 +566,8 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
   };
 
   const patchMembrane = (patch: Partial<AcousticMembraneSpec>) => {
-    if (!node.acousticMembrane) return;
-    updateNode(node.id, { acousticMembrane: { ...node.acousticMembrane, ...patch } });
+    if (!membraneSpec) return;
+    updateNode(node.id, { acousticMembrane: { ...membraneSpec, ...patch } });
   };
 
   const patchTube = (patch: Partial<ResonatorTubeSpec>) => {
@@ -530,7 +613,7 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
 
   const bodyChoices = listBodies(sceneGraph.nodes, node.id).slice(0, 80);
   const hingeChoices = listHingeJoints(sceneGraph.nodes).slice(0, 80);
-  const membraneMat = node.acousticMembrane ? MEMBRANE_MATERIALS[node.acousticMembrane.material] ?? MEMBRANE_MATERIALS.mylar : null;
+  const membraneMat = membraneSpec ? MEMBRANE_MATERIALS[membraneSpec.material] ?? MEMBRANE_MATERIALS.mylar : null;
 
   return (
     <div className="p-3 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col gap-2">
@@ -688,13 +771,13 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
         </div>
       )}
 
-      {role === 'membrane' && node.acousticMembrane && membraneMat && (
+      {role === 'membrane' && membraneSpec && membraneMat && (
         <div className="flex flex-col gap-1.5 text-[10px] bg-rose-50/60 dark:bg-rose-950/20 border border-rose-200/70 dark:border-rose-800/50 rounded px-2 py-1.5">
           <div className="grid grid-cols-2 gap-1.5">
             <label className="flex flex-col gap-0.5">
               <span className={labelClass}>Head</span>
               <select
-                value={node.acousticMembrane.material}
+                value={membraneSpec.material}
                 onChange={(e) => patchMembrane({ material: e.target.value as MembraneMaterialId })}
                 className={selectClass}
                 aria-label="Head material"
@@ -707,7 +790,7 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
             <label className="flex flex-col gap-0.5">
               <span className={labelClass}>Shape</span>
               <select
-                value={node.acousticMembrane.shape ?? ''}
+                value={membraneSpec.shape ?? ''}
                 onChange={(e) => patchMembrane({ shape: (e.target.value || undefined) as AcousticMembraneSpec['shape'] })}
                 className={selectClass}
                 aria-label="Head shape"
@@ -720,20 +803,20 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
           </div>
           <Slider
             label="Tension"
-            value={node.acousticMembrane.tensionNPerM}
-            shown={`${node.acousticMembrane.tensionNPerM.toFixed(0)} N/m${membraneEval ? ` (${Math.round(membraneEval.stressRatio * 100)}% yield)` : ''}`}
-            min={100}
-            max={8000}
+            value={Math.max(15, Math.min(75000, membraneSpec.tensionNPerM))}
+            shown={`${membraneSpec.tensionNPerM.toFixed(0)} N/m${membraneEval ? ` (${Math.round(membraneEval.stressRatio * 100)}% yield)` : ''}`}
+            min={15}
+            max={75000}
             step={10}
             accent="accent-rose-500"
             onChange={(v) => patchMembrane({ tensionNPerM: v })}
           />
           <Slider
             label="Thickness"
-            value={node.acousticMembrane.thicknessMm}
-            shown={`${node.acousticMembrane.thicknessMm.toFixed(2)} mm`}
+            value={Math.max(0.05, Math.min(2.0, membraneSpec.thicknessMm))}
+            shown={`${membraneSpec.thicknessMm.toFixed(2)} mm`}
             min={0.05}
-            max={0.6}
+            max={2.0}
             step={0.01}
             accent="accent-rose-500"
             onChange={(v) => patchMembrane({ thicknessMm: v })}
@@ -741,7 +824,7 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
           <label className="flex flex-col gap-0.5">
             <span className={labelClass}>Kettle / shell body</span>
             <select
-              value={node.acousticMembrane.shellNodeId ?? ''}
+              value={membraneSpec.shellNodeId ?? ''}
               onChange={(e) => patchMembrane({ shellNodeId: e.target.value || undefined })}
               className={selectClass}
               aria-label="Shell body"
@@ -754,8 +837,8 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
           </label>
           <Slider
             label="Kettle air coupling"
-            value={node.acousticMembrane.kettleCoupling ?? 0.6}
-            shown={(node.acousticMembrane.kettleCoupling ?? 0.6).toFixed(2)}
+            value={membraneSpec.kettleCoupling ?? 0.6}
+            shown={(membraneSpec.kettleCoupling ?? 0.6).toFixed(2)}
             min={0}
             max={1}
             step={0.01}
@@ -764,8 +847,8 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
           />
           <Slider
             label="Snare buzz"
-            value={node.acousticMembrane.snareBuzz ?? 0}
-            shown={(node.acousticMembrane.snareBuzz ?? 0).toFixed(2)}
+            value={membraneSpec.snareBuzz ?? 0}
+            shown={(membraneSpec.snareBuzz ?? 0).toFixed(2)}
             min={0}
             max={1}
             step={0.01}
@@ -774,8 +857,8 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
           />
           <Slider
             label="Hard-strike pitch drop"
-            value={node.acousticMembrane.pitchGlideSemitones ?? membraneEval?.pitchGlide.semitones ?? 0}
-            shown={`${(node.acousticMembrane.pitchGlideSemitones ?? membraneEval?.pitchGlide.semitones ?? 0).toFixed(2)} st`}
+            value={membraneSpec.pitchGlideSemitones ?? membraneEval?.pitchGlide.semitones ?? 0}
+            shown={`${(membraneSpec.pitchGlideSemitones ?? membraneEval?.pitchGlide.semitones ?? 0).toFixed(2)} st`}
             min={0}
             max={4}
             step={0.05}
@@ -784,8 +867,8 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
           />
           <Slider
             label="Glide decay"
-            value={node.acousticMembrane.pitchGlideDecayMs ?? 90}
-            shown={`${(node.acousticMembrane.pitchGlideDecayMs ?? 90).toFixed(0)} ms`}
+            value={membraneSpec.pitchGlideDecayMs ?? 90}
+            shown={`${(membraneSpec.pitchGlideDecayMs ?? 90).toFixed(0)} ms`}
             min={20}
             max={250}
             step={5}
@@ -794,8 +877,8 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
           />
           <Slider
             label="Nonlinear glide"
-            value={node.acousticMembrane.nonlinearGlide ?? 1}
-            shown={`×${(node.acousticMembrane.nonlinearGlide ?? 1).toFixed(2)}`}
+            value={membraneSpec.nonlinearGlide ?? 1}
+            shown={`×${(membraneSpec.nonlinearGlide ?? 1).toFixed(2)}`}
             min={0}
             max={2}
             step={0.05}
@@ -855,10 +938,10 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
             <label className="flex flex-col gap-0.5">
               <span className={labelClass}>Gauge ({stringSpec.diameterMm.toFixed(2)} mm)</span>
               <RangeInput
-                min="0.20"
-                max="1.60"
+                min="0.14"
+                max="2.45"
                 step="0.02"
-                value={stringSpec.diameterMm}
+                value={Math.max(0.14, Math.min(2.45, stringSpec.diameterMm))}
                 onChange={(v) => patchString({ diameterMm: v })}
                 className="w-full accent-violet-500 cursor-pointer mt-1.5"
               />
@@ -873,10 +956,10 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
               </span>
             </label>
             <RangeInput
-              min="8"
-              max="160"
+              min="2"
+              max="280"
               step="0.5"
-              value={stringSpec.tensionN}
+              value={Math.max(2, Math.min(280, stringSpec.tensionN))}
               onChange={(v) => {
                 const kPerp = +(4 * v / stringLengthM(node)).toFixed(1);
                 const nextJoints = (node.joints ?? []).map((j, idx) =>
@@ -905,7 +988,7 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
             <span title="Kirchhoff–Carrier tension modulation: a hard pluck starts sharp and settles flat">Nonlinear pitch droop on hard plucks</span>
             <input
               type="checkbox"
-              checked={!!stringSpec.nonlinearPitchDroop}
+              checked={stringSpec.nonlinearPitchDroop !== false && stringSpec.nonlinearPitchDroop !== 0}
               onChange={(e) => patchString({ nonlinearPitchDroop: e.target.checked })}
             />
           </label>
@@ -959,7 +1042,8 @@ export function AcousticTuningCard({ node }: { node: SceneNode }) {
                   if ((e.key === 'Enter' || e.key === ' ') && !e.repeat) {
                     e.preventDefault();
                     startBow();
-                    setTimeout(endBow, 1100);
+                    if (bowStopTimerRef.current) clearTimeout(bowStopTimerRef.current);
+                    bowStopTimerRef.current = setTimeout(endBow, 1100);
                   }
                 }}
                 title="Bow: hold for a sustained Helmholtz stick-slip note; move the sliders while it sounds"

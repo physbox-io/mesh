@@ -1996,8 +1996,8 @@ export function analyze3DCavityAndPorts(node: SceneNode): Cavity3DAnalysis {
         }
       }
 
-      const stepU = nAxis === 0 ? hy : hx;
-      const stepV = nAxis === 2 ? hy : hz;
+      const stepU = nAxis === 0 ? hy : nAxis === 1 ? hz : hx;
+      const stepV = nAxis === 0 ? hz : nAxis === 1 ? hx : hy;
       const refined = refinePortPatch(
         scene,
         nAxis,

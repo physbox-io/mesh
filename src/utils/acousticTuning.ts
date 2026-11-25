@@ -239,7 +239,8 @@ export function tuneWindInstrumentToPitch(
 ): SceneNode {
   const spec = node.windInstrument;
   if (!spec) return node;
-  const targetHz = Math.max(24, Math.min(3500, targetHzRaw));
+  const safeTargetHz = Number.isFinite(targetHzRaw) ? targetHzRaw : 261.63;
+  const targetHz = Math.max(24, Math.min(3500, safeTargetHz));
 
   // Autonomous compliant flap-valve (`flap_valve` / short sub-resonant whoopee nozzle):
   // oscillation pitch is governed directly by the valve's mechanical natural frequency `embouchureHz`!
@@ -416,7 +417,8 @@ export function tuneBodyToPitch(
   targetHzRaw: number,
   opts: TunePitchOptions = {},
 ): TunePitchResult {
-  const targetHz = Math.max(25, Math.min(8000, targetHzRaw));
+  const safeTargetHz = Number.isFinite(targetHzRaw) ? targetHzRaw : 261.63;
+  const targetHz = Math.max(25, Math.min(8000, safeTargetHz));
 
   // Specialized Path A: Tensioned 2D Membrane (`acousticMembrane`)
   if (inputNode.acousticMembrane) {

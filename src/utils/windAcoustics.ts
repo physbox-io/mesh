@@ -1874,7 +1874,7 @@ export function extractBoreWaveguide(
       toneholes.push({
         cellIndex: cellIdx,
         axialFraction: frac,
-        radiusMm: roundN(rHole * 2000, 10),
+        radiusMm: roundN(rHole * 1000, 10),
         shuntCoeff: roundN(Math.max(-0.85, Math.min(-0.08, shunt)), 10000),
         keyJointName: th.jointName,
         openAmount: preOpenAmounts[i],
@@ -1893,7 +1893,7 @@ export function extractBoreWaveguide(
     toneholes.push({
       cellIndex: cellIdx,
       axialFraction: h.axialFraction,
-      radiusMm: +(h.radiusM * 2000).toFixed(1),
+      radiusMm: +(h.radiusM * 1000).toFixed(1),
       shuntCoeff: +Math.max(-0.85, Math.min(-0.08, shunt)).toFixed(4),
       openAmount: 1,
       fromGeometry: true,

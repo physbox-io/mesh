@@ -614,14 +614,14 @@ function evaluateTensionedMembraneInternal(
       if (bm.m >= 1 && isClosedKettle && hasShellCavity && shellVolumeM3 > 1e-5 && kettleStrength > 0) {
         const lkOverA = Math.max(0.35, shellVolumeM3 / Math.max(1e-5, areaM2 * a));
         const cothTerm = 1 / Math.tanh(Math.min(8, bm.jmn * lkOverA * 0.45));
-        sigmaKettleAir = kettleStrength * ((3.5 * AIR_DENSITY_KGM3 * a) / Math.pow(bm.jmn, 1.55)) * cothTerm;
+        sigmaKettleAir = kettleStrength * ((5.2 * AIR_DENSITY_KGM3 * a) / Math.pow(bm.jmn, 1.72)) * cothTerm;
       } else if (bm.m === 0 && bm.n === 1 && isDualHeadOrVentedSnare && hasShellCavity) {
         // Dual-head snare/tom in-phase (0,1) mode carries the internal shell air plug without compressing it,
         // slightly lowering f_{01} into a warm, fat studio snare fundamental (~170–195 Hz)!
         sigmaKettleAir = 0.28 * AIR_DENSITY_KGM3 * Math.min(0.22, shellDepthM);
       }
       const sigmaEff = sigmaFilm + sigmaFrontAir + sigmaKettleAir;
-      const stiffFactor = Math.sqrt(1 + (D * Math.pow(bm.jmn, 4)) / Math.max(1e-6, tensionNPerM * a * a));
+      const stiffFactor = Math.sqrt(1 + (D * bm.jmn * bm.jmn) / Math.max(1e-6, tensionNPerM * a * a));
       let fMode = (bm.jmn / (2 * Math.PI * a)) * Math.sqrt(tensionNPerM / sigmaEff) * stiffFactor;
 
       // Axisymmetric modes (m === 0) displace net air volume and couple to an enclosed kettle or Helmholtz shell!
@@ -641,7 +641,10 @@ function evaluateTensionedMembraneInternal(
           const kappa = 0.18 * kettleStrength;
           const sumSq = fMode * fMode + fH * fH;
           const diffSq = fMode * fMode - fH * fH;
-          fMode = Math.sqrt(0.5 * (sumSq + Math.sqrt(diffSq * diffSq + 4 * kappa * kappa * fMode * fMode * fH * fH)));
+          const branchSign = diffSq >= 0 ? 1 : -1;
+          fMode = Math.sqrt(
+            Math.max(0, 0.5 * (sumSq + branchSign * Math.sqrt(diffSq * diffSq + 4 * kappa * kappa * fMode * fMode * fH * fH))),
+          );
         }
       }
 
@@ -965,7 +968,8 @@ export function tuneMembraneToPitch(
   targetHzRaw: number,
   sceneNodes?: SceneNode[],
 ): SceneNode {
-  const targetHz = Math.max(25, Math.min(2500, targetHzRaw));
+  const safeTargetHz = Number.isFinite(targetHzRaw) ? targetHzRaw : 261.63;
+  const targetHz = Math.max(25, Math.min(2500, safeTargetHz));
   const baseSpec: AcousticMembraneSpec = node.acousticMembrane
     ? { ...node.acousticMembrane }
     : {
@@ -1010,8 +1014,8 @@ export function tuneMembraneToPitch(
   let bestT = +(0.5 * (loT + hiT)).toFixed(2);
   curEval = evalAtTension(bestT, thickMm);
 
-  // If film stress exceeds 80% of material ultimate strength, thin the film (or step to kevlar only if requested)
-  if (curEval.stressRatio > 0.80 && thickMm > 0.10) {
+  // If film stress exceeds 80% of material ultimate strength, clamp safely below 88% ultimate yield
+  if (curEval.stressRatio > 0.80) {
     // Wait: sigma_stress = T / h, while T ∝ sigma_areal = rho * h => T / h ≈ rho * (2π a f / j)^2 is independent of h!
     // Clamp tension safely below 88% ultimate yield if extreme pitch exceeds physical film wave-speed limit.
     const maxSafeT = 0.88 * mat.ultimateStrengthMPa * 1e6 * (thickMm * 1e-3);

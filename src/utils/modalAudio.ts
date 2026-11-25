@@ -854,16 +854,22 @@ function buildWeightedModalVoices(
   strikeXi?: number,
   modeQs?: number[],
 ): ModalVoice[] {
+  const safeTauC = Number.isFinite(tauC) && tauC > 0 ? tauC : 0.001;
+  const safeQualityQ = Number.isFinite(qualityQ) && qualityQ > 0 ? qualityQ : 80;
+  const safeStrikeXi =
+    strikeXi !== undefined && Number.isFinite(strikeXi)
+      ? Math.max(-1, Math.min(1, strikeXi))
+      : undefined;
   const modes: ModalVoice[] = [];
   for (let idx = 0; idx < freqs.length; idx++) {
     const rawHz = freqs[idx];
-    if (rawHz < 24 || rawHz > 18000) continue;
+    if (!Number.isFinite(rawHz) || rawHz < 24 || rawHz > 18000) continue;
 
     // 1. Fourier spectrum of the half-sine Hertzian contact force pulse + dual-stiffness mallet core:
     //    |F(f)| = |cos(π f τ_c) / (1 - (2 f τ_c)²)|
     //    For f * τ_c > 1.0 (soft yarn mallet on upper partials), rolls off smoothly while preserving
     //    warm 4*f1 and 9.2*f1 arch overtone articulation from the firmer inner mallet core!
-    const x = rawHz * tauC;
+    const x = rawHz * safeTauC;
     let pulseExcitation: number;
     if (Math.abs(x - 0.5) < 1e-3) {
       pulseExcitation = Math.PI / 4;
@@ -877,27 +883,40 @@ function buildWeightedModalVoices(
     //    Striking near the center strongly excites symmetric modes (m=1, 3) and gently excites the 4*f1
     //    arch harmonic across the finite mallet head radius, while striking off-center excites all overtones!
     let spatialWeight = 1.0;
-    if (strikeXi !== undefined && modeVectors && modeVectors[idx]) {
+    if (safeStrikeXi !== undefined && modeVectors && modeVectors[idx]) {
       const vec = modeVectors[idx];
-      const xiLo = Math.max(-1, Math.min(1, strikeXi - 0.10));
-      const xiHi = Math.max(-1, Math.min(1, strikeXi + 0.10));
+      const xiLo = Math.max(-1, Math.min(1, safeStrikeXi - 0.10));
+      const xiHi = Math.max(-1, Math.min(1, safeStrikeXi + 0.10));
       const patchAvg =
-        0.5 * evaluateNormalizedModeShape(vec, strikeXi) +
+        0.5 * evaluateNormalizedModeShape(vec, safeStrikeXi) +
         0.25 * evaluateNormalizedModeShape(vec, xiLo) +
         0.25 * evaluateNormalizedModeShape(vec, xiHi);
-      spatialWeight = 0.12 + 0.92 * patchAvg;
+      if (Number.isFinite(patchAvg)) {
+        spatialWeight = 0.12 + 0.92 * patchAvg;
+      }
     }
 
-    const weightedGain = (baseGains[idx] ?? 0.12) * Math.min(1.25, pulseExcitation * 1.08) * spatialWeight;
-    if (weightedGain < 0.006) continue;
+    const rawBaseGain = baseGains[idx];
+    const baseGain =
+      rawBaseGain === undefined
+        ? 0.12
+        : Number.isFinite(rawBaseGain)
+          ? rawBaseGain
+          : 0;
+    const weightedGain = baseGain * Math.min(1.25, pulseExcitation * 1.08) * spatialWeight;
+    if (!Number.isFinite(weightedGain) || weightedGain < 0.006) continue;
 
     // Zener thermoelastic + acoustic radiation damping increases with mode order.
     // Free structural solids use physical RT60/RT80 ring duration (~6.91 * Q / (π f)) matching voiceSympathyPool's
     // -80 dB exponential ramp; explicit `modeQs` overrides (joined cabinet seam thuds / air ports) keep crisp fast decay.
-    const baseModeQ = modeQs?.[idx] ?? qualityQ;
+    const rawModeQ = modeQs?.[idx];
+    const baseModeQ =
+      typeof rawModeQ === 'number' && Number.isFinite(rawModeQ) && rawModeQ > 0
+        ? rawModeQ
+        : safeQualityQ;
     const modeQ = baseModeQ / (1 + (modeQs ? 1.2 : 1.85) * idx * idx);
     const rawDecay = (modeQ / (Math.PI * rawHz)) * (modeQs ? 2.8 : 6.91);
-    const decaySec = Math.max(0.016, Math.min(4.2, rawDecay));
+    const decaySec = Number.isFinite(rawDecay) ? Math.max(0.016, Math.min(4.2, rawDecay)) : 0.05;
 
     modes.push({
       freqHz: +rawHz.toFixed(2),
@@ -930,14 +949,22 @@ export function resolveTwoBodyImpact(
   opts: TwoBodyImpactOptions,
 ): TwoBodyImpactResult {
   const targetProfile = asBodyModalProfile(targetProfileIn);
+  const safeImpulseNs = Number.isFinite(opts.impulseNs) && opts.impulseNs > 0 ? opts.impulseNs : 0;
+  const safeLocalPoint: [number, number, number] | undefined =
+    opts.localPoint &&
+    Number.isFinite(opts.localPoint[0]) &&
+    Number.isFinite(opts.localPoint[1]) &&
+    Number.isFinite(opts.localPoint[2])
+      ? opts.localPoint
+      : undefined;
   const propsA = inferColliderContactProps(targetNode, opts.selfGeomName);
   const propsB = inferColliderContactProps(opts.strikerNode, opts.strikerGeomName);
 
   // Starter #1: Tensioned 2D drum/timpani membrane impact — ONLY when `targetNode.acousticMembrane` is explicitly set!
   if (targetNode.acousticMembrane !== undefined && !opts.isPluck) {
     const mem = solveMembraneImpact(targetNode, opts.sceneNodes, {
-      impulseNs: opts.impulseNs,
-      localPoint: opts.localPoint,
+      impulseNs: safeImpulseNs,
+      localPoint: safeLocalPoint,
       strikerNode: opts.strikerNode,
       strikerGeomName: opts.strikerGeomName,
     });
@@ -983,7 +1010,7 @@ export function resolveTwoBodyImpact(
   const mStar = (propsA.massKg * propsB.massKg) / Math.max(1e-6, propsA.massKg + propsB.massKg);
 
   // Relative impact velocity estimated from physical impulse J = (1 + e) m* v_rel
-  const vRel = Math.max(0.06, Math.min(12.0, opts.impulseNs / Math.max(0.0015, 1.55 * mStar)));
+  const vRel = Math.max(0.06, Math.min(12.0, safeImpulseNs / Math.max(0.0015, 1.55 * mStar)));
 
   // Landau–Lifshitz / Rayleigh–Hertz two-body elastic contact duration:
   //   τ_c = 2.87 * γ_macro * (m*² / (R* * E*² * v_rel))^(1/5)
@@ -1000,7 +1027,7 @@ export function resolveTwoBodyImpact(
   // Map body-local hit point onto normalized principal coordinate ξ_hit in [-1, 1]
   // (supporting both axis-aligned solids and rotated/`fromto` principal axes!)
   let strikeXi: number | undefined;
-  if (opts.localPoint && targetProfile.lenBounds) {
+  if (safeLocalPoint && targetProfile.lenBounds) {
     const [sLo, sHi] = targetProfile.lenBounds;
     const mid = 0.5 * (sLo + sHi);
     const half = Math.max(1e-4, 0.5 * (sHi - sLo));
@@ -1008,12 +1035,18 @@ export function resolveTwoBodyImpact(
       const dir = targetProfile.principalLenDir;
       const orig = targetProfile.principalOrigin ?? [0, 0, 0];
       const sProj =
-        (opts.localPoint[0] - orig[0]) * dir[0] +
-        (opts.localPoint[1] - orig[1]) * dir[1] +
-        (opts.localPoint[2] - orig[2]) * dir[2];
-      strikeXi = Math.max(-1, Math.min(1, (sProj - mid) / half));
+        (safeLocalPoint[0] - orig[0]) * dir[0] +
+        (safeLocalPoint[1] - orig[1]) * dir[1] +
+        (safeLocalPoint[2] - orig[2]) * dir[2];
+      const rawXi = (sProj - mid) / half;
+      if (Number.isFinite(rawXi)) {
+        strikeXi = Math.max(-1, Math.min(1, rawXi));
+      }
     } else if (targetProfile.lenAxis !== undefined) {
-      strikeXi = Math.max(-1, Math.min(1, (opts.localPoint[targetProfile.lenAxis] - mid) / half));
+      const rawXi = (safeLocalPoint[targetProfile.lenAxis] - mid) / half;
+      if (Number.isFinite(rawXi)) {
+        strikeXi = Math.max(-1, Math.min(1, rawXi));
+      }
     }
   }
 
@@ -1028,14 +1061,14 @@ export function resolveTwoBodyImpact(
   // Starter #4b & #3: Plucked / struck taut string modes (raw un-colored modes for 3D FIR + Kirchhoff pitch droop)
   if (opts.isPluck || targetNode.acousticString) {
     const pluckBeta = targetNode.acousticString
-      ? resolveStringBetaFromPoint(targetNode, opts.localPoint, opts.stoppedLengthFraction, opts.sceneNodes)
+      ? resolveStringBetaFromPoint(targetNode, safeLocalPoint, opts.stoppedLengthFraction, opts.sceneNodes)
       : undefined;
     let voices: ModalVoiceSpec[] = targetProfile.modes.map((m) => ({ ...m }));
     let rawIrVoices: ModalVoiceSpec[] | undefined = targetProfile.rawStringModes?.map((m) => ({ ...m }));
 
     if (
       targetNode.acousticString &&
-      opts.impulseNs > 0 &&
+      safeImpulseNs > 0 &&
       voices.length > 0 &&
       voices[0].pitchDroopFrac === undefined
     ) {
@@ -1046,7 +1079,7 @@ export function resolveTwoBodyImpact(
       const droop = computePluckPitchDroop(
         targetNode,
         strLenM,
-        opts.impulseNs,
+        safeImpulseNs,
         pluckBeta ?? targetNode.acousticString.pluckPos ?? 0.18,
         voices[0].decaySec,
       );
@@ -1121,7 +1154,7 @@ export function resolveTwoBodyImpact(
   // Starter #4a: von Kármán geometric nonlinearity on thin plates / cymbals / gongs
   let voices: ModalVoiceSpec[] = baseVoices.map((v) => ({ ...v }));
   let crashShimmer: CrashShimmerParams | undefined;
-  const crashEnvelope = solveVonKarmanPlateImpact(targetProfile, targetNode, opts.impulseNs, tauC);
+  const crashEnvelope = solveVonKarmanPlateImpact(targetProfile, targetNode, safeImpulseNs, tauC);
   if (crashEnvelope?.active) {
     voices = voices.map((v) => ({
       ...v,
@@ -1240,6 +1273,7 @@ function scheduleIdleAudioSuspend(delayMs = 180): void {
 /** Returns the existing shared `AudioContext` if already created, without allocating or resuming one. */
 export function peekSharedAudioContext(): AudioContext | null {
   if (sharedAudioCtx && sharedAudioCtx.state !== 'closed') return sharedAudioCtx;
+  if (sharedAudioCtx?.state === 'closed') sharedAudioCtx = null;
   if (typeof window !== 'undefined') {
     const winCtx = (window as WindowWithAudioCtx).__physboxSharedAudioCtx;
     if (winCtx && winCtx.state !== 'closed') {
@@ -1260,6 +1294,9 @@ export function getSharedOutputBusForContext(ctx?: AudioContext | null): AudioNo
 function getAudioContext(): AudioContext | null {
   if (typeof window === 'undefined') return null;
   clearPendingSuspend();
+  if (sharedAudioCtx?.state === 'closed') {
+    sharedAudioCtx = null;
+  }
   const win = window as WindowWithAudioCtx;
   if (!sharedAudioCtx && win.__physboxSharedAudioCtx && win.__physboxSharedAudioCtx.state !== 'closed') {
     sharedAudioCtx = win.__physboxSharedAudioCtx;
@@ -1377,8 +1414,7 @@ export function playModalImpact(
   },
 ): ActiveModalVoiceGroup | null {
   if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return null;
-  const ctx = getAudioContext();
-  if (!ctx) return null;
+  if (!Number.isFinite(impulseNs) || impulseNs <= 0) return null;
 
   const radScale = twoBodyOverride?.radiationScale ?? (isPluck ? 1.15 : 1.0);
   // Concert-matched dynamic curve so marimba, metallophone, and lyre sit at the same lush presence as cornet/clarinet
@@ -1386,7 +1422,10 @@ export function playModalImpact(
     ? 0.34 * Math.log10(1 + Math.max(0.0005, impulseNs) * 140)
     : 0.30 * Math.log10(1 + Math.max(0.0005, impulseNs) * 95);
   const level = Math.min(0.56, baseLevel * radScale);
-  if (level < 0.004) return null;
+  if (!Number.isFinite(level) || level < 0.004) return null;
+
+  const ctx = getAudioContext();
+  if (!ctx) return null;
 
   const vScale = Math.pow(Math.max(0.08, Math.min(6, impulseNs * 1.8)), -0.15);
   const tauC = twoBodyOverride
@@ -1450,7 +1489,8 @@ export function playModalTap(node: SceneNode, sceneNodes?: SceneNode[]): BodyMod
 
 /** Streams active wind/brass bore parameters to the native WebAudio engine. */
 export function updateLiveWindVoices(voices: WorkletWindVoicePayload[]): void {
-  const ctx = getAudioContext();
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+  const ctx = voices.length === 0 ? peekSharedAudioContext() : getAudioContext();
   if (!ctx) return;
   postWorkletWindUpdate(ctx, voices);
 }
@@ -1462,7 +1502,8 @@ export function silenceWindVoices(): void {
 
 /** Streams active bowed-string Helmholtz voices to the native WebAudio engine. */
 export function updateLiveBowedVoices(voices: WorkletBowedVoicePayload[]): void {
-  const ctx = getAudioContext();
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+  const ctx = voices.length === 0 ? peekSharedAudioContext() : getAudioContext();
   if (!ctx) return;
   postWorkletBowedUpdate(ctx, voices);
 }
@@ -1474,7 +1515,8 @@ export function silenceBowedVoices(): void {
 
 /** Streams active rotor, wing, windmill, and cloth aeroacoustic voices to the native WebAudio engine. */
 export function updateLiveAeroVoices(voices: SpatialAeroSynthParams[]): void {
-  const ctx = getAudioContext();
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+  const ctx = voices.length === 0 ? peekSharedAudioContext() : getAudioContext();
   if (!ctx) return;
   postWorkletAeroUpdate(ctx, voices);
 }
@@ -1518,7 +1560,8 @@ export function silenceAeroVoices(): void {
 
 /** Streams active continuous rolling, scraping, squealing, and rim-singing friction voices to WebAudio. */
 export function updateLiveFrictionVoices(voices: WorkletFrictionVoicePayload[]): void {
-  const ctx = getAudioContext();
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+  const ctx = voices.length === 0 ? peekSharedAudioContext() : getAudioContext();
   if (!ctx) return;
   postWorkletFrictionUpdate(ctx, voices);
 }

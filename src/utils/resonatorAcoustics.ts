@@ -120,7 +120,12 @@ function composeNodeLocalMat(n: SceneNode, out: THREE.Matrix4): void {
     _posePos.set(px, py, pz);
     out.compose(_posePos, _poseQuat, _poseScale);
   } else if (n.euler) {
-    _poseEuler.set(n.euler[0], n.euler[1], n.euler[2], 'XYZ');
+    _poseEuler.set(
+      (n.euler[0] || 0) * THREE.MathUtils.DEG2RAD,
+      (n.euler[1] || 0) * THREE.MathUtils.DEG2RAD,
+      (n.euler[2] || 0) * THREE.MathUtils.DEG2RAD,
+      'XYZ',
+    );
     _poseQuat.setFromEuler(_poseEuler);
     _posePos.set(px, py, pz);
     out.compose(_posePos, _poseQuat, _poseScale);
@@ -755,7 +760,8 @@ export function tuneResonatorTubeToPitch(
   targetHzRaw: number,
   endConditionOverride?: ResonatorTubeEndCondition,
 ): SceneNode {
-  const targetHz = Math.max(28, Math.min(4200, targetHzRaw));
+  const safeTargetHz = Number.isFinite(targetHzRaw) ? targetHzRaw : 261.63;
+  const targetHz = Math.max(28, Math.min(4200, safeTargetHz));
   const current = extractTubeAirColumn(tubeNode);
   const endCondition: ResonatorTubeEndCondition =
     endConditionOverride ?? tubeNode.resonatorTube?.endCondition ?? current?.endCondition ?? 'open_closed';
