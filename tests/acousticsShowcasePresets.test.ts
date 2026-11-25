@@ -44,18 +44,25 @@ describe('Wave 2B Acoustics Showcase Presets', () => {
     const crashCymbal = nodes.find((n) => n.id === 'crash_cymbal')!;
     const chokeArm = nodes.find((n) => n.id === 'cymbal_choke_arm')!;
 
-    // 1. Kettle-coupled timpani head: harmonic 1 : 1.50 : 1.99 azimuthal Bessel ratios tuned to F3
+    // 1. Kettle-coupled timpani head: harmonic 1 : 1.50 : 1.99 azimuthal Bessel ratios tuned to F2
     const timpEval = evaluateTensionedMembrane(timpaniHead, nodes)!;
     expect(timpEval).not.toBeNull();
     expect(timpEval.hasShellCavity).toBe(true);
     expect(timpEval.isClosedKettle).toBe(true);
-    expect(hzToNoteInfo(timpEval.fundamentalHz).note).toBe('F3');
+    expect(hzToNoteInfo(timpEval.fundamentalHz).note).toBe('F2');
     expect(Math.abs(hzToNoteInfo(timpEval.fundamentalHz).cents)).toBeLessThanOrEqual(6);
     expect(timpEval.modeRatios[0]).toBeCloseTo(1.0, 2);
     expect(timpEval.modeRatios[1]).toBeGreaterThan(1.42);
     expect(timpEval.modeRatios[1]).toBeLessThan(1.56);
     expect(timpEval.modeRatios[2]).toBeGreaterThan(1.88);
     expect(timpEval.modeRatios[2]).toBeLessThan(2.08);
+    // Kettle-baffled azimuthal (1,1) fundamental sustains cleanly (>= 1.5 s) with subtle timpani pitch bloom (< 1.0 st)
+    const timpF2Voice = timpEval.profile.modes.find((m) => Math.abs(m.freqHz - timpEval.fundamentalHz) < 2.0)!;
+    expect(timpF2Voice).toBeDefined();
+    expect(timpF2Voice.decaySec).toBeGreaterThanOrEqual(1.5);
+    const timpHit = solveMembraneImpact(timpaniHead, nodes, { impulseNs: 0.14 })!;
+    expect(timpHit.pitchGlide.semitones).toBeGreaterThan(0.05);
+    expect(timpHit.pitchGlide.semitones).toBeLessThan(1.0);
 
     // 2. Dual-head snare drum: batter & resonant heads produce snare wire rattle + hard-strike tension pitch glide
     const snareHit = solveMembraneImpact(snareBatter, nodes, { impulseNs: 0.85 })!;

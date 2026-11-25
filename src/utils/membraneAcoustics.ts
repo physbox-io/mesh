@@ -662,13 +662,18 @@ function evaluateTensionedMembraneInternal(
           : Math.max(0.05, jVal);
 
       // Axisymmetric m = 0 modes radiate strongly as acoustic monopoles (fast radiation damping -> lower Q ~ 18..32),
-      // whereas azimuthal m >= 1 dipole/quadrupole modes sustain on timpani, while snare-wire contact chatter on snare
-      // drums (`snareAmount > 0.05`) damps high timbale/bongo ring so the fat (0,1) body dominates cleanly!
+      // whereas azimuthal m >= 1 dipole/quadrupole modes sustain much longer on an enclosed kettle timpani
+      // (closed parabolic kettle baffles back-side radiation -> 4-5x higher azimuthal Q, T60 ~ 1.5..2.5 s!),
+      // while snare-wire contact chatter on snare drums (`snareAmount > 0.05`) damps high ring so the fat (0,1) body dominates cleanly!
       const snareRingDamp =
         snareAmount > 0.05 && idx > 0 ? 1 + 2.4 * snareAmount * Math.sqrt(idx) : 1.0;
+      const kettleSustainBoost =
+        isClosedKettle && kettleStrength >= 0.45 && snareAmount <= 0.05
+          ? 1 + 4.5 * Math.min(1, kettleStrength)
+          : 1.0;
       const modeQ = bm.m === 0
         ? Math.min(mat.intrinsicQ * 0.42, 26) / (bm.n >= 2 && snareAmount > 0.05 ? 1 + 1.5 * snareAmount : 1)
-        : mat.intrinsicQ / ((1 + 0.16 * idx) * snareRingDamp);
+        : (mat.intrinsicQ * kettleSustainBoost) / ((1 + 0.16 * idx) * snareRingDamp);
 
       const modeWeight =
         snareAmount > 0.05 && idx === 0

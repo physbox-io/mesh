@@ -197,12 +197,14 @@ export interface SceneGeom {
    */
   stableMesh?: boolean;
   // For type='mesh': flat array of vertex positions (x0,y0,z0, x1,y1,z1, ...) and
-  // flat array of triangle face indices (i0,j0,k0, i1,j1,k1, ...).
-  // vertices are in Three.js Y-up space; the mjcf builder swaps Y↔Z for MuJoCo.
+  // Flat array of triangle face indices (i0,j0,k0, i1,j1,k1, ...).
+  // `vertices` are in Three.js Y-up space [x, z, -y]; mjcf.ts rotates (x,y,z)->(x,-z,y) for MuJoCo Z-up.
   vertices?: number[];
   faces?: number[];
-  // When true, the mesh participates in simulation and its transform is tracked from MuJoCo.
-  // The renderer uses renderVertices (Z-up, centroid at origin) inside the rotated group.
+  // When true, the mesh is drawn inside the Z-up body group and tracks MuJoCo's body transform.
+  // REQUIRED pair: every `dynamic: true` mesh MUST also set `renderVertices` (raw Z-up [x, y, z]) —
+  // SceneLayer renders dynamic meshes strictly from `renderVertices`, so omitting it makes the mesh invisible!
+  // Conversely, omitting `dynamic: true` on Z-up `vertices` draws it flipped 90° vertical in static Y-up space.
   dynamic?: boolean;
   /**
    * How hard this surface has to be struck before it takes a dent, in N*s.
@@ -396,7 +398,8 @@ export interface SceneGeom {
    * with the un-cut cage.
    */
   latticeGeom?: boolean;
-  // Centroid-recentered vertices in MuJoCo Z-up space for dynamic mesh rendering.
+  // Raw MuJoCo Z-up vertices [x, y, z] required for rendering any `dynamic: true` mesh
+  // (no centroid subtraction; pair with Y-up `vertices` = [x, z, -y]).
   renderVertices?: number[];
   /**
    * The un-rotated mesh, kept so repeated absolute rotations compose from the

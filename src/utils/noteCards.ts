@@ -704,18 +704,18 @@ A mechanical music-box cylinder and six spring-returned hinged mallets play Edva
 
   metallophone_carillon: `# 🔔 Steel Glockenspiel Carillon
 
-The metallic sister to the rosewood marimba: six **high-carbon steel glockenspiel bars** (**G4–A4–C5–D5–E5–G5**, $Q \\approx 950$ for long, shimmering bell sustain) struck by solid **brass mallets** to play **Amazing Grace**.
+The metallic sister to the rosewood marimba: six **high-carbon steel glockenspiel bars** (**G4–A4–C5–D5–E5–G5**, Q ≈ 950 for long, shimmering bell sustain) struck by solid **brass mallets** to play **Amazing Grace**.
 
 ## Wood vs Steel in Modal Synthesis
-- **Rosewood Marimba** ($E \\approx 12.5\\text{ GPa}, Q \\approx 145$): warm, woody attack that decays in ~0.25 s
-- **Steel Glockenspiel** ($E \\approx 200\\text{ GPa}, Q \\approx 950$): bright metallic transient and ~2 s crystalline sustain where consecutive notes ring together into chords!`,
+- **Rosewood Marimba** (E ≈ 12.5 GPa, Q ≈ 145): warm, woody attack that decays in ~0.25 s
+- **Steel Glockenspiel** (E ≈ 200 GPa, Q ≈ 950): bright metallic transient and ~2 s crystalline sustain where consecutive notes ring together into chords!`,
 
   soundbox_lyre: `# 🎸 Acoustic Soundbox Lyre
 
-Five **80/20 bronze strings** (**C4–D4–E4–G4–A4**) stretched across a hollowed **2.5 L spruce soundbox** with a **Ø52 mm soundhole** ($f_H \\approx 122\\text{ Hz}$ Helmholtz air resonance), strummed by an oscillating plectrum.
+Five **80/20 bronze strings** (**C4–D4–E4–G4–A4**) stretched across a hollowed **2.5 L spruce soundbox** with a **Ø52 mm soundhole** (f_H ≈ 122 Hz Helmholtz air resonance), strummed by an oscillating plectrum.
 
 ## What is physical here
-- **Mersenne's Law + Fletcher Inharmonicity**: pitch comes from wire tension $T$, gauge, density, and vibrating span $L$, with transverse MuJoCo stiffness $k_\\perp = 4T/L$
+- **Mersenne's Law + Fletcher Inharmonicity**: pitch comes from wire tension T, gauge, density, and vibrating span L, with transverse MuJoCo stiffness k = 4T/L
 - **Bridge → Soundbox Coupling**: string harmonics drive the soundbox's **Helmholtz air mode** and **top-plate mode**
 
 ## Try it
@@ -727,8 +727,8 @@ Five **80/20 bronze strings** (**C4–D4–E4–G4–A4**) stretched across a ho
 An **80 g Pernambuco & horsehair bow** on a concentric arched-bridge gimbal plays the opening arpeggio of **J.S. Bach's Cello Suite No. 1 in G Major (BWV 1007)** (**G2–D3–B3–A3–B3–D3–B3–D3**) across four standard baritone cello strings (**C2–G2–D3–A3**) over a hollowed **~8.2 L spruce & maple cello body** with **twin CSG f-holes**, while a **3D left-hand finger** stops **B3** on the **A3** string.
 
 ## What is physical here
-- **Complete 3D Load Path**: strings bear on the **arched ebony nut** ($y = +0.295\\text{ m}$) and the **standing arched maple bridge** ($R = 86\\text{ mm}$, $y = -0.045\\text{ m}$) planted on the **4.5 mm spruce belly**, while \`cello_finger_b3\` stops the **A3** wire at $8/9$ scale for **B3 (246.9 Hz)**.
-- **Helmholtz Stick-Slip & Schelleng Bow Wedge**: MuJoCo bow sliding speed $v_{\\text{bow}}$, normal rosin force $F_{\\text{bow}}$, and contact station $\\beta = x_{\\text{bow}}/L$ drive analytical Helmholtz/Cremer stick-slip harmonics.
+- **Complete 3D Load Path**: strings bear on the **arched ebony nut** (y = +0.295 m) and the **standing arched maple bridge** (R = 86 mm, y = -0.045 m) planted on the **4.5 mm spruce belly**, while \`cello_finger_b3\` stops the **A3** wire at 8/9 scale for **B3 (246.9 Hz)**.
+- **Helmholtz Stick-Slip & Schelleng Bow Wedge**: MuJoCo bow sliding speed v_bow, normal rosin force F_bow, and contact station β = x_bow / L drive analytical Helmholtz/Cremer stick-slip harmonics.
 - **3D Vibro-Acoustic Impulse-Response Convolution**: Mesh runs a 48 kHz 3D coupled Kirchhoff-shell + FDTD air-cavity simulation directly on \`cello_soundbox\` + \`cello_bridge\` (including the CSG f-holes and 4.5 mm spruce belly) from each string's 3D bridge foot, loading the measured 85 ms impulse response into a WebAudio \`ConvolverNode\`.
 
 ## Try it
@@ -740,7 +740,7 @@ An **80 g Pernambuco & horsehair bow** on a concentric arched-bridge gimbal play
 
 Three **monolithic 3D-printed PETG mechanisms** on one frame — no pins, bearings, or metal springs:
 1. **Cross-Strip Flexure Pivot** (left): ±45° crossed leaves giving a frictionless, zero-backlash pendulum hinge
-2. **Bistable Von Mises Snap Toggle** (middle): inclined double-arch leaves with **two stable equilibria** ($q = 0$ and $q = 2h_0 \\approx 6.4\\text{ mm}$), flipped back and forth across its snap-through barrier
+2. **Bistable Von Mises Snap Toggle** (middle): inclined double-arch leaves with **two stable equilibria** (q = 0 and q = 2h₀ ≈ 6.4 mm), flipped back and forth across its snap-through barrier
 3. **Serpentine Linear Stage** (right): folded-beam parallel guided stage
 
 ## Try it
@@ -764,8 +764,8 @@ Four printable compliant joints doing real jobs on one bench, each run by real a
 
 Real-time **1D Kelly–Lochbaum bore waveguide** + **nonlinear reed / lip-reed synthesis** running at 48 kHz (~0.15% CPU):
 
-1. **Grenadilla & Silver Clarinet** (front, bars 1–4): cylindrical bore ($\\lambda = 4L$, warm woody odd harmonics $f, 3f, 5f$) with four articulated silver pad keys playing the opening phrase of Beethoven's ***Ode to Joy*** ($G_3$–$D_4$).
-2. **Folded 3-Valve Spun-Brass Cornet** (back, bars 5–8): continuous folded brass tubing flaring into a Ø112 mm Bessel bell, with three mother-of-pearl piston valves ($-2, -1, -3$ st) answering ***Ode to Joy*** an octave higher ($G_4$–$D_5$)!
+1. **Grenadilla & Silver Clarinet** (front, bars 1–4): cylindrical bore (λ = 4L, warm woody odd harmonics f, 3f, 5f) with four articulated silver pad keys playing the opening phrase of Beethoven's ***Ode to Joy*** (**G3–D4**).
+2. **Folded 3-Valve Spun-Brass Cornet** (back, bars 5–8): continuous folded brass tubing flaring into a Ø112 mm Bessel bell, with three mother-of-pearl piston valves (-2, -1, -3 st) answering ***Ode to Joy*** an octave higher (**G4–D5**)!
 
 ## Try it
 - Turn on **Sound** in **⚙️ Environment** (top right) and press **Run**
@@ -775,9 +775,9 @@ Real-time **1D Kelly–Lochbaum bore waveguide** + **nonlinear reed / lip-reed s
 
 Three **2D membrane** and **nonlinear thin-plate** percussion voices spread across the stereo stage, plus **physical felt-pad contact choking**:
 
-1. **Parabolic Copper Kettle Timpani** (left, **F3 = 174.6 Hz**): an enclosed ~18 L spun-copper kettle stiffens the axisymmetric $(0,1)$ head mode while air-mass loading shifts the azimuthal Bessel modes $(1,1):(2,1):(3,1)$ from inharmonic $1 : 1.59 : 2.14$ into orchestral **$1 : 1.50 : 1.99$**!
+1. **Parabolic Copper Kettle Timpani** (left, **F2 = 87.3 Hz**): an enclosed ~18 L spun-copper kettle stiffens the axisymmetric (0,1) head mode while air-mass loading shifts the azimuthal Bessel modes (1,1) : (2,1) : (3,1) from inharmonic 1 : 1.59 : 2.14 into orchestral **1 : 1.50 : 1.99**!
 2. **Dual-Head Concert Snare Drum** (center, **G3**): coated batter film over a vented maple shell and bottom mylar snare head, modeling **hard-strike tension pitch-glide** and sympathetic **coiled snare-wire rattle**.
-3. **Thin B20 Bronze Crash Cymbal & Felt Choke Arm** (right): high-energy strikes cross the **von Kármán** deflection threshold ($w_{\\max}/h > 0.5$), pumping energy upward over 50–250 ms into shimmering Rossing–Chladni cascade modes — until the hinged **crimson felt damper arm** drops onto the bow at $t = 0.96\\text{ s}$ and physically chokes the sustain!
+3. **Thin B20 Bronze Crash Cymbal & Felt Choke Arm** (right): high-energy strikes cross the **von Kármán** deflection threshold (w_max / h > 0.5), pumping energy upward over 50–250 ms into shimmering Rossing–Chladni cascade modes — until the hinged **crimson felt damper arm** drops onto the bow at t = 0.96 s and physically chokes the sustain!
 
 ## Try it
 - Turn on **Sound** in **⚙️ Environment** and press **Run**
@@ -785,10 +785,10 @@ Three **2D membrane** and **nonlinear thin-plate** percussion voices spread acro
 
   singing_bowl_friction: `# 🥣 Singing Bowl & Rolling Chute
 
-Real-time **tribological contact-friction synthesis** driven directly by MuJoCo normal force $F_n$, slip speed $v_{\\text{slip}}$, rolling ratio, and surface roughness $R_a$:
+Real-time **tribological contact-friction synthesis** driven directly by MuJoCo normal force F_n, slip speed v_slip, rolling ratio, and surface roughness R_a:
 
-1. **Cast-Bronze Tibetan Singing Bowl** (left): a motorized suede-wrapped rosewood **puja mallet** circles the Ø164 mm hollow bronze rim at $1.75\\text{ rad/s}$ ($F_n \\approx 1.4\\text{ N}$). Circumferential tangential slip locks onto the bowl's quadrupole shell modes (convolved through its **3D vibro-acoustic impulse response**) with a revolving nodal-line shimmer beat $\\Delta f = v_{\\text{slip}} / (\\pi R_{\\text{rim}})$.
-2. **Stepped Hardwood & Slate Zig-Zag Chute** (right): **bearing-steel** and **cobalt-glass** marbles roll down a maple track, drop onto a rough slate tier ($R_a \\approx 0.85$), and land in a motorized **±9.5° rocking soundboard trough** alongside a gliding **slate whetstone block** — contrasting pure Hertzian **rolling**, broadband **scraping**, and **singing-rim** lock-in!
+1. **Cast-Bronze Tibetan Singing Bowl** (left): a motorized suede-wrapped rosewood **puja mallet** circles the Ø164 mm hollow bronze rim at 1.75 rad/s (F_n ≈ 1.4 N). Circumferential tangential slip locks onto the bowl's quadrupole shell modes (convolved through its **3D vibro-acoustic impulse response**) with a revolving nodal-line shimmer beat Δf = v_slip / (π · R_rim).
+2. **Stepped Hardwood & Slate Zig-Zag Chute** (right): **bearing-steel** and **cobalt-glass** marbles roll down a maple track, drop onto a rough slate tier (R_a ≈ 0.85), and land in a motorized **±9.5° rocking soundboard trough** alongside a gliding **slate whetstone block** — contrasting pure Hertzian **rolling**, broadband **scraping**, and **singing-rim** lock-in!
 
 ## Try it
 - Turn on **Sound** in **⚙️ Environment** and press **Run**
@@ -796,24 +796,24 @@ Real-time **tribological contact-friction synthesis** driven directly by MuJoCo 
 
   vibraphone_resonators: `# 🎹 Motorized Vibraphone
 
-Six arch-tuned **6061 aluminum vibraphone bars** (**C4–D4–E4–G4–A4–C5**, $Q \\approx 780$) suspended on cord rails over individual open-top / closed-bottom **quarter-wave ($\\lambda/4$) cylindrical resonator tubes**:
+Six arch-tuned **6061 aluminum vibraphone bars** (**C4–D4–E4–G4–A4–C5**, Q ≈ 780) suspended on cord rails over individual open-top / closed-bottom **quarter-wave (λ/4) cylindrical resonator tubes**:
 
-1. **Bar ↔ Tube Radiation Tradeoff**: each stopped tube ($f_1 = c / [4(L + 0.6133r)]$) boosts its bar's fundamental radiation by ~+8 dB while drawing vibrational energy out of the bar faster when open, and restoring long dry bell sustain when closed.
-2. **Rotating Butterfly Tremolo Fans**: a single motor shaft spins six golden disks inside the tube mouths at $\\Omega = 5.5\\pi\\text{ rad/s}$, opening and occluding each resonator **twice per shaft revolution** ($f_{\\text{trem}} = |\\Omega|/\\pi = 5.5\\text{ Hz}$ amplitude + throat-formant shimmer).
-3. **Spring-Return Pedal Felt Damper Bar**: cord-wound mallets voice jazz **C6** and **Dm7/G9** chords before the crimson felt damper bar lifts against the underside of all six bars ($t = 1.42\\text{–}1.96\\text{ s}$) to mute the harmony cleanly!
+1. **Bar ↔ Tube Radiation Tradeoff**: each stopped tube (f₁ = c / [4(L + 0.6133r)]) boosts its bar's fundamental radiation by ~+8 dB while drawing vibrational energy out of the bar faster when open, and restoring long dry bell sustain when closed.
+2. **Rotating Butterfly Tremolo Fans**: a single motor shaft spins six golden disks inside the tube mouths at Ω = 5.5π rad/s, opening and occluding each resonator **twice per shaft revolution** (f_trem = |Ω|/π = 5.5 Hz amplitude + throat-formant shimmer).
+3. **Spring-Return Pedal Felt Damper Bar**: cord-wound mallets voice jazz **C6** and **Dm7/G9** chords before the crimson felt damper bar lifts against the underside of all six bars (t = 1.42–1.96 s) to mute the harmony cleanly!
 
 ## Try it
 - Turn on **Sound** in **⚙️ Environment** and press **Run**
-- Select **Rotating Butterfly Tremolo Fans** (\`tremolo_motor_shaft\`) and vary \`vibe_tremolo_shaft\`'s actuator speed — or stop it at $0\\text{ rad/s}$ to compare open vs closed tube sustain!`,
+- Select **Rotating Butterfly Tremolo Fans** (\`tremolo_motor_shaft\`) and vary \`vibe_tremolo_shaft\`'s actuator speed — or stop it at 0 rad/s to compare open vs closed tube sustain!`,
 
   hydrostatic_flotation: `# ⛵ Self-Righting Buoy, Skiff & Flooding Cup
 
 Four demonstrations of **exact clipped-triangle Archimedes hydrostatics** and **inverse auto-balance (\`Stand / Spin / Float\`)** inside a bounded **Glass Aquarium Tank** (80% water fill):
 
-1. **Unbalanced Red Buoy** (left): top-heavy polymer + heavy lantern ($\\text{CoM}$ above $\\text{CoB}$) — capsizes upside-down on **Run**!
+1. **Unbalanced Red Buoy** (left): top-heavy polymer + heavy lantern (CoM above CoB) — capsizes upside-down on **Run**!
 2. **Auto-Balanced Green Buoy** (center-left): identical outer silhouette processed by **Float → Balance Part** (carves an upper internal void + seats bought-in steel hex nuts in the keel) — snaps upright from a **42° knockdown**!
 3. **Open-Hull Cedar Skiff** (center-right): floats high on displaced interior hull air with hydrostatic roll righting torque.
-4. **Porcelain Cup + Brass Rim Weight** (right): dense $2350\\text{ kg/m}^3$ ceramic floats upright on its trapped air pocket until the falling brass pebble dips its rim underwater, flooding and sinking it!
+4. **Porcelain Cup + Brass Rim Weight** (right): dense 2350 kg/m³ ceramic floats upright on its trapped air pocket until the falling brass pebble dips its rim underwater, flooding and sinking it!
 
 ## Try it
 - Press **Run** to watch the green buoy self-right, the red buoy capsize, and the porcelain cup flood and sink
@@ -822,13 +822,13 @@ Four demonstrations of **exact clipped-triangle Archimedes hydrostatics** and **
 
   flag_in_wind: `# 🚩 Coastal Flagpole in the Wind
 
-An ultralight **55 g/m² marine ripstop nylon** signal ensign ($920 \\times 560\\text{ mm}$) flying above a heavy **400 g/m² cotton duck canvas** regatta burgee ($460 \\times 260\\text{ mm}$) on a hollow $\\varnothing 54\\text{ mm}$ anodized aluminum mast in a fresh $8.8\\text{ m/s}$ coastal breeze.
+An ultralight **55 g/m² marine ripstop nylon** signal ensign (920 × 560 mm) flying above a heavy **400 g/m² cotton duck canvas** regatta burgee (460 × 260 mm) on a hollow Ø54 mm anodized aluminum mast in a fresh 8.8 m/s coastal breeze.
 
 ## Physics
-1. **Kármán Vortex Wake Flutter**: the cylindrical mast sheds an alternating leeward vortex street ($f_{\\text{wake}} \\approx 0.20\\,U / D$) that convects downstream across the cloth, sustaining travelling flutter waves instead of letting the sheet freeze flat in the wind.
-2. **Curle Trailing-Edge Whip-Snaps**: when a travelling fold reaches a free fly corner and reverses normal velocity against sudden XPBD membrane arrest tension, it radiates an asymmetric N-wave acoustic shock whose spectral peak shifts inversely with fabric areal density $\\sigma$ — crisp **~2.8 kHz crackle** on ripstop nylon (\`ensign_flag\`) vs warm **~500 Hz thwack** on heavy canvas (\`burgee_pennant\`).
-3. **Weave-Strain Rustle**: continuous inter-triangle hinge bending and tensile gust strain drive a high-shelf weave rustle ($2.2\\text{–}5.5\\text{ kHz}$), brighter on thin ripstop and warmer on heavy canvas.
-4. **Mast Modal Coupling & Strouhal Hum**: sharp halyard grommet tie jerks and the swinging brass **\`halyard_shackle\`** excite the 3D flexural/hollow-tube modes of the aluminum **\`flagpole\`**, while the taut $\\varnothing 6\\text{ mm}$ stainless halyard stay emits a subtle high-$Q$ Strouhal Aeolian wind hum ($f_c \\approx 0.21\\,U / d \\approx 309\\text{ Hz}$).
+1. **Kármán Vortex Wake Flutter**: the cylindrical mast sheds an alternating leeward vortex street (f_wake ≈ 0.20 U / D) that convects downstream across the cloth, sustaining travelling flutter waves instead of letting the sheet freeze flat in the wind.
+2. **Curle Trailing-Edge Whip-Snaps**: when a travelling fold reaches a free fly corner and reverses normal velocity against sudden XPBD membrane arrest tension, it radiates an asymmetric N-wave acoustic shock whose spectral peak shifts inversely with fabric areal density σ — crisp **~2.8 kHz crackle** on ripstop nylon (\`ensign_flag\`) vs warm **~500 Hz thwack** on heavy canvas (\`burgee_pennant\`).
+3. **Weave-Strain Rustle**: continuous inter-triangle hinge bending and tensile gust strain drive a high-shelf weave rustle (2.2–5.5 kHz), brighter on thin ripstop and warmer on heavy canvas.
+4. **Mast Modal Coupling & Strouhal Hum**: sharp halyard grommet tie jerks and the swinging brass **\`halyard_shackle\`** excite the 3D flexural/hollow-tube modes of the aluminum **\`flagpole\`**, while the taut Ø6 mm stainless halyard stay emits a subtle high-Q Strouhal Aeolian wind hum (f_c ≈ 0.21 U / d ≈ 309 Hz).
 
 ## Try it
 - Turn on **Sound** in **⚙️ Environment** and press **Play** to hear the ripstop ensign crackle, the canvas burgee thwack, the brass shackle clink, and the halyard hum in 3D stereo

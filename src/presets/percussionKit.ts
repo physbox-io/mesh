@@ -6,7 +6,7 @@ import { noteToHz, tuneMembraneToPitch } from '../utils/acousticTuning';
  * Showcases 2D Bessel membrane acoustics (`acousticMembrane`), von Kármán nonlinear
  * thin-plate crash cascade (`nonlinearPlate`), and viscoelastic contact choking (`AUDIO_DAMPING`):
  *   1. Left (`x = -0.380 m`): Parabolic copper kettle timpani (`timpani_kettle` + `timpani_head`
- *      tuned to F3 = 174.61 Hz), where enclosed kettle air coupling shifts circular Bessel
+ *      tuned to F2 = 87.31 Hz), where enclosed kettle air coupling shifts circular Bessel
  *      azimuthal modes into harmonic 1 : 1.50 : 1.99 intervals.
  *   2. Center (`x = 0.000 m`): Authentic 14"×5.5" dual-head vented maple concert snare drum
  *      (`snare_batter_head` + `snare_resonant_head` around ~182 Hz) with near-center backbeat
@@ -19,21 +19,21 @@ import { noteToHz, tuneMembraneToPitch } from '../utils/acousticTuning';
 export const percussionKitPreset: SceneGraph = (() => {
   const controllerScript = `// 2-Bar (4.00 s) orchestral & studio groove showcasing BOTH mid-ring felt choke & full unchoked crash!
 // Bar 1 (0.00..2.00 s) — Crash -> 0.49 s loud bronze shimmer -> crisp viscoelastic felt choke:
-//   t = 0.06 s : Timpani F3 downbeat
+//   t = 0.06 s : Timpani F2 downbeat
 //   t = 0.28 s : Snare center backbeat crack (~222 -> 182 Hz punch + crisp wire buzz)
 //   t = 0.50 s : Big Ø350 mm B20 Crash Cymbal strike (t_strike ≈ 0.515 s) + Timpani accent
 //   t = 0.96..1.55 s : Felt choke arm clamps onto ringing cymbal at t_choke ≈ 1.005 s (dt ≈ 0.49 s!)
 //   t = 1.04 s, 1.52 s, 1.66 s : Snare groove + Timpani turnaround at 1.78 s
 // Bar 2 (2.00..4.00 s) — Full unchoked Crash Cymbal sustain alongside snare & timpani groove:
-//   t = 2.06 s : Unchoked B20 Crash Cymbal + Timpani F3 (rings freely across Bar 2!)
+//   t = 2.06 s : Unchoked B20 Crash Cymbal + Timpani F2 (rings freely across Bar 2!)
 const period = 4.00;
 const tLoop = api.getTime() % period;
 
 const timpHits = [0.06, 0.50, 1.78, 2.06, 2.78, 3.78];
 for (let i = 0; i < timpHits.length; i++) {
   const dt = tLoop - timpHits[i];
-  if (dt >= 0 && dt < 0.042) {
-    api.applyJointForce('timpani_mallet_hinge', -3.6);
+  if (dt >= 0 && dt < 0.008) {
+    api.applyJointForce('timpani_mallet_hinge', -7.5);
   }
 }
 
@@ -58,8 +58,8 @@ for (let i = 0; i < snareHits.length; i++) {
 const crashHits = [0.50, 2.06];
 for (let i = 0; i < crashHits.length; i++) {
   const dt = tLoop - crashHits[i];
-  if (dt >= 0 && dt < 0.044) {
-    api.applyJointForce('cymbal_mallet_hinge', -5.4);
+  if (dt >= 0 && dt < 0.009) {
+    api.applyJointForce('cymbal_mallet_hinge', -6.4);
   }
 }
 
@@ -74,7 +74,7 @@ if (tLoop >= 0.90 && tLoop < 1.55) {
 }
 `;
 
-  // 1. Enclosed Parabolic Spun-Copper Kettle Timpani (`x = -0.380, y = 0.035`, tuned to F3 = 174.61 Hz)
+  // 1. Enclosed Parabolic Spun-Copper Kettle Timpani (`x = -0.380, y = 0.035`, tuned to F2 = 87.31 Hz)
   const timpaniKettle: SceneNode = {
     id: 'timpani_kettle',
     name: 'Parabolic Copper Kettle',
@@ -138,7 +138,7 @@ if (tLoop >= 0.90 && tLoop < 1.55) {
 
   const rawTimpaniHead: SceneNode = {
     id: 'timpani_head',
-    name: 'Timpani Head (F3)',
+    name: 'Timpani Head (F2)',
     type: 'body',
     pos: [-0.380, 0.035, 0.252],
     deformMaterial: 'plastic',
@@ -149,7 +149,9 @@ if (tLoop >= 0.90 && tLoop < 1.55) {
       shape: 'circular',
       shellNodeId: 'timpani_kettle',
       kettleCoupling: 1.0,
-      nonlinearGlide: 0.85,
+      nonlinearGlide: 1.0,
+      pitchGlideSemitones: 0.55,
+      pitchGlideDecayMs: 95,
     },
     joints: [
       {
@@ -176,7 +178,7 @@ if (tLoop >= 0.90 && tLoop < 1.55) {
   };
   const timpaniHead = tuneMembraneToPitch(
     rawTimpaniHead,
-    noteToHz('F3') ?? 174.61,
+    noteToHz('F2') ?? 87.31,
     [timpaniKettle, rawTimpaniHead],
   );
 
@@ -357,6 +359,84 @@ if (tLoop >= 0.90 && tLoop < 1.55) {
   );
 
   // 3. Suspended Ø340 mm Thin B20 Bronze Crash Cymbal (`x = +0.390, y = 0.035`)
+  //    Smooth 36-segment revolved spun-bronze visual profile (arched bow + rounded bell cup)
+  //    paired with the thin analytical collision disk for exact von Kármán plate acoustics.
+  const buildSpunCymbalMesh = (): { vertices: number[]; renderVertices: number[]; faces: number[] } => {
+    const profileRZ: [number, number][] = [
+      [0.006, 0.0245], // bell crown around center spindle hole
+      [0.017, 0.0230],
+      [0.028, 0.0185],
+      [0.036, 0.0115],
+      [0.043, 0.0060], // bell shoulder
+      [0.062, 0.0038], // inner bow
+      [0.095, 0.0008], // mid bow (mallet & choke contact zone hugs z ≈ 0)
+      [0.134, -0.0038],
+      [0.170, -0.0095], // outer edge rim
+    ];
+    const thickness = 0.0015;
+    const segs = 36;
+    const nRing = profileRZ.length;
+    const renderVertices: number[] = [];
+    const vertices: number[] = [];
+    const faces: number[] = [];
+
+    // Top surface rings (0 .. nRing - 1), then bottom surface rings (nRing .. 2*nRing - 1)
+    for (let side = 0; side < 2; side++) {
+      const zOff = side === 0 ? 0.5 * thickness : -0.5 * thickness;
+      for (let i = 0; i < nRing; i++) {
+        const [r, z] = profileRZ[i];
+        for (let s = 0; s < segs; s++) {
+          const ang = (s / segs) * Math.PI * 2;
+          const vx = +(r * Math.cos(ang)).toFixed(5);
+          const vy = +(r * Math.sin(ang)).toFixed(5);
+          const vz = +(z + zOff).toFixed(5);
+          renderVertices.push(vx, vy, vz);
+          vertices.push(vx, vz, -vy);
+        }
+      }
+    }
+
+    const idx = (side: number, ring: number, s: number) =>
+      (side * nRing + ring) * segs + (s % segs);
+
+    // Top surface quads (outward +Z normal)
+    for (let i = 0; i < nRing - 1; i++) {
+      for (let s = 0; s < segs; s++) {
+        const a = idx(0, i, s);
+        const b = idx(0, i + 1, s);
+        const c = idx(0, i + 1, s + 1);
+        const d = idx(0, i, s + 1);
+        faces.push(a, b, c, a, c, d);
+      }
+    }
+    // Bottom surface quads (outward -Z normal)
+    for (let i = 0; i < nRing - 1; i++) {
+      for (let s = 0; s < segs; s++) {
+        const a = idx(1, i, s);
+        const b = idx(1, i + 1, s);
+        const c = idx(1, i + 1, s + 1);
+        const d = idx(1, i, s + 1);
+        faces.push(a, c, b, a, d, c);
+      }
+    }
+    // Outer rim bevel strip + inner spindle hole wall
+    for (let s = 0; s < segs; s++) {
+      const t0 = idx(0, nRing - 1, s);
+      const t1 = idx(0, nRing - 1, s + 1);
+      const b0 = idx(1, nRing - 1, s);
+      const b1 = idx(1, nRing - 1, s + 1);
+      faces.push(t0, b0, b1, t0, b1, t1);
+
+      const it0 = idx(0, 0, s);
+      const it1 = idx(0, 0, s + 1);
+      const ib0 = idx(1, 0, s);
+      const ib1 = idx(1, 0, s + 1);
+      faces.push(it0, it1, ib1, it0, ib1, ib0);
+    }
+    return { vertices, renderVertices, faces };
+  };
+  const cymbalVisualMesh = buildSpunCymbalMesh();
+
   const crashCymbal: SceneNode = {
     id: 'crash_cymbal',
     name: 'Thin B20 Bronze Crash Cymbal',
@@ -366,10 +446,11 @@ if (tLoop >= 0.90 && tLoop < 1.55) {
     density: 8600,
     nonlinearPlate: {
       enabled: true,
-      crashSensitivity: 1.55,
-      bloomDelayMs: 95,
-      shimmerMix: 0.85,
-      archRatio: 0.16,
+      crashSensitivity: 2.5,
+      bloomDelayMs: 65,
+      shimmerMix: 0.88,
+      archRatio: 0.12,
+      pitchGlideCents: 32,
     },
     joints: [
       {
@@ -392,14 +473,40 @@ if (tLoop >= 0.90 && tLoop < 1.55) {
         density: 8600,
         solref: [0.004, 0.22],
         rgba: [0.88, 0.72, 0.28, 1],
+        role: 'collision',
       },
       {
-        name: 'cymbal_cup_bell',
-        type: 'cylinder',
-        size: [0.036, 0.0065],
-        pos: [0, 0, 0.006],
-        rgba: [0.93, 0.78, 0.34, 1],
+        name: 'cymbal_spun_bronze_shell',
+        type: 'mesh',
+        size: [1],
+        dynamic: true,
+        vertices: cymbalVisualMesh.vertices,
+        renderVertices: cymbalVisualMesh.renderVertices,
+        faces: cymbalVisualMesh.faces,
+        rgba: [0.89, 0.73, 0.30, 1],
         role: 'visual',
+        contype: 0,
+        conaffinity: 0,
+      },
+      {
+        name: 'cymbal_top_felt_washer',
+        type: 'cylinder',
+        size: [0.015, 0.0045],
+        pos: [0, 0, 0.029],
+        rgba: [0.18, 0.18, 0.20, 1],
+        role: 'visual',
+        contype: 0,
+        conaffinity: 0,
+      },
+      {
+        name: 'cymbal_wingnut_cap',
+        type: 'cylinder',
+        size: [0.007, 0.005],
+        pos: [0, 0, 0.036],
+        rgba: [0.82, 0.84, 0.88, 1],
+        role: 'visual',
+        contype: 0,
+        conaffinity: 0,
       },
     ],
     children: [],
@@ -470,11 +577,12 @@ if (tLoop >= 0.90 && tLoop < 1.55) {
       { name: 'rack_post_r', type: 'box', size: [0.012, 0.012, 0.126], pos: [0.425, -0.255, 0.126], rgba: [0.18, 0.20, 0.25, 1] },
       { name: 'rack_foot_l', type: 'box', size: [0.034, 0.048, 0.006], pos: [-0.425, -0.255, 0.006], rgba: [0.15, 0.17, 0.21, 1] },
       { name: 'rack_foot_r', type: 'box', size: [0.034, 0.048, 0.006], pos: [0.425, -0.255, 0.006], rgba: [0.15, 0.17, 0.21, 1] },
-      // Rear cymbal boom stand at (0.390, 0.235) supporting both `crash_cymbal` center spindle and `cymbal_choke_arm`
-      { name: 'cymbal_boom_post', type: 'cylinder', fromto: [0.390, 0.235, 0.008, 0.390, 0.235, 0.325], size: [0.0085], rgba: [0.72, 0.75, 0.80, 1], contype: 0, conaffinity: 0 },
-      { name: 'cymbal_boom_base', type: 'cylinder', size: [0.085, 0.006], pos: [0.390, 0.235, 0.006], rgba: [0.20, 0.22, 0.26, 1], role: 'visual' },
-      { name: 'cymbal_boom_arm', type: 'cylinder', fromto: [0.390, 0.235, 0.322, 0.390, 0.035, 0.322], size: [0.0055], rgba: [0.76, 0.79, 0.84, 1], contype: 0, conaffinity: 0 },
-      { name: 'cymbal_spindle_pin', type: 'cylinder', fromto: [0.390, 0.035, 0.322, 0.390, 0.035, 0.248], size: [0.004], rgba: [0.80, 0.82, 0.86, 1], contype: 0, conaffinity: 0 },
+      // Classic floor cymbal stand rising under `crash_cymbal` center spindle + rear post for `cymbal_choke_arm`
+      { name: 'cymbal_stand_base', type: 'cylinder', size: [0.085, 0.006], pos: [0.390, 0.035, 0.006], rgba: [0.20, 0.22, 0.26, 1], role: 'visual' },
+      { name: 'cymbal_stand_post', type: 'cylinder', fromto: [0.390, 0.035, 0.008, 0.390, 0.035, 0.260], size: [0.0085], rgba: [0.74, 0.77, 0.82, 1], contype: 0, conaffinity: 0 },
+      { name: 'cymbal_spindle_pin', type: 'cylinder', fromto: [0.390, 0.035, 0.260, 0.390, 0.035, 0.305], size: [0.004], rgba: [0.82, 0.84, 0.88, 1], contype: 0, conaffinity: 0 },
+      { name: 'cymbal_choke_post_base', type: 'cylinder', size: [0.042, 0.006], pos: [0.390, 0.225, 0.006], rgba: [0.20, 0.22, 0.26, 1], role: 'visual' },
+      { name: 'cymbal_choke_post', type: 'cylinder', fromto: [0.390, 0.225, 0.008, 0.390, 0.225, 0.275], size: [0.007], rgba: [0.70, 0.73, 0.78, 1], contype: 0, conaffinity: 0 },
     ],
     children: [],
   };
@@ -516,7 +624,7 @@ if (tLoop >= 0.90 && tLoop < 1.55) {
         type: 'sphere',
         pos: [0, 0.197, -0.002], // Strikes timpani at y ≈ -0.058 m (radial spot r = 0.093 m = 0.59 R!)
         size: [0.0145],
-        density: 1350,
+        density: 2100,
         solref: [0.0055, 0.35],
         rgba: [0.95, 0.93, 0.88, 1],
       },

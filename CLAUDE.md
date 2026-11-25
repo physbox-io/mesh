@@ -62,11 +62,11 @@ winding first: `physics_get_scene_summary` reports `windingInverted` (negative s
 each triangle's index order from its face's outward direction rather than writing indices in
 ascending order. `californiaRelief.ts` shipped inside out this way.
 
-**Two coordinate spaces, and builders whose rows run opposite ways.** Three.js is Y-up
-(`vertices`); MuJoCo is Z-up (`renderVertices`); `mjcf.ts` rotates one into the other,
-`(x,y,z)→(x,−z,y)`, which keeps winding. The trap is the builders: `utils/heightmapMesh.ts` is Z-up
-with rows running −Y (+Z once converted), while `presets/californiaRelief.ts` is Y-up with rows
-running −Z — so a quad's winding cannot be copied from one to the other unchanged. See GUIDE.md § Mesh Geoms Reference.
+**Two coordinate spaces, `dynamic: true` + `renderVertices`, and builders whose rows run opposite ways.** Three.js is Y-up (`vertices`); MuJoCo is Z-up (`renderVertices`); `mjcf.ts` rotates `vertices` into MuJoCo via `(x, y, z) → (x, -z, y)`, which keeps winding. Every procedural Z-up mesh in a preset (including `role: 'visual'` shells on moving bodies) needs **all three** of:
+- `dynamic: true` — without it, `SceneLayer.tsx` draws the mesh in the unrotated Y-up static group, so Z-up `vertices` render **flipped 90° vertical** and never track the body.
+- `renderVertices` in raw MuJoCo **Z-up** `[x, y, z]` — `SceneLayer.tsx` draws `dynamic: true` meshes strictly from `g.renderVertices`; setting `dynamic: true` without `renderVertices` makes the mesh **completely invisible**.
+- `vertices` in Three.js **Y-up** `[x, z, -y]` (inverse of `mjcf.ts`'s `(x, y, z) → (x, -z, y)`), so MuJoCo's asset mesh matches `renderVertices`.
+Also watch builder row directions: `utils/heightmapMesh.ts` is Z-up with rows running −Y (+Z once converted), while `presets/californiaRelief.ts` is Y-up with rows running −Z — so a quad's winding cannot be copied from one to the other unchanged. See GUIDE.md § Mesh Geoms Reference.
 
 **Concave shapes collide as convex pieces now, and the source mesh is demoted asymmetrically.**
 MuJoCo hulls every mesh geom, so a cup used to be a solid billet. `utils/convexDecomposition.ts`

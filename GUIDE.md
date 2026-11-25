@@ -726,7 +726,10 @@ Requires two extra fields:
 **Rendering path for dynamic meshes:**
 - Rendered **inside** the `rotation={[-π/2, 0, 0]}` group alongside primitives.
 - Position is tracked every frame from `data.xpos[bodyId]` / `data.xmat[bodyId]` (the **body** transform).
-- `renderVertices` are in raw Z-up space. MuJoCo recentres the mesh internally and `xpos` tracks the recentred body frame, so render and physics stay aligned.
+- `renderVertices` are in raw Z-up space (`[x, y, z]`), and `vertices` must be the matching Y-up conversion `[x, z, -y]` (so `mjcf.ts`'s `(x, y, z) → (x, -z, y)` recovers the exact same Z-up coordinates).
+- **Two common failure modes:**
+  1. **Missing `dynamic: true`** on a Z-up mesh → rendered in the unrotated Y-up static group (**flipped 90° vertical** and detached from body motion).
+  2. **`dynamic: true` without `renderVertices`** → `SceneLayer.tsx` renders `dynamic: true` meshes strictly from `g.renderVertices`, so omitting it makes the mesh **completely invisible**.
 
 ---
 
