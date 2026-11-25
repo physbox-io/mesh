@@ -211,15 +211,16 @@ api.applyJointForce('trough_rock_hinge', 28.0 * (targetTilt - qTilt) + 3.6 * (ta
         rgba: [0.76, 0.58, 0.26, 1],
       },
       {
-        // Analytical mjc_SphereCapsule lip equator collider for exact C^infinity chatter-free rim rub
+        // Analytical mjc_SphereCapsule lip equator collider for exact C^infinity chatter-free rim rub.
+        // Hand-authored, so NOT csgDerived: 'collider' — the convex-decomposition pass replaces every
+        // geom carrying that flag with its own pieces (none for this hull), which deleted the lip and
+        // let the pressed mallet sink half its width into the bowl with no rim contact to sing from.
         name: 'bowl_lip_ring_collider',
         type: 'capsule',
         size: [0.1096, 0.004],
         pos: [0, 0, 0.1098],
         mass: 0,
         role: 'collision',
-        csgDerived: 'collider',
-        colliderOf: 'bowl_lip_ring',
         contype: 2,
         conaffinity: 2,
         friction: [0.38, 0.004, 0.0002],
