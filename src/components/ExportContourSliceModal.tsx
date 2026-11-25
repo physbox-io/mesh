@@ -31,6 +31,12 @@ import { useAddSimulation } from '../hooks/useAddSimulation';
 import { contourSheetParts } from '../utils/sheetSimulation';
 import { ExportSubjectLine } from './ExportSubjectLine';
 import { buildEtchHandoffUrl, openInEtch } from '../utils/etchHandoff';
+import {
+  buildContourSvgLayout,
+  deriveSvgLiveState,
+  parseSheetGcodeProgram,
+} from '../utils/svgLiveOverlay';
+import { StaticSvgLayer, SvgLiveHud, SvgLiveOverlay } from './SvgLiveOverlay';
 
 interface ExportContourSliceModalProps {
   /** What it works on: the selection, or the whole scene (shown under the title). */
@@ -374,6 +380,38 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
       .replace(/<svg width="[^"]*" height="[^"]*"/, '<svg width="100%"')
       .replace(/stroke-width="0.2"/g, 'stroke-width="0.9"');
   }, [exportResult, preview]);
+
+  const svgLayout = useMemo(
+    () =>
+      buildContourSvgLayout(
+        exportResult,
+        sliceFields.sheetWidthMm,
+        sliceFields.sheetHeightMm,
+        machineMode,
+        bitDiameterMm,
+      ),
+    [exportResult, sliceFields.sheetWidthMm, sliceFields.sheetHeightMm, machineMode, bitDiameterMm],
+  );
+
+  const parsedGcode = useMemo(
+    () => parseSheetGcodeProgram(gcodeResult?.gcode, svgLayout),
+    [gcodeResult?.gcode, svgLayout],
+  );
+
+  const isLiveJob = webSerialManager.matchesRunningGcode(gcodeResult?.gcode);
+  const liveOverlayState = useMemo(
+    () =>
+      deriveSvgLiveState({
+        machineState,
+        machineMode,
+        isLiveJob,
+        layout: svgLayout,
+        program: parsedGcode,
+        viewMode: preview,
+        bitDiameterMm: machineMode === 'cnc' ? bitDiameterMm : undefined,
+      }),
+    [machineState, machineMode, isLiveJob, svgLayout, parsedGcode, preview, bitDiameterMm],
+  );
 
   // Why the last hand-over to Etch did not happen (handleOpenInEtch), before the early return.
   const [etchError, setEtchError] = useState<string | null>(null);
@@ -945,6 +983,11 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                       Attachments: {gcodeResult.attachmentCount}
                     </span>
                   )}
+                  {liveOverlayState?.isLiveJob && (
+                    <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-emerald-500/20 text-emerald-500 border border-emerald-500/40 whitespace-nowrap">
+                      Tracing the machine
+                    </span>
+                  )}
                 </div>
                 <Segmented
                   value={preview}
@@ -953,19 +996,25 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 />
               </div>
 
-              <div className="relative w-full h-80 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 p-4 overflow-y-auto overflow-x-hidden">
-                <div
-                  className={`w-full [&>svg]:w-full [&>svg]:h-auto transition-opacity ${slicePending ? 'opacity-40' : ''}`}
-                  dangerouslySetInnerHTML={{ __html: previewSvg }}
-                />
-                {/* The drawing on screen is the one before the edit being typed.
-                    Saying so beats letting a stale picture read as a finished one. */}
-                {slicePending && (
-                  <span className="absolute top-2 right-2 flex items-center gap-1 text-[10px] font-medium text-slate-400 dark:text-slate-500 bg-white/90 dark:bg-slate-950/90 px-1.5 py-0.5 rounded">
-                    <RefreshCw className="w-3 h-3 animate-spin" />
-                    Re-slicing…
-                  </span>
-                )}
+              <div className="relative rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 overflow-hidden">
+                <div className="relative w-full h-80 p-4 overflow-y-auto overflow-x-hidden">
+                  <div className={`relative w-full transition-opacity ${slicePending ? 'opacity-40' : ''}`}>
+                    <StaticSvgLayer
+                      html={previewSvg}
+                      className="w-full [&>svg]:w-full [&>svg]:h-auto [&>svg]:block"
+                    />
+                    {liveOverlayState && <SvgLiveOverlay state={liveOverlayState} />}
+                  </div>
+                  {/* The drawing on screen is the one before the edit being typed.
+                      Saying so beats letting a stale picture read as a finished one. */}
+                  {slicePending && (
+                    <span className="absolute top-2 right-2 flex items-center gap-1 text-[10px] font-medium text-slate-400 dark:text-slate-500 bg-white/90 dark:bg-slate-950/90 px-1.5 py-0.5 rounded">
+                      <RefreshCw className="w-3 h-3 animate-spin" />
+                      Re-slicing…
+                    </span>
+                  )}
+                </div>
+                {liveOverlayState && <SvgLiveHud state={liveOverlayState} />}
               </div>
             </div>
           )}

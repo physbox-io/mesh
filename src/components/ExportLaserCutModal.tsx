@@ -33,6 +33,12 @@ import { RackToolPicker } from './RackToolPicker';
 import { useAddSimulation } from '../hooks/useAddSimulation';
 import { laserSheetParts, laserStockTransform } from '../utils/sheetSimulation';
 import { ExportSubjectLine } from './ExportSubjectLine';
+import {
+  buildLaserSvgLayout,
+  deriveSvgLiveState,
+  parseSheetGcodeProgram,
+} from '../utils/svgLiveOverlay';
+import { StaticSvgLayer, SvgLiveHud, SvgLiveOverlay } from './SvgLiveOverlay';
 
 interface ExportLaserCutModalProps {
   /** What it works on: the selection, or the whole scene (shown under the title). */
@@ -448,6 +454,37 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
       ? thickened
       : thickened.replace(/<svg width="[^"]*" height="[^"]*"/, '<svg width="100%"');
   }, [exportResult, previewActualSize]);
+
+  const svgLayout = useMemo(
+    () =>
+      buildLaserSvgLayout(
+        exportResult,
+        layoutFields.sheetWidthMm,
+        layoutFields.sheetHeightMm,
+        machineMode,
+        bitDiameterMm,
+      ),
+    [exportResult, layoutFields.sheetWidthMm, layoutFields.sheetHeightMm, machineMode, bitDiameterMm],
+  );
+
+  const parsedGcode = useMemo(
+    () => parseSheetGcodeProgram(gcodeResult?.gcode, svgLayout),
+    [gcodeResult?.gcode, svgLayout],
+  );
+
+  const isLiveJob = webSerialManager.matchesRunningGcode(gcodeResult?.gcode);
+  const liveOverlayState = useMemo(
+    () =>
+      deriveSvgLiveState({
+        machineState,
+        machineMode,
+        isLiveJob,
+        layout: svgLayout,
+        program: parsedGcode,
+        bitDiameterMm: machineMode === 'cnc' ? bitDiameterMm : undefined,
+      }),
+    [machineState, machineMode, isLiveJob, svgLayout, parsedGcode, bitDiameterMm],
+  );
 
   if (!isOpen) return null;
 
@@ -1271,6 +1308,11 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                       Attachments: {gcodeResult.attachmentCount}
                     </span>
                   )}
+                  {liveOverlayState?.isLiveJob && (
+                    <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-emerald-500/20 text-emerald-500 border border-emerald-500/40 whitespace-nowrap">
+                      Tracing the machine
+                    </span>
+                  )}
                 </div>
                 {/*
                   Fit squeezes the whole layout into the panel width, which is
@@ -1289,23 +1331,33 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                 </button>
               </div>
 
-              <div className="relative w-full h-80 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 p-4 overflow-auto">
-                <div
-                  className={`transition-opacity ${layoutPending ? 'opacity-40 ' : ''}${
-                    previewActualSize
-                      ? '[&>svg]:max-w-none'
-                      : 'w-full [&>svg]:w-full [&>svg]:h-auto'
-                  }`}
-                  dangerouslySetInnerHTML={{ __html: previewSvg }}
-                />
-                {/* The sheet on screen is the one before the edit being typed.
-                    Saying so beats letting a stale drawing read as a finished one. */}
-                {layoutPending && (
-                  <span className="sticky top-0 float-right flex items-center gap-1 text-[10px] font-medium text-slate-400 dark:text-slate-500 bg-white/90 dark:bg-slate-950/90 px-1.5 py-0.5 rounded">
-                    <RefreshCw className="w-3 h-3 animate-spin" />
-                    Re-nesting…
-                  </span>
-                )}
+              <div className="relative rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 overflow-hidden">
+                <div className="relative w-full h-80 p-4 overflow-auto">
+                  <div
+                    className={`relative transition-opacity ${layoutPending ? 'opacity-40 ' : ''}${
+                      previewActualSize ? 'inline-block' : 'w-full'
+                    }`}
+                  >
+                    <StaticSvgLayer
+                      html={previewSvg}
+                      className={
+                        previewActualSize
+                          ? '[&>svg]:max-w-none [&>svg]:block'
+                          : 'w-full [&>svg]:w-full [&>svg]:h-auto [&>svg]:block'
+                      }
+                    />
+                    {liveOverlayState && <SvgLiveOverlay state={liveOverlayState} />}
+                  </div>
+                  {/* The sheet on screen is the one before the edit being typed.
+                      Saying so beats letting a stale drawing read as a finished one. */}
+                  {layoutPending && (
+                    <span className="sticky top-0 float-right flex items-center gap-1 text-[10px] font-medium text-slate-400 dark:text-slate-500 bg-white/90 dark:bg-slate-950/90 px-1.5 py-0.5 rounded">
+                      <RefreshCw className="w-3 h-3 animate-spin" />
+                      Re-nesting…
+                    </span>
+                  )}
+                </div>
+                {liveOverlayState && <SvgLiveHud state={liveOverlayState} />}
               </div>
             </div>
           )}
