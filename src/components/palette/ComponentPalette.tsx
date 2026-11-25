@@ -4,6 +4,7 @@ import type { SceneNode } from '../../types/scene';
 import type { PhysicsState } from '../../store/useStore';
 import type { HardwareCutKind, HardwarePartKind } from '../../types/scene';
 import { createDShaftHubNode } from '../../utils/hardwareComponents';
+import { applyFlexureToNode } from '../../utils/flexure';
 import { HARDWARE_KINDS } from '../../utils/hardwareCuts';
 import { HARDWARE_PARTS } from '../../utils/hardwareParts';
 import { PaletteTile, type TileColor, type TileSpin } from './PaletteTile';
@@ -233,6 +234,28 @@ export const ComponentPalette: React.FC<ComponentPaletteProps> = ({
             spin="group-hover:-rotate-6"
             icon={<DShaftHubIcon />}
             onClick={() => onAddHardwareNode(createDShaftHubNode(5.0))}
+          />
+          <PaletteTile
+            button
+            label="Flexure Spring"
+            title="3D-printable monolithic PETG serpentine compliant spring (no metal hardware or pins; switch to blade, cross-pivot, or bistable in the Inspector)"
+            color="emerald"
+            spin="group-hover:rotate-3"
+            icon={<SpringIcon />}
+            onClick={() => {
+              const id = `flexure_spring_${Math.random().toString(36).slice(2, 7)}`;
+              const raw: SceneNode = {
+                id,
+                name: '3D-Printed Flexure Spring',
+                type: 'body',
+                pos: [0, 0, 0.04],
+                joints: [{ name: `${id}_slide`, type: 'slide', axis: [0, 0, 1], pos: [0, 0, 0], limited: true, range: [-0.01, 0.01] }],
+                geoms: [{ name: `${id}_head`, type: 'box', pos: [0, 0, 0], size: [0.014, 0.014, 0.004], rgba: [0.18, 0.72, 0.58, 1] }],
+                children: [],
+              };
+              const applied = applyFlexureToNode(raw, { kind: 'serpentine', filament: 'petg', thicknessMm: 1.2, lengthMm: 22, widthMm: 8, folds: 3 });
+              onAddHardwareNode(applied ? applied.node : raw);
+            }}
           />
         </div>
         <p className="text-[10px] leading-snug text-slate-400 dark:text-slate-500 mt-3 mb-2">

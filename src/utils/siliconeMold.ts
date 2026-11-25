@@ -674,7 +674,48 @@ export function buildPourBox(wasm: ManifoldToplevel, masterSoup: ArrayLike<numbe
     const grooveRing = track(grooveOuter.subtract(grooveInner));
     // A hair past the plate's top, so the cut is clean through that face.
     const grooveCut = track(track(grooveRing.extrude(groove + 0.01)).translate([0, 0, zMin - groove]));
-    const baseM = track(plate.subtract(grooveCut));
+    let baseM = track(plate.subtract(grooveCut));
+
+    // Check whether the master actually has a flat foot standing on the base
+    // plate. Rounded/curved masters (e.g. a figurine or serpent belly) have
+    // almost zero area at zMin and will float or tip when silicone is poured:
+    // add a small tapered breakaway anchor post on the base plate under the
+    // master's lowest contact point so it bonds cleanly and snaps off after.
+    let baseContactMm2 = 0;
+    let lowSumX = 0, lowSumY = 0, lowCount = 0;
+    for (let i = 0; i < masterSoup.length; i += 9) {
+      const z0 = masterSoup[i + 2], z1 = masterSoup[i + 5], z2 = masterSoup[i + 8];
+      if (z0 <= zMin + 0.4 && z1 <= zMin + 0.4 && z2 <= zMin + 0.4) {
+        const ax = masterSoup[i], ay = masterSoup[i + 1];
+        const bx = masterSoup[i + 3] - ax, by = masterSoup[i + 4] - ay;
+        const cx2 = masterSoup[i + 6] - ax, cy2 = masterSoup[i + 7] - ay;
+        const triArea = 0.5 * Math.abs(bx * cy2 - by * cx2);
+        baseContactMm2 += triArea;
+        lowSumX += (ax + masterSoup[i + 3] + masterSoup[i + 6]) / 3;
+        lowSumY += (ay + masterSoup[i + 4] + masterSoup[i + 7]) / 3;
+        lowCount++;
+      }
+    }
+    if (lowCount === 0) {
+      for (let i = 0; i < masterSoup.length; i += 3) {
+        if (masterSoup[i + 2] <= zMin + 0.5) {
+          lowSumX += masterSoup[i];
+          lowSumY += masterSoup[i + 1];
+          lowCount++;
+        }
+      }
+    }
+    if (baseContactMm2 < 35 && lowCount > 0 && zTop - zMin >= 2) {
+      const ax = lowSumX / lowCount;
+      const ay = lowSumY / lowCount;
+      const anchorPost = track(
+        wasm.Manifold.cylinder(1.5, 2.2, 1.2, 24, false).translate([ax, ay, zMin - 0.5]),
+      );
+      baseM = track(baseM.add(anchorPost));
+      warnings.push(
+        `Master touches the base across only ${baseContactMm2.toFixed(1)} mm² (may float or tip in silicone): added a ⌀2.4 mm tapered breakaway anchor post at (${ax.toFixed(1)}, ${ay.toFixed(1)}) mm on the base plate so it bonds cleanly and snaps off to sand flush afterward.`,
+      );
+    }
 
     let hole: PourBox['hole'];
     if (o.hole) {

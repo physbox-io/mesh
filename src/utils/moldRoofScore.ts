@@ -229,7 +229,7 @@ export function linerPartingChoice(tris: ArrayLike<number>, zMin: number, zMax: 
  */
 export function linerPullChoice(tris: ArrayLike<number>, preferred: PullDirection): PullDirection | null {
   const axes: PullDirection[] = ['+z', '+y', '+x'];
-  const results = axes.map((dir) => {
+  const raw = axes.map((dir) => {
     const turned = dir === '+z' ? tris : rotateTrianglesForPull(tris, dir);
     let lo = Infinity, hi = -Infinity;
     for (let i = 2; i < turned.length; i += 3) {
@@ -238,10 +238,18 @@ export function linerPullChoice(tris: ArrayLike<number>, preferred: PullDirectio
       lo = Math.min(lo, z);
       hi = Math.max(hi, z);
     }
-    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return { dir, score: Infinity };
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return { dir, roof: Infinity, depthMm: Infinity };
     const s = linerPartingChoice(turned, lo, hi, (lo + hi) / 2);
-    return { dir, score: s.curvedMm2 + FLAT_WEIGHT * s.flatMm2 };
+    return { dir, roof: s.curvedMm2 + FLAT_WEIGHT * s.flatMm2, depthMm: Math.max(1, hi - lo) };
   });
+  const minDepth = Math.min(...raw.map((r) => r.depthMm));
+  // Penalize deep end-on pulls (e.g. splitting a 100 mm slender figurine along
+  // its length): deeper cavities consume far more filament and multiply PVA
+  // dissolve time, even when their end-on cross-section has less projected roof.
+  const results = raw.map((r) => ({
+    dir: r.dir,
+    score: Number.isFinite(r.roof) ? r.roof * Math.pow(r.depthMm / minDepth, 1.25) : Infinity,
+  }));
   const mine = results.find((r) => r.dir === `+${preferred[1]}`) ?? results[0];
   const best = results.reduce((a, b) => (b.score < a.score ? b : a));
   if (!Number.isFinite(best.score) || best.dir === mine.dir || best.score >= mine.score * 0.95 - 0.5) return null;
