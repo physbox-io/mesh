@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo } from 'react';
+import { useLayoutEffect } from 'react';
 import { useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { getCycloramaPalette } from '../../utils/cycloramaPalette';
@@ -66,21 +66,25 @@ function buildCycloramaTexture(darkMode: boolean): THREE.Texture | THREE.Color {
  * naturally — and MCP viewport screenshots capture it too.
  */
 export function StudioBackdrop({ darkMode }: StudioBackdropProps) {
+  const getThree = useThree((s) => s.get);
   const invalidate = useThree((s) => s.invalidate);
 
-  const background = useMemo(
-    () => buildCycloramaTexture(darkMode),
-    [darkMode],
-  );
-
   useLayoutEffect(() => {
+    const { scene } = getThree();
+    const background = buildCycloramaTexture(darkMode);
+    const prev = scene.background;
+    scene.background = background;
     invalidate();
     return () => {
+      if (scene.background === background) {
+        scene.background = prev;
+      }
       if (background instanceof THREE.Texture) {
         background.dispose();
       }
+      invalidate();
     };
-  }, [background, invalidate]);
+  }, [darkMode, getThree, invalidate]);
 
-  return <primitive object={background} attach="background" />;
+  return null;
 }

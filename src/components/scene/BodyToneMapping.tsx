@@ -19,8 +19,9 @@ import { wrapEffect } from '@react-three/postprocessing';
  * and come out exactly as they do with Hi-Res off. Background pixels read depth
  * 1.0 even with the logarithmic depth buffer, which is the far plane either way.
  */
-const fragmentShader = /* glsl */ `
+export const BODY_TONE_MAPPING_FRAGMENT_SHADER = /* glsl */ `
 vec3 pbrNeutral(vec3 color) {
+  color = max(color, vec3(0.0));
   const float startCompression = 0.8 - 0.04;
   const float desaturation = 0.15;
   float x = min(color.r, min(color.g, color.b));
@@ -43,7 +44,7 @@ void mainImage(const in vec4 inputColor, const in vec2 uv, const in float depth,
 
 class BodyToneMappingEffect extends Effect {
   constructor() {
-    super('BodyToneMappingEffect', fragmentShader, { attributes: EffectAttribute.DEPTH });
+    super('BodyToneMappingEffect', BODY_TONE_MAPPING_FRAGMENT_SHADER, { attributes: EffectAttribute.DEPTH });
   }
 }
 

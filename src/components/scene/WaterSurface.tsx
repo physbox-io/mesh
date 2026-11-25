@@ -2,10 +2,50 @@ import { useEffect, useMemo } from 'react';
 import { useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
-import { collectWaterBasins } from '../../utils/hydrostatics';
+import { collectWaterBasins, type WaterBasinWorld } from '../../utils/hydrostatics';
 
 const NOOP_RAYCAST = () => null;
 const EMPTY_BASINS: ReturnType<typeof collectWaterBasins> = [];
+
+export interface WaterBasinMeshParams {
+  cx: number;
+  cy: number;
+  cz: number;
+  capZ: number;
+  depthZ: number;
+  spanX: number;
+  spanY: number;
+  rMean: number;
+}
+
+/**
+ * Validates and derives finite mesh dimensions/positions for a water basin.
+ * Returns `null` if any bound is non-finite so NaN/Infinity never reaches Three.js.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function computeWaterBasinMeshParams(
+  b: Pick<WaterBasinWorld, 'minX' | 'maxX' | 'minY' | 'maxY' | 'floorZ' | 'surfaceZ'>,
+): WaterBasinMeshParams | null {
+  if (
+    !Number.isFinite(b.minX) ||
+    !Number.isFinite(b.maxX) ||
+    !Number.isFinite(b.minY) ||
+    !Number.isFinite(b.maxY) ||
+    !Number.isFinite(b.floorZ) ||
+    !Number.isFinite(b.surfaceZ)
+  ) {
+    return null;
+  }
+  const cx = 0.5 * (b.minX + b.maxX);
+  const cy = 0.5 * (b.minY + b.maxY);
+  const depthZ = Math.max(0.002, b.surfaceZ - b.floorZ);
+  const cz = b.floorZ + 0.5 * depthZ;
+  const capZ = b.floorZ + depthZ;
+  const spanX = Math.max(0.004, b.maxX - b.minX);
+  const spanY = Math.max(0.004, b.maxY - b.minY);
+  const rMean = 0.25 * (spanX + spanY);
+  return { cx, cy, cz, capZ, depthZ, spanX, spanY, rMean };
+}
 
 /**
  * Renders translucent 3D freshwater volumes strictly inside open-top containers
@@ -24,9 +64,7 @@ export function WaterSurface({ darkMode }: { darkMode: boolean }) {
   }, [nodes]);
 
   useEffect(() => {
-    if (basins.length > 0 || (waterLevel !== null && Number.isFinite(waterLevel))) {
-      invalidate();
-    }
+    invalidate();
   }, [basins, waterLevel, darkMode, invalidate]);
 
   if (basins.length > 0) {
@@ -34,13 +72,9 @@ export function WaterSurface({ darkMode }: { darkMode: boolean }) {
       // Z-up -> Three.js Y-up group matching SceneLayer's primitive coordinate frame
       <group rotation={[-Math.PI / 2, 0, 0]} userData={{ skipExport: true, isOverlay: true }}>
         {basins.map((b) => {
-          const cx = 0.5 * (b.minX + b.maxX);
-          const cy = 0.5 * (b.minY + b.maxY);
-          const depthZ = Math.max(0.002, b.surfaceZ - b.floorZ);
-          const cz = b.floorZ + 0.5 * depthZ;
-          const spanX = Math.max(0.004, b.maxX - b.minX);
-          const spanY = Math.max(0.004, b.maxY - b.minY);
-          const rMean = 0.25 * (spanX + spanY);
+          const params = computeWaterBasinMeshParams(b);
+          if (!params) return null;
+          const { cx, cy, cz, capZ, depthZ, spanX, spanY, rMean } = params;
 
           return (
             <group key={b.containerNodeId}>
@@ -68,9 +102,9 @@ export function WaterSurface({ darkMode }: { darkMode: boolean }) {
                 />
               </mesh>
 
-              {/* Crisp bright meniscus surface cap right at Z = surfaceZ */}
+              {/* Crisp bright meniscus surface cap right at the top of the rendered water volume */}
               <mesh
-                position={[cx, cy, b.surfaceZ]}
+                position={[cx, cy, capZ]}
                 raycast={NOOP_RAYCAST}
                 renderOrder={3}
               >

@@ -125,11 +125,14 @@ function createEngine(gl: THREE.WebGLRenderer): Engine | null {
       denoise.transparent = fade.opacity < 1;
       const autoClear = renderer.autoClear;
       renderer.autoClear = false;
-      denoiseQuad.render(renderer);
-      if (engine.glowScale > 0) {
-        glow.render(renderer, cleaned, target.width, target.height, fade.opacity * engine.glowScale);
+      try {
+        denoiseQuad.render(renderer);
+        if (engine.glowScale > 0) {
+          glow.render(renderer, cleaned, target.width, target.height, fade.opacity * engine.glowScale);
+        }
+      } finally {
+        renderer.autoClear = autoClear;
       }
-      renderer.autoClear = autoClear;
     };
 
     return engine;
@@ -224,8 +227,18 @@ export function PathTracedView({ background }: { background: string }) {
       for (const g of s.ownedGeometries) g.dispose();
       s.ownedGeometries = [];
       s.sceneDirty = true;
+      s.cameraDirty = true;
+      s.showing = false;
+      s.traced = null;
       s.buildArmed = false;
       s.building = false;
+      s.phase = null;
+      s.reportedSamples = -1;
+      s.compileStarted = 0;
+      s.lastSampleAt = 0;
+      s.slowFrames = 0;
+      s.tileStep = 0;
+      usePathTraceStatus.getState().set({ phase: 'waiting', samples: 0 });
     };
   }, [gl]);
 
@@ -369,7 +382,10 @@ export function PathTracedView({ background }: { background: string }) {
           },
           (e) => {
             disposeBatch(nextMaterials, nextTextures, nextGeometries);
-            if (engineRef.current === engine) fail(e);
+            if (engineRef.current === engine) {
+              s.building = false;
+              fail(e);
+            }
           },
         );
       } catch (e) {
@@ -424,8 +440,11 @@ export function PathTracedView({ background }: { background: string }) {
     // curve as the raster view's BodyToneMapping.
     const toneMapping = gl.toneMapping;
     gl.toneMapping = THREE.NeutralToneMapping;
-    pathTracer.renderSample();
-    gl.toneMapping = toneMapping;
+    try {
+      pathTracer.renderSample();
+    } finally {
+      gl.toneMapping = toneMapping;
+    }
 
     if (converged) {
       report('done', pathTracer.samples);
@@ -480,16 +499,18 @@ const TRACED_GLOW = 2.2;
  * it. So a translucent geom is drawn as what it stands for, a clear material
  * that lets through 1 - alpha, and its tint fades with it.
  */
-function tracedMaterial(live: THREE.MeshStandardMaterial, owned: THREE.Material[]): THREE.MeshStandardMaterial {
-  const glow: number = live.userData.glow ?? 0;
+// eslint-disable-next-line react-refresh/only-export-components
+export function tracedMaterial(live: THREE.MeshStandardMaterial, owned: THREE.Material[]): THREE.MeshStandardMaterial {
+  const rawGlow = live.userData?.glow;
+  const glow = typeof rawGlow === 'number' && Number.isFinite(rawGlow) && rawGlow > 0 ? rawGlow : 0;
   const lit = live.emissiveIntensity > 0 && live.emissive.getHex() !== 0;
-  const clear = live.transparent && live.opacity < 1;
+  const clear = live.transparent && Number.isFinite(live.opacity) && live.opacity < 1;
   if (!clear && !lit) return live;
   const material = live.clone();
   owned.push(material);
   if (lit) material.emissiveIntensity = glow * TRACED_GLOW;
   if (clear) {
-    const alpha = live.opacity;
+    const alpha = Math.min(1, Math.max(0, live.opacity));
     material.color.lerp(_white, 1 - alpha);
     Object.assign(material, { transmission: 1 - alpha, ior: CLEAR_IOR, opacity: 1, transparent: false, roughness: Math.min(live.roughness, 0.05), depthWrite: true });
   }
@@ -507,7 +528,7 @@ export function collectBodies(scene: THREE.Scene): THREE.Mesh[] {
     if (instanced.isInstancedMesh && instanced.count <= 0) return;
     const material = mesh.material as THREE.MeshStandardMaterial;
     if (Array.isArray(mesh.material) || !material.isMeshStandardMaterial) return;
-    if (material.wireframe || !material.visible || material.opacity <= 0) return;
+    if (material.wireframe || !material.visible || !(material.opacity > 0)) return;
     bodies.push(mesh);
   });
   return bodies;
@@ -561,6 +582,7 @@ export function sceneSignature(bodies: THREE.Mesh[]): number[] {
       material.emissiveIntensity,
       typeof material.userData?.glow === 'number' ? material.userData.glow : 0,
       material.transparent ? 1 : 0,
+      material.vertexColors ? 1 : 0,
       material.side,
       material.visible ? 1 : 0,
     );
@@ -595,7 +617,7 @@ const CAMERA_TOLERANCE = 1e-5;
 // eslint-disable-next-line react-refresh/only-export-components
 export function sameSignature(a: number[], b: number[], tolerance: number): boolean {
   if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (Math.abs(a[i] - b[i]) > tolerance) return false;
+  for (let i = 0; i < a.length; i++) if (!(Math.abs(a[i] - b[i]) <= tolerance)) return false;
   return true;
 }
 

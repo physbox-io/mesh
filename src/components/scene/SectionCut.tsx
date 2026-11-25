@@ -25,13 +25,60 @@ const LIFT_M = 1e-5;
 const toThree = (x: number, y: number, z: number): [number, number, number] => [x, z, -y];
 
 /**
+ * Normalizes a section plane `dot(p, normal) = offset` (document Z-up frame)
+ * into a unit-normal plane in both document and Three.js Y-up frames.
+ * Returns `null` if any component is non-finite or the normal is degenerate.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function normalizeSectionPlane(
+  normal: readonly [number, number, number],
+  offset: number,
+): { normal: [number, number, number]; threeNormal: [number, number, number]; constant: number } | null {
+  const [nx, ny, nz] = normal;
+  if (!Number.isFinite(nx) || !Number.isFinite(ny) || !Number.isFinite(nz) || !Number.isFinite(offset)) {
+    return null;
+  }
+  const len = Math.hypot(nx, ny, nz);
+  if (!Number.isFinite(len) || len <= 1e-12) return null;
+  const ux = nx / len;
+  const uy = ny / len;
+  const uz = nz / len;
+  return {
+    normal: [ux, uy, uz],
+    threeNormal: toThree(ux, uy, uz),
+    constant: -offset / len,
+  };
+}
+
+/** Attaches `plane` to `material.clippingPlanes` without clobbering other clipping planes. */
+// eslint-disable-next-line react-refresh/only-export-components
+export function attachClippingPlane(material: THREE.Material, plane: THREE.Plane): boolean {
+  if (material.clippingPlanes?.includes(plane)) return false;
+  material.clippingPlanes = material.clippingPlanes ? [...material.clippingPlanes, plane] : [plane];
+  material.needsUpdate = true;
+  return true;
+}
+
+/** Detaches only `plane` from `material.clippingPlanes`, preserving any other clipping planes. */
+// eslint-disable-next-line react-refresh/only-export-components
+export function detachClippingPlane(material: THREE.Material, plane: THREE.Plane): boolean {
+  if (!material.clippingPlanes?.includes(plane)) return false;
+  const remaining = material.clippingPlanes.filter((p) => p !== plane);
+  material.clippingPlanes = remaining.length > 0 ? remaining : null;
+  material.needsUpdate = true;
+  return true;
+}
+
+/**
  * True when an object represents a scene part that Section View should clip:
  * either a mesh inside a named body group (`bodyOf`) or an instanced batch of
  * static boxes (`StaticBoxInstances`) carrying `userData.nodeIds`.
  */
 // eslint-disable-next-line react-refresh/only-export-components
 export function isSectionPart(object: THREE.Object3D): boolean {
-  if (object.userData?.isOverlay || object.userData?.isBackground) return false;
+  for (let cur: THREE.Object3D | null = object; cur; cur = cur.parent) {
+    if (cur.userData?.isOverlay || cur.userData?.isBackground) return false;
+  }
   if (bodyOf(object)) return true;
   const inst = object as THREE.InstancedMesh;
   return Boolean(inst.isInstancedMesh && Array.isArray(object.userData?.nodeIds));
@@ -56,23 +103,40 @@ export function SectionCut() {
   // materials hold this one object.
   const planeRef = useRef(new THREE.Plane());
   const clippedRef = useRef(false);
+  const prevLocalClippingRef = useRef<boolean | null>(null);
+  const clippedMaterialsRef = useRef<Set<THREE.Material>>(new Set());
   const scene = useThree((s) => s.scene);
   const gl = useThree((s) => s.gl);
-  // Unmounted mid-cut: nothing stays clipped.
+  const invalidate = useThree((s) => s.invalidate);
+
+  // Trigger a frame in demand-rendered mode whenever the cut changes.
+  useEffect(() => {
+    invalidate();
+  }, [cut, invalidate]);
+
+  // Unmounted mid-cut: nothing stays clipped and localClippingEnabled is restored.
   useEffect(() => () => {
     if (!clippedRef.current) return;
     const plane = planeRef.current;
     for (const m of partMaterials(scene)) {
-      if (m.clippingPlanes?.includes(plane)) { m.clippingPlanes = null; m.needsUpdate = true; }
+      detachClippingPlane(m, plane);
     }
-    gl.localClippingEnabled = false;
+    for (const m of clippedMaterialsRef.current) {
+      detachClippingPlane(m, plane);
+    }
+    clippedMaterialsRef.current.clear();
+    gl.localClippingEnabled = prevLocalClippingRef.current ?? false;
+    prevLocalClippingRef.current = null;
     clippedRef.current = false;
-  }, [gl, scene]);
+    invalidate();
+  }, [gl, scene, invalidate]);
   const view = isDrawingView(cameraView) ? cameraView : null;
 
   const geometry = useMemo(() => {
     if (!cut || !view) return null;
-    const [nx, ny, nz] = cut.normal;
+    const planeData = normalizeSectionPlane(cut.normal, cut.offset);
+    if (!planeData) return null;
+    const [nx, ny, nz] = planeData.normal;
     const lift = (p: number[]) => {
       const out: number[] = [];
       for (let i = 0; i < p.length; i += 3) {
@@ -106,27 +170,31 @@ export function SectionCut() {
   // new materials; skipped completely when no cut is active and unclipped.
   useFrame(({ gl: frameGl, scene: frameScene }) => {
     const plane = planeRef.current;
-    if (!cut) {
+    const planeData = cut ? normalizeSectionPlane(cut.normal, cut.offset) : null;
+    if (!planeData) {
       if (!clippedRef.current) return;
       for (const m of partMaterials(frameScene)) {
-        if (m.clippingPlanes?.includes(plane)) {
-          m.clippingPlanes = null;
-          m.needsUpdate = true;
-        }
+        detachClippingPlane(m, plane);
       }
-      frameGl.localClippingEnabled = false;
+      for (const m of clippedMaterialsRef.current) {
+        detachClippingPlane(m, plane);
+      }
+      clippedMaterialsRef.current.clear();
+      frameGl.localClippingEnabled = prevLocalClippingRef.current ?? false;
+      prevLocalClippingRef.current = null;
       clippedRef.current = false;
       return;
     }
+    if (!clippedRef.current) {
+      prevLocalClippingRef.current = frameGl.localClippingEnabled;
+      clippedRef.current = true;
+    }
     frameGl.localClippingEnabled = true;
-    clippedRef.current = true;
-    plane.normal.set(...toThree(...cut.normal));
-    plane.constant = -cut.offset;
+    plane.normal.set(...planeData.threeNormal);
+    plane.constant = planeData.constant;
     for (const m of partMaterials(frameScene)) {
-      const clipped = m.clippingPlanes?.includes(plane) ?? false;
-      if (!clipped) {
-        m.clippingPlanes = [plane];
-        m.needsUpdate = true;
+      if (attachClippingPlane(m, plane) || m.clippingPlanes?.includes(plane)) {
+        clippedMaterialsRef.current.add(m);
       }
     }
   });
