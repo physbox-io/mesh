@@ -715,7 +715,7 @@ export const objectCommands: McpCommands = {
       : undefined;
 
     // A part already in the scene: only fix a body to its moving piece.
-    if (existing) {
+    if (existing && (!kind || fixTo)) {
       const part = findNodeInScene(store.sceneGraph.nodes, existing);
       const piece = part && (part.hardwarePart?.piece ? part : movingPieceOf(part));
       if (!piece) return { ok: false, error: `'${existing}' has no moving piece to fix a body to` };
@@ -728,7 +728,14 @@ export const objectCommands: McpCommands = {
     }
     const partKind = kind as HardwarePartKind;
     const info = HARDWARE_PARTS[partKind];
-    if (size !== undefined && !info.sizes.includes(String(size))) {
+    // Accept ASCII equivalents like '10x30' for Unicode sizes like 'Ø10×30'.
+    const normalizeSize = (raw: string) => raw.trim().replace(/^[Øø]/u, '').replace(/[xX×]/gu, '×').toLowerCase();
+    const resolvedSize = size !== undefined
+      ? (info.sizes.includes(String(size))
+        ? String(size)
+        : info.sizes.find((s) => normalizeSize(s) === normalizeSize(String(size))))
+      : undefined;
+    if (size !== undefined && !resolvedSize) {
       return { ok: false, error: `${info.label} comes in ${info.sizes.join(', ')}; got '${size}'` };
     }
     if (lengthMm !== undefined && (!isFiniteNumber(lengthMm) || lengthMm <= 0)) {
@@ -769,7 +776,7 @@ export const objectCommands: McpCommands = {
       if (!Array.isArray(between) || between.length !== 2 || typeof between[0] !== 'string' || typeof between[1] !== 'string') {
         return { ok: false, error: `A ${info.label.toLowerCase()} joins two profiles: give their ids as between: [a, b]` };
       }
-      const joined = store.joinProfiles(between[0], between[1], joinKind, size !== undefined ? String(size) : undefined);
+      const joined = store.joinProfiles(between[0], between[1], joinKind, resolvedSize);
       if ('problem' in joined) return { ok: false, error: joined.problem };
       id = joined.id;
     } else if (kind === 'vslot_carriage') {
@@ -790,9 +797,9 @@ export const objectCommands: McpCommands = {
     if (!id) return { ok: false, error: 'The part could not be added' };
     // Sized before anything is fixed to it: fixed first, a body rode the
     // default size's moving piece where the new size's no longer was.
-    if (!joinKind && kind !== 'vslot_carriage' && (size !== undefined || lengthMm !== undefined || washer !== undefined)) {
+    if (!joinKind && kind !== 'vslot_carriage' && (resolvedSize !== undefined || lengthMm !== undefined || washer !== undefined)) {
       useStore.getState().setHardwarePart(id, {
-        ...(size !== undefined ? { size: String(size) } : {}),
+        ...(resolvedSize !== undefined ? { size: resolvedSize } : {}),
         ...(typeof lengthMm === 'number' ? { lengthMm } : {}),
         ...(typeof washer === 'boolean' ? { washer } : {}),
       });

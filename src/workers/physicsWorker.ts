@@ -948,7 +948,7 @@ const wakeBodies = () => {
 };
 
 /** The least the pointer can pull with, N: about what fingers pull a strand out of putty with. */
-const DRAG_HAND_N = 5;
+const DRAG_HAND_N = 25;
 
 /**
  * The mass of everything joined to body `bId` by active welds and pins, its
@@ -1033,9 +1033,9 @@ const applyDragForce = () => {
    * time, so the gesture feels the same whatever is on the end of it. 200 per
    * kg is what a 1 kg body already had, so light bodies are unchanged.
    */
-  // A hand's worth at the least: enough, at the 0.15 m of pointer offset
-  // every body saturates at, to pull a part out of a joint or snap it.
-  const K = Math.max(200.0 * mass, DRAG_HAND_N / 0.15);
+  // A hand's worth at the least: enough, at ~0.08 m of pointer offset,
+  // to depress stiff spring-loaded buttons (e.g. 1.2 N/mm) or snap flexures.
+  const K = Math.max(200.0 * mass, DRAG_HAND_N / 0.08);
   // Critical damping for the body actually being pulled: damping sized to the
   // whole assembly but applied to one light part would be unstable at 1 ms.
   const D = 2.0 * Math.sqrt(own * K);

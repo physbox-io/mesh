@@ -346,11 +346,16 @@ export function makeStrutNode(
   radiusMm: number,
   rgba: [number, number, number, number] = [0.92, 0.94, 0.96, 1]
 ): SceneNode {
+  // Centre the body at the pipe's midpoint so selecting or dragging it places
+  // the transform gizmo and drag anchor on the pipe rather than at [0, 0, 0].
+  const mid: Vec3 = [(p1Mm[0] + p2Mm[0]) / 2, (p1Mm[1] + p2Mm[1]) / 2, (p1Mm[2] + p2Mm[2]) / 2];
+  const d1: Vec3 = [p1Mm[0] - mid[0], p1Mm[1] - mid[1], p1Mm[2] - mid[2]];
+  const d2: Vec3 = [p2Mm[0] - mid[0], p2Mm[1] - mid[1], p2Mm[2] - mid[2]];
   return {
     id,
     name,
     type: 'body',
-    pos: [0, 0, 0],
+    pos: [mm(mid[0]), mm(mid[1]), mm(mid[2])],
     joints: [],
     children: [],
     geoms: [
@@ -359,12 +364,12 @@ export function makeStrutNode(
         type: 'cylinder',
         size: [mm(radiusMm), mm(vDist(p1Mm, p2Mm) / 2)],
         fromto: [
-          mm(p1Mm[0]),
-          mm(p1Mm[1]),
-          mm(p1Mm[2]),
-          mm(p2Mm[0]),
-          mm(p2Mm[1]),
-          mm(p2Mm[2]),
+          mm(d1[0]),
+          mm(d1[1]),
+          mm(d1[2]),
+          mm(d2[0]),
+          mm(d2[1]),
+          mm(d2[2]),
         ],
         rgba,
       },
@@ -1200,6 +1205,10 @@ export function buildPipeHubNode(
     name: `3D Hub: ${hub.name} (${hub.ports.length}-Way)`,
     type: 'body',
     csgEnabled: true,
+    // Pipe hubs sit around pipe ends in a static frame; convex-decomposing 20+
+    // hollow sockets spawns hundreds of V-HACD hulls per hub and hangs the
+    // compile for minutes, while export/print still uses the exact CSG mesh.
+    collision: 'hull',
     pos: [mm(hub.centerMm[0]) + cx, mm(hub.centerMm[1]) + cy, mm(hub.centerMm[2])],
     joints: [],
     children: [],
@@ -1217,9 +1226,14 @@ export function withoutHubsAt(nodes: SceneNode[], hubs: SceneNode[]): SceneNode[
     Math.hypot(h.pos[0] - n.pos[0], h.pos[1] - n.pos[1], h.pos[2] - n.pos[2]) < 0.005)));
 }
 
-export function buildAllCustomHubNodes(breakdown: PipeFrameBreakdownResult): SceneNode[] {
+export function buildAllCustomHubNodes(
+  breakdown: PipeFrameBreakdownResult,
+  includeStandard = false,
+): SceneNode[] {
   const customHubs = breakdown.hubs.filter((h) => h.needsCustomPrint);
-  const targets = customHubs.length > 0 ? customHubs : breakdown.hubs.filter((h) => h.ports.length >= 2);
+  const targets = includeStandard || customHubs.length === 0
+    ? breakdown.hubs.filter((h) => h.ports.length >= 2)
+    : customHubs;
   const spacingMm = (breakdown.pipeSpec.odMm + (breakdown.options.socketDepthMm ?? breakdown.pipeSpec.socketDepthMm) * 2) * 1.4;
 
   return targets.map((hub, idx) => {

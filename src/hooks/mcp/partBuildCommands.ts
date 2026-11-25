@@ -620,11 +620,12 @@ const breakdownPipeFrameCommand: McpHandler = async (msg) => {
     }
     const bd = breakdownPipeFrame(useStore.getState().sceneGraph, msg as Partial<PipeFrameOptions>);
     let addedHubIds: string[] = [];
-    if (msg.addPrintableHubs === true) {
-      const hubNodes = await buildHubsOffThread(bd);
+    const includeStandard = msg.includeStandardFittings === true || msg.addAllFittings === true;
+    if (msg.addPrintableHubs === true || msg.addAllFittings === true) {
+      const hubNodes = await buildHubsOffThread(bd, includeStandard);
       addedHubIds = hubNodes.map((h) => h.id);
       const nextNodes = [...withoutHubsAt(useStore.getState().sceneGraph.nodes, hubNodes), ...hubNodes];
-      const settled = await settleScene(nextNodes, { replacesScene: false });
+      const settled = await settleScene(nextNodes, { replacesScene: false, waitForColliders: false });
       if (!settled.ok) return { ok: false, error: settled.error || 'Scene failed to compile after adding printable hubs.' };
     }
     return {
@@ -693,7 +694,7 @@ export const partBuildCommands: McpCommands = {
       });
       useStore.getState().prepareForDiscreteChange();
       // Adds to the scene: its note card and settings stay.
-      const settled = await settleScene(nodes, { replacesScene: false });
+      const settled = await settleScene(nodes, { replacesScene: false, waitForColliders: false });
       if (!settled.ok) return { ok: false, error: settled.error || 'Scene failed to compile after building pipe frame.' };
       const kinds: Record<string, number> = {};
       for (const m of skeleton.members) kinds[m.kind] = (kinds[m.kind] ?? 0) + 1;

@@ -668,14 +668,50 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     },
     onPointerDown: (e: ThreeEvent<PointerEvent>) => {
       if (useStore.getState().isPlaying) {
+        // Static bodies (0 DOFs along their ancestor chain) cannot be pulled
+        // by a drag spring; let orbit/camera drag work instead of drawing a
+        // dead spring line to the body's origin.
+        const st = useStore.getState();
+        const mdl = st.model;
+        if (mdl && mdl.body_dofnum && mdl.body_parentid && nodeId) {
+          const findNode = (nodes: SceneNode[]): SceneNode | null => {
+            for (const n of nodes) {
+              if (n.id === nodeId) return n;
+              const hit = findNode(n.children || []);
+              if (hit) return hit;
+            }
+            return null;
+          };
+          const node = findNode(st.sceneGraph.nodes || []);
+          const bId = node ? (
+            st.mujoco
+              ? (() => {
+                  for (let b = 0; b < mdl.nbody; b++) {
+                    const nm = st.mujoco!.mj_id2name(mdl, st.mujoco!.mjtObj.mjOBJ_BODY.value, b);
+                    if (nm === node.name || nm === node.id) return b;
+                  }
+                  return -1;
+                })()
+              : -1
+          ) : -1;
+          if (bId > 0) {
+            let cur = bId;
+            let hasDof = false;
+            while (cur > 0) {
+              if ((mdl.body_dofnum[cur] ?? 0) > 0) { hasDof = true; break; }
+              cur = mdl.body_parentid[cur] ?? 0;
+            }
+            if (!hasDof) return;
+          }
+        }
         e.stopPropagation();
         setOrbitEnabled(false);
-        useStore.getState().setDraggedNodeId(nodeId!);
-        useStore.getState().setDragDistance(e.distance);
+        st.setDraggedNodeId(nodeId!);
+        st.setDragDistance(e.distance);
         
         const pt = e.point;
         // Transform standard Three.js world coordinates (Y-up) to MuJoCo coordinate space (Z-up)
-        useStore.getState().setDragTarget({ x: pt.x, y: -pt.z, z: pt.y });
+        st.setDragTarget({ x: pt.x, y: -pt.z, z: pt.y });
         const canvasEl = e.nativeEvent?.target as HTMLElement;
         if (canvasEl && typeof canvasEl.setPointerCapture === 'function') {
           try {
@@ -1348,9 +1384,12 @@ export const MouseDragForceRenderer = ({ model, data, mujoco }: { model: ModelMi
       }
       lineRef.current.visible = true;
 
-      const px = data.xpos[bId * 3];
-      const py = data.xpos[bId * 3 + 1];
-      const pz = data.xpos[bId * 3 + 2];
+      // Anchor at body CoM (xipos) when available so bodies with offset geoms
+      // (e.g. fromto cylinders) don't draw a spring line to [0, 0, 0].
+      const src = (data as DataMirror & { xipos?: ArrayLike<number> }).xipos ?? data.xpos;
+      const px = src[bId * 3];
+      const py = src[bId * 3 + 1];
+      const pz = src[bId * 3 + 2];
 
       // Parent group has rotation={[-Math.PI / 2, 0, 0]} which converts MuJoCo Z-up space to Three.js Y-up.
       // Inside this group, local coordinates ARE MuJoCo Z-up (x, y, z).

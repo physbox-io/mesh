@@ -26,8 +26,26 @@ export const sectionCommands: McpCommands = {
     if (msg.bodyId !== undefined && msg.bodyId !== null && typeof msg.bodyId !== 'string') {
       return { ok: false, error: 'bodyId must be a body id or name string.' };
     }
-    const subject = mcpMoldSubject(store.sceneGraph, msg.bodyId, (id) => findNodeInScene(store.sceneGraph.nodes, (toId ? toId(id) : id) as string), 'cut', 'body_id');
-    if ('error' in subject) return { ok: false, error: subject.error };
+    let subject: { scene: typeof store.sceneGraph; label: string; ids: string[] };
+    const rawIds = typeof msg.bodyId === 'string'
+      ? msg.bodyId.split(',').map((x) => x.trim()).filter(Boolean)
+      : [];
+    const resolvedNodes = rawIds
+      .map((id) => findNodeInScene(store.sceneGraph.nodes, (toId ? toId(id) : id) as string))
+      .filter((n): n is NonNullable<typeof n> => Boolean(n));
+    if (rawIds.length > 0 && resolvedNodes.length === rawIds.length && resolvedNodes.some((n) => Boolean(n.simulation || n.pourBox))) {
+      // Explicit body_id targeting a simulation or pour box (e.g. inspecting a
+      // generated mold's wall thickness or cavity clearance): allow slicing it.
+      subject = {
+        scene: { ...store.sceneGraph, nodes: resolvedNodes.map((n) => ({ ...n, simulation: undefined, pourBox: undefined })) },
+        label: resolvedNodes.length === 1 ? resolvedNodes[0].name : `${resolvedNodes[0].name} and ${resolvedNodes.length - 1} more`,
+        ids: resolvedNodes.map((n) => n.id),
+      };
+    } else {
+      const checked = mcpMoldSubject(store.sceneGraph, msg.bodyId, (id) => findNodeInScene(store.sceneGraph.nodes, (toId ? toId(id) : id) as string), 'cut', 'body_id');
+      if ('error' in checked) return { ok: false, error: checked.error };
+      subject = checked;
+    }
     const options = { axis, ...(typeof msg.atMm === 'number' ? { atMm: msg.atMm } : {}) };
     let result: SectionResult;
     try {

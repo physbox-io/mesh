@@ -34,7 +34,7 @@ async function handleMessage(msg: PipeFrameRequest): Promise<void> {
       post({ type: 'FRAME_DONE', id: msg.id, outcome }, collectTransferables(outcome));
       return;
     }
-    const nodes = buildAllCustomHubNodes(msg.breakdown);
+    const nodes = buildAllCustomHubNodes(msg.breakdown, msg.includeStandard === true);
     post({ type: 'HUBS_DONE', id: msg.id, nodes }, collectTransferables(nodes));
   } catch (err) {
     post({ type: 'FAILED', id: msg.id, error: err instanceof Error ? err.message : String(err) });

@@ -77,6 +77,7 @@ function buildSpring(node: SceneNode, p: HardwarePart, id: string) {
       quat: [Math.cos(tilt / 2), Math.sin(tilt / 2), 0, 0].map((v) => +v.toFixed(9)),
       geoms: [{
         name: `${id}_coil${i}_wire`, type: 'mesh', size: [1], rgba: [...SPRING_STEEL], contype: 0, conaffinity: 0,
+        dynamic: true,
         mass: +(Math.PI * mm(od - wire) * Math.PI * mm(wire / 2) ** 2 * STEEL).toFixed(7), ...ring,
       } as SceneGeom],
       // Along the spring's axis, which the tip leans off: in the coil's own frame.
