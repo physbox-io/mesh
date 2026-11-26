@@ -206,16 +206,23 @@ export const latticeCommands: McpCommands = {
     return { ok: true, id: targetId, ...result, ...latticeSummary(lattice), undoDepth: (latticeHistory.get(targetId) ?? []).length };
   },
   LATTICE_SMOOTH: async (msg, { store }) => {
-    const { targetId, level } = msg as Msg<{ targetId: string }>;
+    const { targetId, level, subdiv } = msg as Msg<{ targetId: string; level?: unknown; subdiv?: unknown }>;
     const { node } = latticeTarget(store, targetId);
-    const wanted = parseSubdiv(level, 'level');
+    const rawLevel = level !== undefined ? level : subdiv;
+    const wanted = parseSubdiv(rawLevel, level !== undefined ? 'level' : 'subdiv');
     useStore.getState().setLatticeSubdiv(node.id, wanted);
     const after = findNodeInScene(useStore.getState().sceneGraph.nodes, node.id);
     const mesh = after?.geoms?.find((g: SceneGeom) => g.latticeGeom)
       ?? after?.geoms?.find((g: SceneGeom) => g.type === 'mesh' && !g.csgDerived);
+    const thicknessMm = after?.latticeThickness && after.latticeThickness > 0
+      ? Math.round(after.latticeThickness * 1e6) / 1e3
+      : 0;
+    const summary = latticeSummary(latticeOf(after));
+    const meshWatertight = thicknessMm > 0 ? isTriangleMeshWatertight(mesh?.faces) : summary.watertight;
     return {
-      ok: true, id: node.id, level: wanted,
-      ...latticeSummary(latticeOf(after)),
+      ok: true, id: node.id, level: wanted, subdiv: wanted,
+      ...summary,
+      ...(thicknessMm > 0 ? { thicknessMm, cageWatertight: summary.watertight, watertight: meshWatertight } : {}),
       // The cage is unchanged; what smoothing changes is the mesh built
       // from it, which is what everything downstream actually sees.
       meshTriangles: mesh?.faces ? mesh.faces.length / 3 : 0,
@@ -393,6 +400,23 @@ export const latticeCommands: McpCommands = {
   GET_LATTICE: async (msg, { store }) => {
     const { targetId } = msg as Msg<{ targetId: string }>;
     const { node, lattice } = latticeTarget(store, targetId);
-    return { ok: true, id: targetId, ...describeLattice(lattice), cageOriginMm: cageOriginInBodyMm(node) };
+    const desc = describeLattice(lattice);
+    const subdiv = node.latticeSubdiv ?? 0;
+    const thicknessMm = node.latticeThickness && node.latticeThickness > 0
+      ? Math.round(node.latticeThickness * 1e6) / 1e3
+      : 0;
+    const mesh = node.geoms?.find((g: SceneGeom) => g.latticeGeom)
+      ?? node.geoms?.find((g: SceneGeom) => g.type === 'mesh' && !g.csgDerived);
+    const meshWatertight = thicknessMm > 0 ? isTriangleMeshWatertight(mesh?.faces) : desc.watertight;
+    return {
+      ok: true,
+      id: targetId,
+      ...desc,
+      subdiv,
+      thicknessMm,
+      cageWatertight: desc.watertight,
+      watertight: meshWatertight,
+      cageOriginMm: cageOriginInBodyMm(node),
+    };
   },
 };

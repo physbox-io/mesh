@@ -19,7 +19,7 @@ import {
 } from '../../utils/referenceImages';
 import { sceneContentBounds } from '../../utils/frameScene';
 import { measureInScene } from '../../utils/measureScene';
-import type { Object3D } from 'three';
+import { Vector2, type Object3D } from 'three';
 import type { SceneNode } from '../../types/scene';
 import { hardwareList } from '../../utils/hardwareList';
 import { CAMERA_VIEWS, type CameraView } from '../../utils/cameraViews';
@@ -157,7 +157,7 @@ function applyRenderScale(
     return { scaledRenderer: false, restore: () => {} };
   }
   const origDpr = gl.getPixelRatio();
-  const size = typeof gl.getSize === 'function' ? gl.getSize({ x: 0, y: 0 }) : null;
+  const size = typeof gl.getSize === 'function' ? gl.getSize(new Vector2()) : null;
   gl.setPixelRatio(origDpr * scale);
   if (size && composer && typeof composer.setSize === 'function') {
     composer.setSize(size.x, size.y, false);
