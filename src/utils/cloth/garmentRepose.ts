@@ -89,7 +89,8 @@ export function reposeDraft(draft: GarmentDraft, from: BodyFormMeasurements, to:
   const Rs = reposer(from, to, ['armL', 'armR', 'head']);
   const gp = (g: GarmentPoint | undefined): GarmentPoint | undefined => (Array.isArray(g) ? P(g) : g);
   const plane = <T extends GarmentPlane>(pl: T): T => {
-    const isArmOnly = pl.on && pl.on.length > 0 && pl.on.every((part) => part === 'armL' || part === 'armR');
+    const onList = pl.on === undefined ? [] : (Array.isArray(pl.on) ? pl.on : [pl.on]);
+    const isArmOnly = onList.length > 0 && onList.every((part) => part === 'armL' || part === 'armR' || part === 'sleeveL' || part === 'sleeveR' || part === 'sleeve');
     let z = pl.z;
     if (z) {
       if (isArmOnly) {

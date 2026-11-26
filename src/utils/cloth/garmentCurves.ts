@@ -62,6 +62,8 @@ export interface SurfaceCurve {
   closed: boolean;
   /** Whether each open end (first, last) runs out through an open edge: cut on past it. */
   through: [boolean, boolean];
+  /** Minimum Euclidean distance (metres) from any input control point to the nearest surface point. */
+  minControlDist?: number;
 }
 
 /**
@@ -106,7 +108,9 @@ export function surfaceCurve(line: GarmentCurve, points: number[][], tris: numbe
     for (let k = 0; k < n; k++) fine.push(a.map((v, j) => v + ((b[j] - v) * k) / n));
   }
   if (!closed) fine.push(raw[raw.length - 1]);
-  if (fine.length < 2) return null;
+  if (fine.length < 2 || tris.length < 3) return null;
+  const rawProj = project(raw, points, tris);
+  const minControlDist = Math.min(...raw.map((q, i) => Math.sqrt(dist2(q, rawProj[i].p))));
   const on = project(fine, points, tris);
   // How far each point moved onto the surface, smoothed along the line: from
   // a line drawn off the surface (round the body, under a puffed garment) the
@@ -178,7 +182,7 @@ export function surfaceCurve(line: GarmentCurve, points: number[][], tris: numbe
     }
     return unit(acc) ?? normal[i];
   });
-  return { path, normal: smoothN, closed, through };
+  return { path, normal: smoothN, closed, through, minControlDist };
 }
 
 /**

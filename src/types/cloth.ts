@@ -485,8 +485,12 @@ export interface GarmentPlane {
   point: number[];
   /** Its normal; a cut takes away the cloth on this side. */
   normal: number[];
-  /** Only where the cloth is nearest these parts of the form: skin, armL, armR, legL, legR, head. */
-  on?: ('skin' | FormLimbName)[];
+  /**
+   * Scope to specific form parts (`'skin'`, `'armL'`, `'armR'`, `'legL'`, `'legR'`, `'head'`)
+   * or panel regions (`'front'`, `'back'`, `'frontL'`, `'frontR'`, `'backL'`, `'backR'`,
+   * `'torso'`, `'sleeve'`, `'sleeveL'`, `'sleeveR'`). Accepts a single name or an array.
+   */
+  on?: string | string[];
   /** Only on the garment's front (true) or back (false). */
   front?: boolean;
   /** Only between these heights, metres; and these x, either side. */
@@ -740,6 +744,10 @@ export interface GarmentDraft {
   train?: number;
   /** Sleeve length from the shoulder point, metres; 0 for sleeveless. */
   sleeve?: number;
+  /** Left-arm sleeve length from the shoulder point, metres (overrides `sleeve`; 0 omits the left sleeve). */
+  sleeveL?: number;
+  /** Right-arm sleeve length from the shoulder point, metres (overrides `sleeve`; 0 omits the right sleeve). */
+  sleeveR?: number;
   /** Round the sleeve at its cuff, metres; 0 for as wide as the sleeve. */
   cuff?: number;
   /** Armhole cut this much deeper than a set-in sleeve's, metres: deep, a batwing. */

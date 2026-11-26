@@ -142,7 +142,10 @@ export function garmentPlan(draft: GarmentDraft, form: BodyFormMeasurements, lay
     : fromWaist
       ? Math.max(0.06 * form.height - L.drop, waistTop - Math.max(0.03, d.length))
       : L.waistZ - Math.max(0.02, d.length);
-  const sleeved = !fromWaist && d.sleeve > 0.03;
+  const armSleeve = (arm: 'armL' | 'armR') => (arm === 'armL' ? (d.sleeveL ?? d.sleeve) : (d.sleeveR ?? d.sleeve));
+  const sleevedL = !fromWaist && armSleeve('armL') > 0.03;
+  const sleevedR = !fromWaist && armSleeve('armR') > 0.03;
+  const sleeved = sleevedL || sleevedR;
   // A batwing: sleeve and bodice cut in one, very full under the arm.
   const batwing = sleeved && d.armhole > 0.05;
   // Not following the legs and reaching past the seat: hangs from the hips.
@@ -164,11 +167,12 @@ export function garmentPlan(draft: GarmentDraft, form: BodyFormMeasurements, lay
   // The armholes are cut first: the seams that end on them (side, underarm)
   // are run on across them and trimmed back to where they cross.
   const armholes: GarmentSeam[] = [], underarms: GarmentSeam[] = [];
-  if (sleeved) {
-    const sleeveOff = standOff(Math.max(0.03, d.ease * 0.5), layer);
-    for (const arm of ['armL', 'armR'] as const) {
+  const sleeveOff = standOff(Math.max(0.03, d.ease * 0.5), layer);
+  for (const arm of ['armL', 'armR'] as const) {
+    const len = !fromWaist ? armSleeve(arm) : 0;
+    if (len > 0.03) {
       const limb = limbs[arm];
-      const sleeveLen = Math.min(limb.path.length, Math.max(0.05, d.sleeve));
+      const sleeveLen = Math.min(limb.path.length, Math.max(0.05, len));
       const wrist = limb.section(sleeveLen);
       const cuffOff = d.cuff > 0 ? Math.max(0.004, d.cuff / (2 * Math.PI) - (wrist.w + wrist.h) / 2) : sleeveOff * 0.85;
       covers.push({ part: arm, off: sleeveOff, taper: { len: sleeveLen, end: cuffOff }, names: batwing ? 'frontBack' : 'sleeve' });
@@ -203,14 +207,18 @@ export function garmentPlan(draft: GarmentDraft, form: BodyFormMeasurements, lay
   // it, ran 12 mm into it there, was pushed out as the scene began, and its
   // top folded through itself and through the sleeve of a jacket over it.
   // Where a band is lower (a waist) the cut meets no cloth.
-  if (!sleeved) for (const arm of ['armL', 'armR'] as const) cuts.push({ kind: 'armhole', limb: arm, extra: 0.01 * s + d.armhole * s });
+  if (!sleevedL) cuts.push({ kind: 'armhole', limb: 'armL', extra: 0.01 * s + d.armhole * s });
+  if (!sleevedR) cuts.push({ kind: 'armhole', limb: 'armR', extra: 0.01 * s + d.armhole * s });
   cuts.push({ kind: 'hem', z: hem, train: d.legs ? 0 : d.train, on: [...bodyParts, 'webL', 'webR'], profile: edgeOf(draft, 'hem')?.profile });
 
 
   // ---- Seams: front from back, everywhere but on a set-in sleeve.
   seams.push(...armholes);
   if (d.legs) seams.push({ kind: 'centre' });
-  seams.push({ kind: 'frontBack', on: sleeved && !batwing ? bodyParts : [...bodyParts, 'armL', 'armR', 'webL', 'webR'] });
+  const frontBackParts: Part[] = [...bodyParts];
+  if (!sleevedL || batwing) frontBackParts.push('armL', 'webL');
+  if (!sleevedR || batwing) frontBackParts.push('armR', 'webR');
+  seams.push({ kind: 'frontBack', on: frontBackParts });
   if (d.opening) seams.push({ kind: 'frontOpening', on: bodyParts });
   seams.push(...underarms);
   // Gores: a skirt cut in `gores` panels round, by vertical planes through the
@@ -245,7 +253,12 @@ export function garmentPlan(draft: GarmentDraft, form: BodyFormMeasurements, lay
   // 3.5% with; a woven dress's short sleeve with one, 2.8%.
   const mat = CLOTH_MATERIALS[d.material];
   if (d.darts !== false && sleeved && !batwing && mat.give < CAP_NEED && mat.easeIn < CAP_NEED) {
-    for (const line of dartLines([{ name: 'cap', apex: { limb: 'armL', along: 0.12, face: [0, 0, 1] }, direction: [-1, 0, 1], mirror: true }], form)) {
+    const capSpecs = sleevedL && sleevedR
+      ? [{ name: 'cap', apex: { limb: 'armL' as const, along: 0.12, face: [0, 0, 1] }, direction: [-1, 0, 1], mirror: true }]
+      : sleevedL
+        ? [{ name: 'capL', apex: { limb: 'armL' as const, along: 0.12, face: [0, 0, 1] }, direction: [-1, 0, 1] }]
+        : [{ name: 'capR', apex: { limb: 'armR' as const, along: 0.12, face: [0, 0, 1] }, direction: [1, 0, 1] }];
+    for (const line of dartLines(capSpecs, form)) {
       if (!dartNear(own, line.apex.point, 0.04 * s)) seams.push({ kind: 'dart', ...line });
     }
   }
@@ -274,9 +287,23 @@ function seamedNear(draft: GarmentDraft, p: number[], front: boolean, r: number)
   });
 }
 
+/** Swap L/R suffix in a plane `on` scope token when mirroring across x = 0. */
+const mirrorOnToken = (t: string) => (t.endsWith('L') ? `${t.slice(0, -1)}R` : t.endsWith('R') ? `${t.slice(0, -1)}L` : t);
+
 /** A plane's mirror across the body's centre. */
 function mirrored<T extends GarmentPlane>(pl: T): T {
-  return { ...pl, point: [-pl.point[0], pl.point[1], pl.point[2]], normal: [-pl.normal[0], pl.normal[1], pl.normal[2]], ...(pl.x ? { x: [-pl.x[1], -pl.x[0]] as [number, number] } : {}) };
+  const on = pl.on === undefined
+    ? undefined
+    : Array.isArray(pl.on)
+      ? pl.on.map(mirrorOnToken)
+      : mirrorOnToken(pl.on);
+  return {
+    ...pl,
+    point: [-pl.point[0], pl.point[1], pl.point[2]],
+    normal: [-pl.normal[0], pl.normal[1], pl.normal[2]],
+    ...(pl.x ? { x: [-pl.x[1], -pl.x[0]] as [number, number] } : {}),
+    ...(on !== undefined ? { on } : {}),
+  };
 }
 
 /** The draft's own cuts and seams, after the kind's, each with its mirror image if asked (a pair named L and R). */

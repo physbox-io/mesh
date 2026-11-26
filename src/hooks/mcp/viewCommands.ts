@@ -622,7 +622,7 @@ export const viewCommands: McpCommands = {
       : null;
     if (page && 'error' in page) throw new Error(page.error);
     return {
-      ...objectReply(found, { full: msg.full === true, world, scene: store.sceneGraph.nodes }),
+      ...objectReply(found, { full: msg.full === true, world, scene: store.sceneGraph.nodes, model: store.model, data: store.data }),
       ...(sealChecks.length ? { sealChecks } : {}),
       ...(page ? { meshPage: page } : {}),
     };

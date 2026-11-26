@@ -21,8 +21,10 @@ import { evaluateTensionedMembrane } from './membraneAcoustics';
 import { extractTubeAirColumn } from './resonatorAcoustics';
 import { isNonlinearPlateCandidate } from './nonlinearPlateAcoustics';
 import type { ClothMaterialName } from '../types/cloth';
+import type { ModelMirror } from '../types/sceneLayer';
 import { CLOTH_MATERIALS } from './cloth/clothMesh';
 import { garmentSettings } from './cloth/garments';
+import { bodyFormLandmarksSummary, clothNodeSummary } from './cloth/clothSummary';
 import { solveAeroAcousticVoice, solveClothSnapPulse } from './aeroAcoustics';
 
 /** A paint layer as its colours, each with the vertices it covers, most first. */
@@ -96,6 +98,10 @@ export interface ObjectReplyOptions {
   world?: Map<string, BodyWorldPos>;
   /** The scene's top-level bodies: a string's soundbox and a head's shell are found among them. */
   scene?: SceneNode[];
+  /** Compiled MuJoCo model mirror (provides flex piece counts and outlines for `clothSummary`). */
+  model?: ModelMirror | null;
+  /** Live MuJoCo data mirror (provides `flexvert_xpos` for `clothSummary.bboxMm`). */
+  data?: { flexvert_xpos?: ArrayLike<number> } | null;
 }
 
 const round = (v: number) => +v.toFixed(6);
@@ -252,6 +258,8 @@ function replyNode(node: SceneNode, opts: ObjectReplyOptions): Record<string, un
   const exact = geoms.filter((g) => g.contactClass);
   const { csgScad, ...rest } = node;
   const world = opts.world?.get(node.id);
+  const clothSummary = node.cloth ? clothNodeSummary(node, opts) : null;
+  const formLandmarks = node.bodyForm ? bodyFormLandmarksSummary(node.bodyForm) : null;
   return {
     ...stripMeshArrays({ ...rest, geoms: listed.map(withMeshChecks), children: [] } as SceneNode),
     ...(summarizeCurve ? {
@@ -266,6 +274,8 @@ function replyNode(node: SceneNode, opts: ObjectReplyOptions): Record<string, un
       },
     } : {}),
     ...(opts.full && csgScad !== undefined ? { csgScad } : {}),
+    ...(clothSummary ? { clothSummary } : {}),
+    ...(formLandmarks ? formLandmarks : {}),
     ...(() => {
       const acoustics = acousticsOf(node, opts.scene);
       return acoustics ? { acoustics } : {};

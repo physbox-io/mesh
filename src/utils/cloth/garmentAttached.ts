@@ -191,21 +191,36 @@ function hostSurface(x: number[][], tris: number[], normalOf: (p: number) => num
  * clear of (the body the garment is on), `turns` how far a piece (by name)
  * is turned about its line as it is arranged (ClothTurn), degrees.
  */
-export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string) => { run: number[]; closed: boolean }[], x: number[][], hostTris: number[], normalOf: (p: number) => number[], spacing: number, colour: number[], below: AddOnPiece[] = [], clearOf: { x: number[][]; tris: number[]; normalOf: (p: number) => number[] }[] = [], turns: Map<string, number> = new Map(), hostMaterial: ClothMaterialName = 'jersey'): AddOnPiece[] {
+export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string) => { run: number[]; closed: boolean }[], x: number[][], hostTris: number[], normalOf: (p: number) => number[], spacing: number, colour: number[], below: AddOnPiece[] = [], clearOf: { x: number[][]; tris: number[]; normalOf: (p: number) => number[] }[] = [], turns: Map<string, number> = new Map(), hostMaterial: ClothMaterialName = 'jersey', warnings?: string[]): AddOnPiece[] {
   const out: AddOnPiece[] = [];
   // Each piece's stretches by point, for joins between pieces, made once both are.
   const built = new Map<string, { stretch: (i: number, j: number) => number[]; n: number }>();
   let freeEdges: Map<string, number> | null = null;
   const later: { from: string; jn: NonNullable<GarmentAttachment['joins']>[number] }[] = [];
-  for (const a of list) {
-    if (a.outline.length < 3) continue;
+  for (let idx = 0; idx < list.length; idx++) {
+    const a = list[idx];
+    if (a.outline.length < 3) {
+      warnings?.push(`attached[${idx}] '${a.name}': outline has fewer than 3 points and was not placed.`);
+      continue;
+    }
     const n = a.outline.length;
     const [i0, i1] = (a.sewn ?? [0, 1]).map((i) => ((Math.round(i) % n) + n) % n);
-    if (i0 === i1) continue;
+    if (i0 === i1) {
+      warnings?.push(`attached[${idx}] '${a.name}': sewn edge indices [${i0}, ${i1}] are equal and was not placed.`);
+      continue;
+    }
     const sewnEdge = chain(a.outline, i0, i1);
     let sewnLen = 0;
     for (let k = 1; k < sewnEdge.length; k++) sewnLen += Math.hypot(sewnEdge[k][0] - sewnEdge[k - 1][0], sewnEdge[k][1] - sewnEdge[k - 1][1]);
+    if (sewnLen < 1e-6) {
+      warnings?.push(`attached[${idx}] '${a.name}': sewn edge has zero length and was not placed.`);
+      continue;
+    }
     const runs = runsOf(a.along).filter((r) => r.run.length >= 2);
+    if (runs.length === 0) {
+      warnings?.push(`attached[${idx}] '${a.name}': matched zero seam/edge runs along '${a.along}' and was not placed.`);
+      continue;
+    }
     const copies = Math.max(1, Math.round(a.repeat ?? 1));
     const [s0, sTo] = a.span ?? [0, 1];
     // Fine enough that its sewn side has a few points, and no coarser than the cloth.
@@ -217,6 +232,10 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
     for (let k = 0; k < n; k++) { const l = Math.hypot(a.outline[(k + 1) % n][0] - a.outline[k][0], a.outline[(k + 1) % n][1] - a.outline[k][1]); if (l > 1e-6) shortest = Math.min(shortest, l); }
     const step = Math.max(MIN_STEP, Math.min(spacing, sewnLen / 4, shortest / 2));
     const mesh = meshOutline(a.outline.map((q, k) => ({ id: `s${k}`, pts: [q, a.outline[(k + 1) % n]] })), step);
+    if (mesh.tris.length === 0) {
+      warnings?.push(`attached[${idx}] '${a.name}': outline produced zero triangles and was not placed.`);
+      continue;
+    }
     const stretch = (i: number, j: number) => { const out: number[] = []; for (let k = i; k !== j; k = (k + 1) % n) out.push(...(out.length ? mesh.edgeVerts[`s${k}`].slice(1) : mesh.edgeVerts[`s${k}`])); return out; };
     const onSewn = new Set(stretch(i0, i1));
     const pm = resolveClothMaterial(CLOTH_MATERIALS[a.material ?? hostMaterial] ?? CLOTH_MATERIALS.jersey, a.materialOverrides);

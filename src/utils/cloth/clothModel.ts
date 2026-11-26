@@ -665,6 +665,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     fitTo = spec.garment.fitTo;
     loose = !spec.garment.fitTo;
     const shell = garmentShell(spec.garment, form.bodyForm, spec.layer ?? 0);
+    if (shell.warnings?.length) warnings.push(...shell.warnings);
     if (shell.part?.length) garmentParts = [...new Set(shell.part)];
     x0 = shell.points.map(toWorld);
     mass = new Array(x0.length).fill(0);
@@ -783,7 +784,6 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
         piece.points.forEach((g, local) => {
           if (!openPoints.has(g)) return;
           if (claimed.get(g) === undefined) { claimed.set(g, k); openFirst.set(g, g); return; }
-          if (claimed.get(g) === k) return;
           const dup = openSecond.get(g) ?? x0.length;
           if (!openSecond.has(g)) { openSecond.set(g, dup); secondPanel.set(g, k); x0.push(x0[g].slice()); mass.push(0); }
           own.set(local, dup);
@@ -1147,8 +1147,10 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       }
       const formNormals = vertexNormals(formPts, formTris, new THREE.Matrix4());
       const turns = new Map((spec.arrange ?? []).flatMap((a) => ('turn' in a ? [[a.piece, a.turn] as [string, number]] : [])));
+      const attachWarnings: string[] = [];
       addOns.push(...attachedPieces(settings.attached, (along) => chainLineRuns([...shell.edges, ...shell.seams, ...(shell.marks ?? [])], along), x0, shell.tris, (i) => shellNormals[i], spacing, colour, addOns,
-        [{ x: formPts, tris: formTris, normalOf: (i) => formNormals[i] }], turns, materialName));
+        [{ x: formPts, tris: formTris, normalOf: (i) => formNormals[i] }], turns, materialName, attachWarnings));
+      if (attachWarnings.length) warnings.push(...attachWarnings);
     }
     overlayTrisStart = tris.length;
     // Which way each particle's cloth faces out, from the triangles placed so
