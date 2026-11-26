@@ -44,11 +44,17 @@ export const breakageCommands: McpCommands = {
     const joints = node.joints || [];
     const joint = jointName
       ? joints.find((j) => j.name === jointName)
-      : joints.find((j) => j.type === 'hinge' || j.type === 'slide');
+      : joints.find((j) => j.type === 'hinge');
     if (!joint) {
       return { ok: false, error: jointName
         ? `'${targetId}' has no joint named '${jointName}'`
-        : `'${targetId}' has no hinge or slider to crumple — a free or ball joint has no single axis to fold about` };
+        : `'${targetId}' has no hinge joint to crumple — a free, ball, or slide joint cannot fold about a single rotational axis` };
+    }
+    if (joint.type !== 'hinge') {
+      return {
+        ok: false,
+        error: `Joint '${joint.name}' on '${targetId}' is a ${joint.type} joint — crumple only supports hinge joints (a ${joint.type} joint has no single rotational axis to fold about)`,
+      };
     }
 
     if (crumpleTorqueNm !== undefined && crumpleTorqueNm !== null && !isNonNegFinite(crumpleTorqueNm)) {

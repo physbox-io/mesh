@@ -71,8 +71,6 @@ export const slipCommands: McpCommands = {
       if (!chk.ok) return chk;
       if (chk.value !== undefined) options[key] = chk.value;
     }
-    const fillChk = checkNonNeg(msg.fillMm, 'fillMm');
-    if (!fillChk.ok) return fillChk;
     const castWallChk = checkPos(msg.castWallMm, 'castWallMm');
     if (!castWallChk.ok) return castWallChk;
 

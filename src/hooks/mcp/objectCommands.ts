@@ -19,7 +19,7 @@ import { Quaternion, Vector3 } from 'three';
 import { checkIncomingBody, normalizeAcousticFields } from '../../utils/incomingBodyCheck';
 import type { SceneNode, SceneGeom, SceneJoint, HardwarePartKind } from '../../types/scene';
 import type { RawNode } from '../../utils/sceneNodes';
-import { HARDWARE_PARTS, documentWorldMatrix, quietHardwarePart, sharedSeamPoint } from '../../utils/hardwareParts';
+import { HARDWARE_PARTS, documentWorldMatrix, quietHardwarePart, seatFor, sharedSeamPoint } from '../../utils/hardwareParts';
 import { withoutNulls } from '../../utils/withoutNulls';
 import { jointAxisWarnings } from '../../utils/jointAxisCheck';
 import {
@@ -43,6 +43,7 @@ import {
 import { autoCompileScad, scadFailureError } from './settleScene';
 import type { McpCommands } from './types';
 import { unresolvedReferences, unresolvedReferenceWarnings } from '../../utils/unresolvedReferences';
+import { applyFlexureToNode, revertFlexure, validateFlexureInput, type FlexureDesignInput } from '../../utils/flexure';
 
 /**
  * Puts a free body where its document now says, in the running simulation too,
@@ -251,6 +252,9 @@ export const objectCommands: McpCommands = {
     // Transient: a request to tune, not a field of the body.
     const tuneRaw = updates.tuneTo;
     const drillRaw = updates.drillNodalHole;
+    const flexureTouched = 'flexure' in rawUpdates;
+    const rawFlexure = rawUpdates.flexure;
+    delete updates.flexure;
     delete updates.tuneTo;
     delete updates.drillNodalHole;
     delete updates.cuts;
@@ -385,6 +389,28 @@ export const objectCommands: McpCommands = {
       }
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    if (flexureTouched) {
+      if (rawFlexure === null) {
+        next = revertFlexure(next);
+        updates.geoms = next.geoms;
+        updates.joints = next.joints;
+        updates.flexure = undefined;
+      } else if (rawFlexure !== undefined) {
+        if (!isPlainObject(rawFlexure)) {
+          return { ok: false, error: 'flexure must be a plain object (or null to remove)' };
+        }
+        const flexureErr = validateFlexureInput(next, rawFlexure);
+        if (flexureErr) return { ok: false, error: flexureErr };
+        const applied = applyFlexureToNode(next, rawFlexure as FlexureDesignInput);
+        if (!applied) {
+          return { ok: false, error: `Body '${next.name || targetId}': flexure requires a 'hinge' or 'slide' joint on the body.` };
+        }
+        next = applied.node;
+        updates.geoms = next.geoms;
+        updates.joints = next.joints;
+        updates.flexure = next.flexure;
+      }
     }
     // A geom type, coordinate or size MuJoCo would refuse with an XML line
     // number is refused here, by name, before the body is touched.
@@ -891,7 +917,7 @@ export const objectCommands: McpCommands = {
     // A part already in the scene: only fix a body to its moving piece.
     if (existing && (!kind || (fixTo && existingNode))) {
       const part = existingNode;
-      const piece = part && (part.hardwarePart?.piece ? part : movingPieceOf(part));
+      const piece = part && movingPieceOf(part);
       if (!piece) return { ok: false, error: `'${existing}' has no moving piece to fix a body to` };
       if (!fixTo) return { ok: false, error: 'Give fixTo: the body to weld to its moving piece' };
       const why = store.fixToPiece(piece.id, fixTo);
@@ -942,12 +968,35 @@ export const objectCommands: McpCommands = {
       const fitted = store.addDrawerRunners(into);
       if (typeof fitted === 'string') return { ok: false, error: fitted };
       await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
-      const after = useStore.getState().sceneGraph.nodes;
+      const afterScene = useStore.getState().sceneGraph;
+      const after = afterScene.nodes;
+      const drawerNode = findNodeInScene(after, into);
+      const findParentId = (nodes: SceneNode[], targetId: string): string | undefined => {
+        for (const n of nodes) {
+          if (n.children?.some((c) => c.id === targetId)) return n.id;
+          const p = findParentId(n.children || [], targetId);
+          if (p) return p;
+        }
+        return undefined;
+      };
       return {
         ok: true, ids: fitted,
         runners: fitted.map((rid) => {
           const r = findNodeInScene(after, rid);
-          return { id: rid, name: r?.name, posMm: r?.pos.map((v) => Math.round(v * 1e6) / 1000), weldedTo: r?.weldTargetId };
+          const worldMat = r ? documentWorldMatrix(afterScene, r.id) : null;
+          const worldPos = worldMat ? new Vector3().setFromMatrixPosition(worldMat).toArray() : (r?.pos ?? [0, 0, 0]);
+          const carriage = r ? movingPieceOf(r) : null;
+          const mountedTo = r ? findParentId(after, r.id) : undefined;
+          const weldedTo = carriage && drawerNode?.weldTargetId === carriage.id ? drawerNode.id : r?.weldTargetId;
+          return {
+            id: rid,
+            name: r?.name,
+            posMm: worldPos.map((v) => Math.round(v * 1e6) / 1000),
+            ...(mountedTo ? { mountedTo } : {}),
+            ...(carriage ? { carriageId: carriage.id } : {}),
+            ...(weldedTo ? { weldedTo } : {}),
+            ...(carriage?.coupleTargetId ? { coupledTo: carriage.coupleTargetId } : {}),
+          };
         }),
       };
     }
@@ -1094,6 +1143,23 @@ export const objectCommands: McpCommands = {
         ...(typeof lengthMm === 'number' ? { lengthMm } : {}),
         ...(typeof washer === 'boolean' ? { washer } : {}),
       });
+      // Re-seat a linear_rod after changing its lengthMm so its bottom end stays
+      // flush on the rod_clamp floor instead of extending past it.
+      if (partKind === 'linear_rod' && typeof lengthMm === 'number' && into) {
+        const currentScene = useStore.getState().sceneGraph;
+        const cloned = structuredClone(currentScene);
+        const hostNode = findNodeInScene(cloned.nodes, into);
+        const rodNode = findNodeInScene(cloned.nodes, id);
+        const seatGroup = rodNode?.hardwarePart?.seat;
+        if (hostNode && rodNode && seatGroup) {
+          const seat = seatFor(hostNode, seatGroup, 'linear_rod', rodNode.hardwarePart?.lengthMm);
+          if (seat) {
+            rodNode.pos = seat.pos;
+            rodNode.quat = seat.quat;
+            useStore.setState({ sceneGraph: cloned });
+          }
+        }
+      }
     }
     if (betweenMovingId) {
       const currentScene = useStore.getState().sceneGraph;
@@ -1149,7 +1215,10 @@ export const objectCommands: McpCommands = {
       ...(part.weldTargetId ? { weldedTo: part.weldTargetId } : {}),
       ...(innerPiece ? { [innerKey]: innerPiece.id } : {}),
       ...(part.children.some((c) => c.hardwarePart?.piece === 'carriage')
-        ? { carriageId: part.children.find((c) => c.hardwarePart?.piece === 'carriage')!.id } : {}),
+        ? { carriageId: part.children.find((c) => c.hardwarePart?.piece === 'carriage')!.id }
+        : spec.kind === 'vslot_carriage'
+          ? { carriageId: part.id }
+          : {}),
       posMm: worldPos.map((v) => Math.round(v * 1e6) / 1000),
       ...(spec.kind === 'oring' && into && spec.seat ? { sealCheck: sealCheckFor(useStore.getState().sceneGraph, into, spec.seat) } : {}),
     };

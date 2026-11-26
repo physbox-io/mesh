@@ -30,8 +30,10 @@ import {
   buildLeadscrewDrive,
   buildMeshingGearPair,
   buildRackAndPinionPair,
+  fourBarMetrics,
   type CamSpec,
   type FourBarSpec,
+  type GearBoreKind,
   type Gt2BeltDriveSpec,
   type InvoluteGearSpec,
   type InvoluteRackSpec,
@@ -69,6 +71,7 @@ export const COMPLIANT_MECHANISM_FAMILIES = ['compliant_gripper', 'parallel_flex
 export type MechanismRequest = Record<string, any> & {
   family?: string;
   origin?: number[];
+  axis?: [number, number, number];
   idPrefix?: string;
   actuate?: boolean;
   speed?: number;
@@ -99,7 +102,59 @@ const gearUsed = (m: { teeth: number; moduleMm: number; pressureAngleDeg: number
 const gearAdjusted = (req: MechanismRequest, key: string, flatTeeth: string, m: Parameters<typeof gearUsed>[0]) =>
   req[key] && typeof req[key] === 'object'
     ? adjustedFields(req[key], gearUsed(m), `${key}.`)
-    : adjustedFields(req, { [flatTeeth]: m.teeth, moduleMm: m.moduleMm });
+    : adjustedFields(req, {
+        [flatTeeth]: m.teeth,
+        moduleMm: m.moduleMm,
+        pressureAngleDeg: m.pressureAngleDeg,
+        backlashMm: m.backlashMm,
+        thicknessMm: m.thicknessMm,
+      });
+
+/** Deduplicates adjustment records by field name, keeping the first occurrence. */
+function dedupeAdjustments(list: MechanismAdjustment[]): MechanismAdjustment[] {
+  const seen = new Set<string>();
+  return list.filter((a) => {
+    if (seen.has(a.field)) return false;
+    seen.add(a.field);
+    return true;
+  });
+}
+
+/** Shortest-arc quaternion rotating +Z ([0,0,1]) to normalized `axis`, or null if zero-length. */
+function axisRotationQuat(axis: [number, number, number]): QuatWXYZ | null {
+  const len = Math.hypot(axis[0], axis[1], axis[2]);
+  if (len < 1e-9) return null;
+  const nx = axis[0] / len;
+  const ny = axis[1] / len;
+  const nz = axis[2] / len;
+  if (nz > 1 - 1e-9) return [1, 0, 0, 0];
+  if (nz < -1 + 1e-9) return [0, 1, 0, 0];
+  const w = 1 + nz;
+  const x = -ny;
+  const y = nx;
+  const qLen = Math.hypot(w, x, y);
+  return [+(w / qLen).toFixed(7), +(x / qLen).toFixed(7), +(y / qLen).toFixed(7), 0];
+}
+
+/** Rotates a mechanism's root bodies (and any world-space connect anchors) around `pivot` by `q`. */
+function applyAxisRotation(nodes: SceneNode[], q: QuatWXYZ, pivot: [number, number, number]) {
+  if (q[0] === 1 && q[1] === 0 && q[2] === 0 && q[3] === 0) return;
+  const rotatePoint = (p: readonly number[]): [number, number, number] => {
+    const r = quatRotateVec(q, [p[0] - pivot[0], p[1] - pivot[1], p[2] - pivot[2]]);
+    return [+(pivot[0] + r[0]).toFixed(7), +(pivot[1] + r[1]).toFixed(7), +(pivot[2] + r[2]).toFixed(7)];
+  };
+  for (const n of nodes) {
+    n.pos = rotatePoint(n.pos ?? [0, 0, 0]);
+    const nextQ = quatMultiply(q, nodeLocalQuat(n));
+    n.quat = nextQ.map((v) => +v.toFixed(7)) as QuatWXYZ;
+    delete n.euler;
+  }
+  walk(nodes, (n) => {
+    if (n.connectAnchor && n.connectAnchor.length >= 3) {
+      n.connectAnchor = rotatePoint(n.connectAnchor);
+    }
+  });
+}
 
 const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
 const vec3 = (v: unknown): [number, number, number] | undefined =>
@@ -201,6 +256,9 @@ export function buildMechanism(req: MechanismRequest, scene: SceneNode[]): Mecha
   const family = (typeof req.family === 'string' ? req.family : 'gear_pair') as MechanismFamilyName;
   if (!MECHANISM_FAMILIES.includes(family)) return { error: `Unknown mechanism family '${family}'. One of: ${MECHANISM_FAMILIES.join(', ')}.` };
   const origin = vec3(req.origin);
+  const axisVec = vec3(req.axis);
+  const axisQuat = axisVec ? axisRotationQuat(axisVec) : null;
+  if (axisVec && !axisQuat) return { error: 'axis must be a non-zero 3D vector.' };
   const actuate = req.actuate !== false;
   const idPrefix = typeof req.idPrefix === 'string' && req.idPrefix
     ? req.idPrefix.replace(/[^A-Za-z0-9_-]/g, '_')
@@ -218,6 +276,19 @@ export function buildMechanism(req: MechanismRequest, scene: SceneNode[]): Mecha
   let adjusted: MechanismAdjustment[] = [];
 
   const gearSpec = (v: unknown, fallback: InvoluteGearSpec): InvoluteGearSpec => (v && typeof v === 'object' ? v as InvoluteGearSpec : fallback);
+  const flatGearFields = (): Partial<InvoluteGearSpec> => ({
+    ...(num(req.backlashMm) !== undefined ? { backlashMm: num(req.backlashMm) } : {}),
+    ...(num(req.thicknessMm) !== undefined ? { thicknessMm: num(req.thicknessMm) } : {}),
+    ...(num(req.pressureAngleDeg) !== undefined ? { pressureAngleDeg: num(req.pressureAngleDeg) } : {}),
+    ...(typeof req.boreKind === 'string' ? { boreKind: req.boreKind as GearBoreKind } : {}),
+    ...(num(req.boreDiameterMm) !== undefined ? { boreDiameterMm: num(req.boreDiameterMm) } : {}),
+  });
+  const flatRackFields = (): Partial<InvoluteRackSpec> => ({
+    ...(num(req.backlashMm) !== undefined ? { backlashMm: num(req.backlashMm) } : {}),
+    ...(num(req.thicknessMm) !== undefined ? { thicknessMm: num(req.thicknessMm) } : {}),
+    ...(num(req.pressureAngleDeg) !== undefined ? { pressureAngleDeg: num(req.pressureAngleDeg) } : {}),
+    ...(num(req.baseHeightMm) !== undefined ? { baseHeightMm: num(req.baseHeightMm) } : {}),
+  });
 
   switch (family) {
     case 'gear': {
@@ -232,15 +303,19 @@ export function buildMechanism(req: MechanismRequest, scene: SceneNode[]): Mecha
       break;
     }
     case 'gear_pair': {
-      const driver = gearSpec(req.driver, { moduleMm: num(req.moduleMm) ?? 1.5, teeth: num(req.driverTeeth) ?? 16 });
-      const driven = gearSpec(req.driven, { moduleMm: driver.moduleMm, teeth: num(req.drivenTeeth) ?? 32 });
+      const sharedFlat = flatGearFields();
+      const driver = gearSpec(req.driver, { ...sharedFlat, moduleMm: num(req.moduleMm) ?? 1.5, teeth: num(req.driverTeeth) ?? 16 });
+      const driven = gearSpec(req.driven, { ...sharedFlat, moduleMm: driver.moduleMm, teeth: num(req.drivenTeeth) ?? 32 });
       const pair = buildMeshingGearPair(driver, driven, {
         ...(origin ? { origin } : {}),
         ...(num(req.meshAngleDeg) !== undefined ? { meshAngleDeg: num(req.meshAngleDeg) } : {}),
         actuateDriver: actuate && !arborId,
       });
       metrics = { centerDistanceMm: pair.centerDistanceMm, ratio: pair.gearRatio, coupleRatio: pair.coupleRatio, contactRatio: pair.contactRatio };
-      adjusted = [...gearAdjusted(req, 'driver', 'driverTeeth', pair.driverMetrics), ...gearAdjusted(req, 'driven', 'drivenTeeth', pair.drivenMetrics)];
+      adjusted = dedupeAdjustments([
+        ...gearAdjusted(req, 'driver', 'driverTeeth', pair.driverMetrics),
+        ...gearAdjusted(req, 'driven', 'drivenTeeth', pair.drivenMetrics),
+      ]);
       if (arborId && arbor) {
         // The driven gear beside the arbor, in the arbor's frame and plane.
         const rel = [0, 1, 2].map((k) => pair.drivenNode.pos[k] - pair.driverNode.pos[k]);
@@ -257,19 +332,48 @@ export function buildMechanism(req: MechanismRequest, scene: SceneNode[]): Mecha
       break;
     }
     case 'rack_pinion': {
-      const pinion = gearSpec(req.pinion, { moduleMm: num(req.moduleMm) ?? 1.5, teeth: num(req.pinionTeeth) ?? 16 });
-      const rack: InvoluteRackSpec = req.rack && typeof req.rack === 'object' ? req.rack : { moduleMm: pinion.moduleMm, teeth: num(req.rackTeeth) ?? 20 };
+      const pinion = gearSpec(req.pinion, { ...flatGearFields(), moduleMm: num(req.moduleMm) ?? 1.5, teeth: num(req.pinionTeeth) ?? 16 });
+      const rack: InvoluteRackSpec = req.rack && typeof req.rack === 'object'
+        ? req.rack
+        : { ...flatRackFields(), moduleMm: pinion.moduleMm, teeth: num(req.rackTeeth) ?? 20 };
       const rp = buildRackAndPinionPair(pinion, rack, { ...(origin ? { origin } : {}), actuatePinion: actuate });
       created = rp.nodes;
       metrics = { coupleRatio: rp.coupleRatio, pitchRadiusMm: rp.pitchRadiusMm };
-      adjusted = gearAdjusted(req, 'pinion', 'pinionTeeth', rp.pinionMetrics);
+      const rackAdj = req.rack && typeof req.rack === 'object'
+        ? adjustedFields(req.rack, {
+            teeth: rp.rackMetrics.teeth,
+            moduleMm: rp.rackMetrics.moduleMm,
+            pressureAngleDeg: rp.rackMetrics.pressureAngleDeg,
+            backlashMm: rp.rackMetrics.backlashMm,
+            thicknessMm: rp.rackMetrics.thicknessMm,
+            baseHeightMm: rp.rackMetrics.baseHeightMm,
+          }, 'rack.')
+        : adjustedFields(req, {
+            rackTeeth: rp.rackMetrics.teeth,
+            baseHeightMm: rp.rackMetrics.baseHeightMm,
+            backlashMm: rp.rackMetrics.backlashMm,
+            thicknessMm: rp.rackMetrics.thicknessMm,
+            pressureAngleDeg: rp.rackMetrics.pressureAngleDeg,
+          });
+      adjusted = dedupeAdjustments([...gearAdjusted(req, 'pinion', 'pinionTeeth', rp.pinionMetrics), ...rackAdj]);
       break;
     }
     case 'gt2_belt': {
       const belt = buildGt2BeltDrive({ ...(req as Gt2BeltDriveSpec), ...(origin ? { origin } : {}), actuateDriver: actuate });
       created = belt.nodes;
-      metrics = { beltLengthMm: belt.beltLengthMm, beltTeeth: belt.beltTeethRounded, coupleRatio: belt.coupleRatio };
-      adjusted = adjustedFields(req, { driverTeeth: belt.driverMetrics.teeth, drivenTeeth: belt.drivenMetrics.teeth, beltWidthMm: belt.driverMetrics.beltWidthMm });
+      metrics = {
+        centerDistanceMm: belt.centerDistanceMm,
+        reductionRatio: belt.reductionRatio,
+        beltLengthMm: belt.beltLengthMm,
+        beltTeeth: belt.beltTeethRounded,
+        coupleRatio: belt.coupleRatio,
+      };
+      adjusted = adjustedFields(req, {
+        driverTeeth: belt.driverMetrics.teeth,
+        drivenTeeth: belt.drivenMetrics.teeth,
+        beltWidthMm: belt.driverMetrics.beltWidthMm,
+        centerDistanceMm: belt.centerDistanceMm,
+      });
       break;
     }
     case 'leadscrew': {
@@ -283,12 +387,33 @@ export function buildMechanism(req: MechanismRequest, scene: SceneNode[]): Mecha
       const cam = buildCamMechanism({ ...(req as CamSpec), ...(origin ? { origin } : {}), actuateCam: actuate });
       created = cam.nodes;
       metrics = { maxRadiusMm: cam.profile.maxRadiusMm, minRadiusMm: cam.profile.minRadiusMm, followerPreloadN: cam.followerPreloadN };
+      adjusted = adjustedFields(req, {
+        baseRadiusMm: cam.profile.baseRadiusMm,
+        liftMm: cam.profile.liftMm,
+        thicknessMm: cam.profile.thicknessMm,
+        samples: cam.profile.outline.length,
+      });
       break;
     }
     case 'four_bar': {
+      const preMetrics = fourBarMetrics(req as FourBarSpec);
+      if (!preMetrics.validAssembly) {
+        return {
+          error: `Invalid 4-bar linkage: links (ground=${preMetrics.groundMm} mm, crank=${preMetrics.crankMm} mm, coupler=${preMetrics.couplerMm} mm, rocker=${preMetrics.rockerMm} mm) cannot assemble (longest link ${preMetrics.longestMm} mm must be shorter than the sum of the other three).`,
+        };
+      }
       const fb = buildFourBarLinkage(req as FourBarSpec, { ...(origin ? { origin } : {}), actuateCrank: actuate });
       created = fb.nodes;
       metrics = { ...fb.metrics };
+      adjusted = adjustedFields(req, {
+        groundMm: fb.metrics.groundMm,
+        crankMm: fb.metrics.crankMm,
+        couplerMm: fb.metrics.couplerMm,
+        rockerMm: fb.metrics.rockerMm,
+        linkWidthMm: fb.linkWidthMm,
+        thicknessMm: fb.thicknessMm,
+        pinDiameterMm: fb.pinDiameterMm,
+      });
       break;
     }
     case 'compliant_gripper': {
@@ -393,6 +518,14 @@ export function buildMechanism(req: MechanismRequest, scene: SceneNode[]): Mecha
     });
   }
   applyActuation(created, req);
+  if (axisQuat && !arborId && created.length > 0) {
+    const pivot: [number, number, number] = origin ?? [
+      created[0].pos?.[0] ?? 0,
+      created[0].pos?.[1] ?? 0,
+      created[0].pos?.[2] ?? 0,
+    ];
+    applyAxisRotation(created, axisQuat, pivot);
+  }
   if ('screwId' in metrics) {
     // Ids may have been renamed above.
     const ls = created[0]?.children ?? [];
@@ -404,9 +537,11 @@ export function buildMechanism(req: MechanismRequest, scene: SceneNode[]): Mecha
   let nodes = [...scene.filter((n) => !createdIds.has(n.id)), ...created];
   if (onArbor && arborId) {
     const gear = onArbor;
+    const addedGeoms = gearGeomsOnArbor(gear, offset);
+    const addedNames = new Set(addedGeoms.map((g) => g.name));
     nodes = withNode(nodes, arborId, (n) => ({
       ...n,
-      geoms: [...(n.geoms || []), ...gearGeomsOnArbor(gear, offset)],
+      geoms: [...(n.geoms || []).filter((g) => !addedNames.has(g.name)), ...addedGeoms],
       // Its gears are coupled by their round colliders' radii, not one tooth form.
       allowCoupling: n.allowCoupling ?? true,
     }));

@@ -145,27 +145,35 @@ function countPoints(shapes: ProfileShape[]): number {
  */
 function placeShapes(
   shapes: ProfileShape[],
-  opts: { widthMm?: number; heightMm?: number; scale: number; flipY: boolean; cutouts?: ProfileShape[] },
+  opts: { widthMm?: number; heightMm?: number; scale: number; scaleY?: number; flipY: boolean; cutouts?: ProfileShape[] },
   notes: string[],
 ): Profile {
   if (!shapes.length) throw new Error('No closed outline was found, so there is nothing to make a part from.');
   const b = bounds(shapes);
   const w = b.maxX - b.minX;
   const h = b.maxY - b.minY;
-  let k = opts.scale;
-  if (opts.widthMm && opts.widthMm > 0 && w > 0) k = opts.widthMm / w;
-  else if (opts.heightMm && opts.heightMm > 0 && h > 0) k = opts.heightMm / h;
+  let kx = opts.scale;
+  let ky = opts.scaleY ?? opts.scale;
+  if (opts.widthMm && opts.widthMm > 0 && w > 0) {
+    const ratio = (opts.widthMm / w) / kx;
+    kx = opts.widthMm / w;
+    ky *= ratio;
+  } else if (opts.heightMm && opts.heightMm > 0 && h > 0) {
+    const ratio = (opts.heightMm / h) / ky;
+    ky = opts.heightMm / h;
+    kx *= ratio;
+  }
   const cx = (b.minX + b.maxX) / 2;
   const cy = (b.minY + b.maxY) / 2;
-  const sy = opts.flipY ? -1 : 1;
-  const map = (loop: Point2D[]) => loop.map((p) => ({ x: (p.x - cx) * k, y: sy * (p.y - cy) * k }));
+  const flip = opts.flipY ? -1 : 1;
+  const map = (loop: Point2D[]) => loop.map((p) => ({ x: (p.x - cx) * kx, y: flip * (p.y - cy) * ky }));
   const place = (list: ProfileShape[]) => list.map((s) => ({ outline: map(s.outline), holes: s.holes.map(map) }));
   const placed = place(shapes);
   const cut = opts.cutouts?.length ? place(opts.cutouts) : undefined;
   return {
     shapes: placed,
     ...(cut ? { cutouts: cut } : {}),
-    widthMm: w * k, heightMm: h * k,
+    widthMm: w * kx, heightMm: h * ky,
     pointCount: countPoints(placed) + (cut ? countPoints(cut) : 0),
     notes,
   };
@@ -177,8 +185,8 @@ function placeShapes(
 
 const UNIT_MM: Record<string, number> = { mm: 1, cm: 10, in: 25.4, pt: 25.4 / 72, pc: 25.4 / 6, px: 25.4 / 96, '': 25.4 / 96 };
 
-/** Millimetres per SVG user unit, from the root's width/height and viewBox; 96 dpi when it says nothing. */
-export function svgUnitMm(root: Element): number {
+/** Independent X/Y millimetres per SVG user unit, respecting preserveAspectRatio="none". */
+export function svgScaleMm(root: Element): { sx: number; sy: number } {
   const viewBox = (root.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number);
   const hasViewBox = viewBox.length === 4 && viewBox.every(Number.isFinite) && viewBox[2] > 0 && viewBox[3] > 0;
   const size = (attr: string): { mm: number; unit: number } | null => {
@@ -189,14 +197,28 @@ export function svgUnitMm(root: Element): number {
     return mm > 0 ? { mm, unit } : null;
   };
   const w = size('width'), h = size('height');
-  if (!hasViewBox) return (w ?? h)?.unit ?? UNIT_MM.px;
+  if (!hasViewBox) {
+    const u = (w ?? h)?.unit ?? UNIT_MM.px;
+    return { sx: u, sy: u };
+  }
   // The viewBox is fitted inside width x height keeping its aspect (the
   // default preserveAspectRatio, "meet"), so the tighter of the two governs.
+  // With preserveAspectRatio="none", X and Y scale independently.
   const kw = w ? w.mm / viewBox[2] : Infinity;
   const kh = h ? h.mm / viewBox[3] : Infinity;
-  if (/^\s*none/.test(root.getAttribute('preserveAspectRatio') || '')) return Number.isFinite(kw) ? kw : Number.isFinite(kh) ? kh : UNIT_MM.px;
+  if (/^\s*none\b/i.test(root.getAttribute('preserveAspectRatio') || '')) {
+    const sx = Number.isFinite(kw) ? kw : Number.isFinite(kh) ? kh : UNIT_MM.px;
+    const sy = Number.isFinite(kh) ? kh : Number.isFinite(kw) ? kw : UNIT_MM.px;
+    return { sx, sy };
+  }
   const k = Math.min(kw, kh);
-  return Number.isFinite(k) ? k : UNIT_MM.px;
+  const u = Number.isFinite(k) ? k : UNIT_MM.px;
+  return { sx: u, sy: u };
+}
+
+/** Millimetres per SVG user unit, from the root's width/height and viewBox; 96 dpi when it says nothing. */
+export function svgUnitMm(root: Element): number {
+  return svgScaleMm(root).sx;
 }
 
 const isNone = (paint: unknown) =>
@@ -259,6 +281,28 @@ function cssPropsFor(el: Element, rules: Map<string, CssDecl>): CssDecl {
   const id = el.getAttribute('id');
   if (id && rules.has(`#${id}`)) out = { ...out, ...rules.get(`#${id}`) };
   return out;
+}
+
+/**
+ * Resolve an inherited paint/opacity CSS property along `node` and its ancestors:
+ * on each element, inline `style="..."` wins over `<style>` rules, which win
+ * over presentation attributes; nearer elements override inherited ancestor values.
+ */
+function resolveCssPaint(
+  node: Element | null | undefined,
+  cssRules: Map<string, CssDecl>,
+  propName: 'fill' | 'stroke' | 'fill-opacity' | 'stroke-opacity',
+): string | undefined {
+  const inlineRe = new RegExp(`(?:^|;)\\s*${propName}\\s*:\\s*([^;]+)`, 'i');
+  for (let el: Element | null | undefined = node; el && el.nodeType === 1; el = el.parentElement) {
+    const inline = inlineRe.exec(el.getAttribute('style') || '')?.[1]?.replace(/!important/i, '').trim().toLowerCase();
+    if (inline && inline !== 'inherit') return inline;
+    const fromCss = cssPropsFor(el, cssRules)[propName];
+    if (fromCss && fromCss !== 'inherit') return fromCss;
+    const attr = el.getAttribute(propName)?.trim().toLowerCase();
+    if (attr && attr !== 'inherit') return attr;
+  }
+  return undefined;
 }
 
 /** Whether an element, or anything round it, hides it: display, visibility, opacity, or an undrawn container. */
@@ -360,12 +404,17 @@ export function svgProfile(svgText: string, opts: SvgProfileOptions = {}): Profi
   }
   const root = data.xml as unknown as Element;
   const cssRules = parseCssRules(root);
-  const unit = svgUnitMm(root);
+  const { sx, sy } = svgScaleMm(root);
   const DIV = 24;
   const solids: ProfileShape[] = [];
   const cutouts: ProfileShape[] = [];
   const strokeSubs: { pts: Point2D[]; closed: boolean }[] = [];
   let hidden = 0;
+  const parseOpacity = (val: string | undefined, fallback: number | undefined): number | undefined => {
+    if (val === undefined) return fallback;
+    const n = parseFloat(val);
+    return Number.isFinite(n) ? n : fallback;
+  };
   for (const path of data.paths) {
     const node = (path.userData as { node?: Element } | undefined)?.node;
     const style = (path.userData?.style ?? {}) as {
@@ -384,19 +433,23 @@ export function svgProfile(svgText: string, opts: SvgProfileOptions = {}): Profi
       styleVis === 'collapse' ||
       (style.opacity !== undefined && style.opacity !== '' && Number(style.opacity) === 0);
     if (isHidden(node, cssRules) || styleHidden) { hidden++; continue; }
-    const filled = !isNone(style.fill) && style.fillOpacity !== 0;
-    const stroked = !isNone(style.stroke) && style.strokeOpacity !== 0;
+    const fill = (cssRules.size ? resolveCssPaint(node, cssRules, 'fill') : undefined) ?? style.fill;
+    const stroke = (cssRules.size ? resolveCssPaint(node, cssRules, 'stroke') : undefined) ?? style.stroke;
+    const fillOpacity = parseOpacity(cssRules.size ? resolveCssPaint(node, cssRules, 'fill-opacity') : undefined, style.fillOpacity);
+    const strokeOpacity = parseOpacity(cssRules.size ? resolveCssPaint(node, cssRules, 'stroke-opacity') : undefined, style.strokeOpacity);
+    const filled = !isNone(fill) && fillOpacity !== 0;
+    const stroked = !isNone(stroke) && strokeOpacity !== 0;
     const tag = node?.nodeName.toLowerCase().replace(/^svg:/, '') ?? '';
     // A cut line is a stroke, whether or not the drawing filled it white; a
     // <line> or <polyline> encloses nothing to fill.
-    if ((stroked && (!filled || isWhite(style.fill))) || tag === 'line' || tag === 'polyline') {
+    if ((stroked && (!filled || isWhite(fill))) || tag === 'line' || tag === 'polyline') {
       for (const sub of path.subPaths) {
         const pts = sub.getPoints(DIV).map((q) => ({ x: q.x, y: q.y }));
         if (pts.length < 2) continue;
         strokeSubs.push({ pts, closed: !!(sub as unknown as { autoClose?: boolean }).autoClose });
       }
     } else if (filled) {
-      const into = isWhite(style.fill) ? cutouts : solids;
+      const into = isWhite(fill) ? cutouts : solids;
       for (const shape of SVGLoader.createShapes(path)) {
         const outline = openRing(shape.getPoints(DIV));
         if (outline.length < 3) continue;
@@ -437,7 +490,7 @@ export function svgProfile(svgText: string, opts: SvgProfileOptions = {}): Profi
 
   // Scale to final mm BEFORE dropping collinear points, so small-unit viewBoxes
   // (e.g. viewBox="0 0 1 1" scaled via widthMm) keep their curved geometry.
-  const placed = placeShapes(solids, { ...opts, scale: unit, flipY: true, cutouts }, []);
+  const placed = placeShapes(solids, { ...opts, scale: sx, scaleY: sy, flipY: true, cutouts }, []);
   const tidy = (l: Point2D[]) => dropCollinear(l, 0.005);
   const clean = (list: ProfileShape[]) => list
     .map((sh) => ({ outline: tidy(sh.outline), holes: sh.holes.map(tidy).filter((h) => h.length >= 3) }))
@@ -776,7 +829,7 @@ export function profileNode(profile: Profile, opts: { name?: string; thicknessMm
   return {
     id,
     name,
-    pos: opts.pos ?? [0, 0, 0.02],
+    pos: opts.pos ?? [0, 0, 0],
     scad: profileScad(profile, opts.thicknessMm ?? PROFILE_DEFAULTS.thicknessMm, name),
     geoms: [{ name: `${id}_geom`, type: 'mesh', size: [1], dynamic: true }],
     joints: [{ name: `${id}_free`, type: 'free' }],

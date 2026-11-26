@@ -98,10 +98,10 @@ export const compliantFlexuresPreset: SceneGraph = (() => {
   const bistableNode = applyFlexureToNode(rawBistableShuttle, {
     kind: 'bistable',
     filament: 'petg',
-    thicknessMm: 0.85,
+    thicknessMm: 0.9,
     lengthMm: 20,
     widthMm: 9,
-    archRiseMm: 3.2,
+    archRiseMm: 3.0,
   })!.node;
 
   // 3. Serpentine guided linear stage (right, x = +0.105 m)
@@ -149,8 +149,8 @@ export const compliantFlexuresPreset: SceneGraph = (() => {
     script: `// Test bench: flips the bistable toggle past its snap force each way, sweeps the
 // serpentine stage, and keeps the flexure pendulum ringing.
 const t = api.getTime();
-// Snap force of this toggle is ~9.5 N; push 1.5x that, then let go so it rests
-// unassisted in each latched state (q = 0 and q = 2·h0 ≈ 6.4 mm).
+// Snap force of this toggle is ~8.4 N; push ~1.7x that, then let go so it rests
+// unassisted in each latched state (q = 0 and q = 2·h0 ≈ 6.0 mm).
 const phase = t % 4.0;
 let togglePush = 0;
 if (phase >= 0.4 && phase < 0.9) togglePush = 14;

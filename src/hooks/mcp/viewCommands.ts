@@ -496,10 +496,11 @@ export const viewCommands: McpCommands = {
     }
     const patch: Parameters<typeof upsertReferenceImage>[2] = readReferencePatch(msg);
     if (msg.height !== undefined) {
-      if (typeof msg.height !== 'number' || !Number.isFinite(msg.height) || msg.height <= 0 || msg.height > 20) {
+      const h = typeof msg.height === 'string' && msg.height.trim() !== '' ? Number(msg.height) : msg.height;
+      if (typeof h !== 'number' || !Number.isFinite(h) || h <= 0 || h > 20) {
         throw new Error('height must be a finite number more than 0 and at most 20 m');
       }
-      if (msg.width === undefined) patch.height = msg.height;
+      if (msg.width === undefined) patch.height = h;
     }
     if (typeof image === 'string' && image) {
       Object.assign(patch, await normalizeReferencePicture(image.startsWith('data:') ? image : `data:image/png;base64,${image}`));

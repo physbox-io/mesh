@@ -122,9 +122,9 @@ function collisionVerdict(node: SceneNode): Record<string, unknown> {
 const r1 = (v: number) => +v.toFixed(1);
 const r3 = (v: number) => +v.toFixed(3);
 
-/** Whether the body says anything acoustic: a spec, cloth, or a Physical Material. */
+/** Whether the body says anything acoustic: a spec, cloth, tuned pitch, or a Physical Material. */
 const hasAcousticFields = (n: SceneNode) => !!(n.cloth || n.deformMaterial || n.acousticString || n.windInstrument
-  || n.acousticMembrane || n.resonatorTube || n.nonlinearPlate || n.acousticBow);
+  || n.acousticMembrane || n.resonatorTube || n.nonlinearPlate || n.acousticBow || typeof n.tunedPitchHz === 'number');
 
 /**
  * What the body sounds like, from the same solvers the audio engine uses:
@@ -176,6 +176,8 @@ function acousticsOf(node: SceneNode, scene?: SceneNode[]): Record<string, unkno
     const out: Record<string, unknown> = {};
     let profile: BodyModalProfile | null = null;
     let pitchHz: number | null = null;
+    let overtoneRatio: number | null = null;
+    let regime: string | null = null;
 
     if (node.acousticString) {
       const ev = evaluateTautString(node, scene);
@@ -197,6 +199,9 @@ function acousticsOf(node: SceneNode, scene?: SceneNode[]): Record<string, unkno
         const spec = node.windInstrument;
         const voice = solvePlayableWindVoice(bore, Math.max(3.2, spec.breathKPa || 3.5), spec.embouchureHz);
         pitchHz = voice.pitchHz;
+        const modes = bore.resonantModesHz;
+        overtoneRatio = modes.length > 1 && modes[0] > 0 ? modes[1] / modes[0] : 2;
+        regime = 'air_column';
         out.wind = {
           boreShape: bore.boreShape,
           lengthM: r3(bore.lengthM),
@@ -218,6 +223,13 @@ function acousticsOf(node: SceneNode, scene?: SceneNode[]): Record<string, unkno
       const col = extractTubeAirColumn(node);
       if (col) {
         pitchHz = col.fundamentalHz;
+        overtoneRatio =
+          col.overtonesHz.length > 1 && col.overtonesHz[0] > 0
+            ? col.overtonesHz[1] / col.overtonesHz[0]
+            : col.endCondition === 'open_closed'
+              ? 3
+              : 2;
+        regime = 'air_column';
         out.resonatorTube = { fundamentalHz: r3(col.fundamentalHz), endCondition: col.endCondition };
       }
     }
@@ -229,8 +241,8 @@ function acousticsOf(node: SceneNode, scene?: SceneNode[]): Record<string, unkno
     out.fundamentalHz = r3(pitchHz);
     out.note = note.note;
     out.cents = note.cents;
-    out.overtoneRatio = r3(profile.overtoneRatio);
-    out.regime = profile.regime;
+    out.overtoneRatio = r3(overtoneRatio ?? profile.overtoneRatio);
+    out.regime = regime ?? profile.regime;
     out.material = node.acousticString ? STRING_MATERIALS[node.acousticString.material]?.label ?? profile.material.label : profile.material.label;
 
     const box = analyzeSoundboxResonance(node);

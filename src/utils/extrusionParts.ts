@@ -274,17 +274,53 @@ function buildEndTap(node: SceneNode, p: HardwarePart, id: string) {
 }
 
 /** V-slot wheel carriage: a plate over the profile's +Y face, two wheels on its -X slot, one on its +X. */
-const WHEEL = { od: 23.9, width: 10.2, centre: 19.85, pitch: 30 };
+const WHEEL = { od: 23.9, width: 10.2, bevel: 2.62, centre: 19.85, pitch: 30 };
 const PLATE = { length: 60, width: 64, thick: 3, standOff: 7 };
 
 /** How far the carriage reaches along the profile either side of its middle, mm. */
 export const CARRIAGE_REACH = Math.max(PLATE.length / 2, WHEEL.pitch / 2 + WHEEL.od / 2);
 
+/** A chamfered Delrin V-wheel revolving around local +Z, 45° bevels matching 2020V. */
+function vWheelMesh(name: string, od: number, width: number, bevel: number): SceneGeom {
+  const R = mm(od / 2);
+  const halfW = mm(width / 2);
+  const b = mm(bevel);
+  const rEdge = R - b;
+  const zFlat = halfW - b;
+  const rings: [number, number][] = [
+    [-halfW, rEdge],
+    [-zFlat, R],
+    [zFlat, R],
+    [halfW, rEdge],
+  ];
+  const segs = 28;
+  const positions: number[] = [0, 0, -halfW, 0, 0, halfW];
+  for (const [z, r] of rings) {
+    for (let k = 0; k < segs; k++) {
+      const a = (k / segs) * Math.PI * 2;
+      positions.push(r * Math.cos(a), r * Math.sin(a), z);
+    }
+  }
+  const idx = (ring: number, k: number) => 2 + ring * segs + (k % segs);
+  const faces: number[] = [];
+  for (let k = 0; k < segs; k++) {
+    faces.push(0, idx(0, k + 1), idx(0, k));
+    for (let r = 0; r < rings.length - 1; r++) {
+      const a0 = idx(r, k), a1 = idx(r, k + 1);
+      const b0 = idx(r + 1, k), b1 = idx(r + 1, k + 1);
+      faces.push(a0, a1, b1, a0, b1, b0);
+    }
+    faces.push(1, idx(rings.length - 1, k), idx(rings.length - 1, k + 1));
+  }
+  // Delrin wheel + dual 625-2RS steel bearings + M5 bolt & spacer ≈ 28 g.
+  return { ...meshGeom(name, positions, faces, DELRIN), mass: 0.028 };
+}
+
 function buildCarriage(node: SceneNode, _p: HardwarePart, id: string) {
-  // A wheel turns about Y, square to the plate: a cylinder's +Z turned onto +Y.
+  // A wheel turns about Y, square to the plate: local +Z turned onto +Y.
   const turn = [Math.SQRT1_2, -Math.SQRT1_2, 0, 0];
   const wheel = (name: string, x: number, z: number): SceneGeom => ({
-    ...cylinderGeom(name, mm(WHEEL.od / 2), mm(WHEEL.width), 0, DELRIN),
+    ...vWheelMesh(name, WHEEL.od, WHEEL.width, WHEEL.bevel),
     pos: [mm(x), 0, mm(z)], quat: turn,
   });
   const plateY = 10 + PLATE.standOff + PLATE.thick / 2;
@@ -298,7 +334,7 @@ function buildCarriage(node: SceneNode, _p: HardwarePart, id: string) {
 
 /** The slide a carriage at `z0` (m, along the profile) may run, kept off both ends. */
 export function carriageRange(profileLengthMm: number, z0: number): [number, number] {
-  const free = mm(profileLengthMm / 2 - CARRIAGE_REACH);
+  const free = Math.max(0.0001, mm(profileLengthMm / 2 - CARRIAGE_REACH));
   return [+(-free - z0).toFixed(6), +(free - z0).toFixed(6)];
 }
 
@@ -387,9 +423,12 @@ export interface Meeting {
   roomBack: number;
   /** How far b's met face is from b's axis, m. */
   depthB: number;
-  /** The face both outside faces share, outward, and how far it is out from b's axis, m. */
+  /** The face both outside faces share, outward, and how far it is out from each profile's axis, m. */
   outward: THREE.Vector3;
+  outwardHalfA: number;
   outwardHalfB: number;
+  /** Signed shift of a's centreline from b's centreline along `outward`, m. */
+  outwardOffset: number;
   bWorld: THREE.Matrix4;
 }
 
@@ -456,7 +495,9 @@ function endOnSide(scene: SceneGraph, a: SceneNode, b: SceneNode): Meeting | nul
     const outward = alongB.clone().cross(intoA).normalize();
     const outwardLocal = outward.clone().applyMatrix3(rotB).normalize();
     const ko = Math.abs(outwardLocal.x) > 0.99 ? 0 : 1;
-    return { a, b, end, intoA, alongB, halfA, roomOnB, roomBack, depthB: halfB[k], outward, outwardHalfB: halfB[ko], bWorld: bW };
+    const outwardHalfA = Math.abs(outward.dot(xA)) > 0.99 ? halfAxy[0] : halfAxy[1];
+    const outwardOffset = end.clone().sub(cB).dot(outward);
+    return { a, b, end, intoA, alongB, halfA, roomOnB, roomBack, depthB: halfB[k], outward, outwardHalfA, outwardHalfB: halfB[ko], outwardOffset, bWorld: bW };
   }
   return null;
 }
@@ -487,6 +528,11 @@ export function joinPose(m: Meeting, kind: JoinKind, size?: string): { pos: numb
     return { ...localPose(m.bWorld, corner, m.alongB, m.intoA), size: series };
   }
   if (kind === 'joint_plate') {
+    if (Math.abs(m.outwardOffset + m.outwardHalfA - m.outwardHalfB) > TOL) {
+      return {
+        problem: `These profiles (${m.a.hardwarePart!.size} and ${m.b.hardwarePart!.size}) do not share a flush outside face for a joint plate; align their outer faces flush or use a corner bracket.`,
+      };
+    }
     // An arm along b reaches 2.5 cells from a's axis: an L has one, toward b's
     // middle; a T one either way, so it goes only across b's middle.
     const cell = mm(Number(series));
@@ -496,7 +542,7 @@ export function joinPose(m: Meeting, kind: JoinKind, size?: string): { pos: numb
       return { problem: `There is not enough of the other profile either side of this one for ${shape === 'T' ? 'a T' : 'an L'} plate's arm.` };
     }
     // The square over the junction, on b's axis, out on the face the two share.
-    const centre = m.end.clone().addScaledVector(m.intoA, -m.depthB).addScaledVector(m.outward, m.outwardHalfB);
+    const centre = m.end.clone().addScaledVector(m.intoA, -m.depthB).addScaledVector(m.outward, m.outwardHalfA);
     return { ...localPose(m.bWorld, centre, m.alongB, m.intoA), size: `${shape}${series}` };
   }
   // End tap: from b's far wall, through b, into a's end.

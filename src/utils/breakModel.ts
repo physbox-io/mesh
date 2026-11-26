@@ -278,17 +278,19 @@ const PRESSED = 0.9;
 function pressedInto(b: Blob, g: SceneGeom, pose: Pose): V3 | null {
   const s = g.size || [];
   const inside = (p: V3) => { const q = inBlob(b, p); return dot(q, q) <= PRESSED * PRESSED; };
+  const local = nodeLocalQuat({ quat: g.quat, euler: g.euler, geoms: [] } as unknown as SceneNode);
+  const frame: Pose = { pos: toWorld(pose, g.pos || [0, 0, 0]), quat: quatMultiply(pose.quat, local) };
   if (g.type === 'mesh') {
-    const v = g.renderVertices;
-    if (!v) return null;
+    const useRender = !!(g.renderVertices && g.renderVertices.length >= 3);
+    const v = useRender ? g.renderVertices! : g.vertices;
+    if (!v || v.length < 3) return null;
     for (let i = 0; i + 2 < v.length; i += 3) {
-      const p = toWorld(pose, [v[i], v[i + 1], v[i + 2]]);
+      const localPt: V3 = useRender ? [v[i], v[i + 1], v[i + 2]] : [v[i], -v[i + 2], v[i + 1]];
+      const p = toWorld(frame, localPt);
       if (inside(p)) return p;
     }
     return null;
   }
-  const local = nodeLocalQuat({ quat: g.quat, euler: g.euler, geoms: [] } as unknown as SceneNode);
-  const frame: Pose = { pos: toWorld(pose, g.pos || [0, 0, 0]), quat: quatMultiply(pose.quat, local) };
   const c = toLocal(frame, b.centre);
   let near: V3;
   if (g.type === 'box') {

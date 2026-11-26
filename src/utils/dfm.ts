@@ -200,6 +200,11 @@ const T = {
   /** Overhang: a quarter of the surface needing support is a lot of support. */
   overhangShare: 0.25,
   overhangShareCritical: 0.45,
+  /** Localized flat overhang ledge (e.g. upright snap-hook catch lip) that needs support even on a large part. */
+  severeOverhangDeg: 80,
+  severeOverhangSpanMm: 0.8,
+  severeOverhangMinZMm: 1.0,
+  severeOverhangMinAreaMm2: 0.5,
   /** A near-flat ceiling on a filament that cannot bridge is a failed print. */
   bridgeDeg: 75,
   /** Flat footprint, mm, past which a shrinking filament lifts at the corners. */
@@ -613,6 +618,76 @@ function maxCeilingClusterSpanMm(tris: Float64Array, ceilingTris: number[]): num
   return maxSpanMm;
 }
 
+/** Worst connected cluster of severe flat-overhang triangles: horizontal XY span (mm), area (mm²), and centroid. */
+function worstSevereOverhangCluster(
+  tris: Float64Array,
+  severeTris: number[],
+): { spanMm: number; areaMm2: number; position: [number, number, number] } | null {
+  if (severeTris.length === 0) return null;
+  const CELL = 0.005; // 5 mm clustering grid
+  const cells = new Map<string, number[]>();
+  const keyOf = (ix: number, iy: number, iz: number) => `${ix},${iy},${iz}`;
+  const triCells: [number, number, number][] = [];
+  for (let idx = 0; idx < severeTris.length; idx++) {
+    const c = triCentroid(tris, severeTris[idx]);
+    const ix = Math.floor(c[0] / CELL);
+    const iy = Math.floor(c[1] / CELL);
+    const iz = Math.floor(c[2] / CELL);
+    triCells.push([ix, iy, iz]);
+    const k = keyOf(ix, iy, iz);
+    let list = cells.get(k);
+    if (!list) cells.set(k, (list = []));
+    list.push(idx);
+  }
+  const visited = new Uint8Array(severeTris.length);
+  let best: { spanMm: number; areaMm2: number; position: [number, number, number] } | null = null;
+  const queue: number[] = [];
+  for (let start = 0; start < severeTris.length; start++) {
+    if (visited[start]) continue;
+    visited[start] = 1;
+    queue.length = 0;
+    queue.push(start);
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    let areaSum = 0, sx = 0, sy = 0, sz = 0;
+    for (let qi = 0; qi < queue.length; qi++) {
+      const cur = queue[qi];
+      const tIdx = severeTris[cur];
+      const o = tIdx * 9;
+      for (let v = 0; v < 9; v += 3) {
+        const x = tris[o + v], y = tris[o + v + 1];
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+      const n = triNormal(tris, tIdx);
+      const a = n ? n.area : 0;
+      const c = triCentroid(tris, tIdx);
+      areaSum += a;
+      sx += c[0] * a; sy += c[1] * a; sz += c[2] * a;
+      const [ix, iy, iz] = triCells[cur];
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dz = -1; dz <= 1; dz++) {
+            const neigh = cells.get(keyOf(ix + dx, iy + dy, iz + dz));
+            if (!neigh) continue;
+            for (const nxt of neigh) {
+              if (!visited[nxt]) { visited[nxt] = 1; queue.push(nxt); }
+            }
+          }
+        }
+      }
+    }
+    const spanMm = Math.max(maxX - minX, maxY - minY) * 1000;
+    const areaMm2 = areaSum * 1e6;
+    if (!best || spanMm > best.spanMm) {
+      const pos: [number, number, number] = areaSum > 0
+        ? [sx / areaSum, sy / areaSum, sz / areaSum]
+        : triCentroid(tris, severeTris[start]);
+      best = { spanMm, areaMm2, position: pos };
+    }
+  }
+  return best;
+}
+
 /** Outward-wound axis-aligned box triangles (12 triangles, 108 floats). */
 function appendBoxSoup(out: Float64Array, offset: number, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number) {
   const faces: [number, number, number][][] = [
@@ -735,6 +810,7 @@ function analysePrint(
 
   let worstDeg = 0, unbridgeable = 0;
   const ceilingTris: number[] = [];
+  const severeOverhangTris: number[] = [];
   const { area: overhangArea, totalArea } = supportArea(tris, limits.overhangDeg, 0.0005, (t, deg, area) => {
     heat[t] = Math.min(1, (deg - limits.overhangDeg) / (90 - limits.overhangDeg));
     if (deg > worstDeg) worstDeg = deg;
@@ -742,13 +818,20 @@ function analysePrint(
       unbridgeable += area;
       ceilingTris.push(t);
     }
+    if (deg >= T.severeOverhangDeg) {
+      const c = triCentroid(tris, t);
+      if ((c[2] - b.minZ) * 1000 > T.severeOverhangMinZMm) {
+        severeOverhangTris.push(t);
+      }
+    }
   });
 
   const share = totalArea > 0 ? overhangArea / totalArea : 0;
 
   // Support is the normal cost of printing, not a defect. This only speaks up
   // when the orientation is costing a LOT of it — the case where turning the
-  // part is worth real time and a better surface.
+  // part is worth real time and a better surface — or when a localized flat
+  // ledge (such as an upright snap-hook catch lip) hangs ≥ 80° in mid-air.
   if (share > T.overhangShare) {
     const at = hotSpot(tris, heat, 0.01) ?? [0, 0, b.maxZ];
     findings.push({
@@ -896,6 +979,25 @@ function analysePrint(
       metric: thin.mm,
       ...(actions.length ? { actions } : {}),
     });
+  }
+
+  // Localized flat downward-facing ledges (e.g. upright snap-hook catch lips >= 80°
+  // and >= 0.8 mm span above z > 1 mm) still need support even when total overhang
+  // area is below 25%. Checked after thin walls so unprintable walls lead the summary.
+  if (share <= T.overhangShare && severeOverhangTris.length > 0) {
+    const severe = worstSevereOverhangCluster(tris, severeOverhangTris);
+    if (severe && severe.spanMm >= T.severeOverhangSpanMm && severe.areaMm2 >= T.severeOverhangMinAreaMm2) {
+      findings.push({
+        id: 'print_severe_overhang',
+        process: 'print',
+        severity: 'warning',
+        title: `Flat ${worstDeg.toFixed(0)}° overhang needs support`,
+        detail: `Localized flat downward-facing ledge (${severe.spanMm.toFixed(1)} mm span at ${worstDeg.toFixed(0)}°, ${((severe.position[2] - b.minZ) * 1000).toFixed(1)} mm above the bed) cannot print cleanly without support.`,
+        fix: 'Reorient the part (e.g. lay hooks flat on the bed), add a 45° chamfer under the ledge, or enable supports.',
+        position: severe.position,
+        metric: severe.spanMm,
+      });
+    }
   }
 
   // Print-in-place opposing-wall air-gap clearance check (< 0.35 mm risks fusion).

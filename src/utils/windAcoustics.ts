@@ -939,10 +939,19 @@ function analyzeHollowMeshAirwayLocal(rv: number[], faces: number[]): MeshAirway
   let muteFactor = 0;
   const bellSamples = orderedSamples.filter((smp) => smp.s >= 0.82 && smp.s <= 0.98);
   if (bellSamples.length > 0) {
+    const bodySamples = orderedSamples.filter((smp) => smp.s >= 0.3 && smp.s <= 0.75);
+    const refSource = bodySamples.length > 0 ? bodySamples : orderedSamples;
+    const refRadii = refSource.map((smp) => smp.info.rEff).sort((a, b) => a - b);
+    const midIdx = Math.floor(refRadii.length / 2);
+    const refReff =
+      refRadii.length % 2 === 1
+        ? refRadii[midIdx]
+        : 0.5 * (refRadii[midIdx - 1] + refRadii[midIdx]);
+    const refArea = Math.max(1e-8, refReff * refReff);
     let minAreaRatio = 1;
     let minStarRatio = 1;
     for (const smp of bellSamples) {
-      const areaRatio = (smp.info.rEff * smp.info.rEff) / Math.max(1e-8, smp.info.rOuter * smp.info.rOuter);
+      const areaRatio = (smp.info.rEff * smp.info.rEff) / refArea;
       if (areaRatio < minAreaRatio) minAreaRatio = areaRatio;
       if (smp.info.minRatio < minStarRatio) minStarRatio = smp.info.minRatio;
     }
@@ -1402,9 +1411,9 @@ function solveConicalBoreTMM(
     .join(',');
   const hSig = toneholes
     .filter((t) => t.openAmount > 0.02)
-    .map((t) => `${t.cellIndex}:${Math.round(t.radiusMm * 10)}:${Math.round(t.openAmount * 100)}`)
+    .map((t) => `${Math.round(t.axialFraction * 10000)}:${Math.round(t.radiusMm * 10)}:${Math.round(t.openAmount * 100)}`)
     .join(';');
-  const cacheKey = `${Math.round(totalBoreLengthM * 20000)}|${rSig}|${hSig}|${isOpenInputFlute ? 1 : 0}|${Math.round(muteFactor * 100)}`;
+  const cacheKey = `${Math.round(totalBoreLengthM * 100000)}|${rSig}|${hSig}|${isOpenInputFlute ? 1 : 0}|${Math.round(muteFactor * 100)}`;
   const hit = tmmCache.get(cacheKey);
   if (hit) {
     tmmCache.delete(cacheKey);

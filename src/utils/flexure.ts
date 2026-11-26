@@ -123,6 +123,8 @@ export interface FlexureEvaluation {
   warnings: string[];
 }
 
+export const VALID_FLEXURE_FILAMENTS: readonly FilamentId[] = ['pla', 'petg', 'abs', 'asa', 'tpu'];
+
 function resolveFilamentId(raw: string | undefined): FilamentId {
   if (raw === 'pla' || raw === 'petg' || raw === 'abs' || raw === 'asa' || raw === 'tpu') {
     return raw;
@@ -134,6 +136,45 @@ export function allowedFlexureKindsForJoint(jointType: string | undefined): Flex
   if (jointType === 'hinge') return ['blade', 'cross_pivot'];
   if (jointType === 'slide') return ['serpentine', 'bistable'];
   return [];
+}
+
+/**
+ * Validates a declarative flexure input against `node`'s joints before applying it.
+ * Returns a human-readable error message when invalid, or `null` when valid.
+ */
+export function validateFlexureInput(
+  node: Pick<SceneNode, 'id' | 'name' | 'joints'>,
+  input: Record<string, unknown>,
+): string | null {
+  const joints = node.joints ?? [];
+  const jointName = typeof input.jointName === 'string' && input.jointName ? input.jointName : undefined;
+  const jointIdx = jointName
+    ? joints.findIndex((j) => j.name === jointName && (j.type === 'hinge' || j.type === 'slide'))
+    : joints.findIndex((j) => j.type === 'hinge' || j.type === 'slide');
+
+  const bodyLabel = node.name || node.id || 'body';
+  if (jointIdx < 0) {
+    return jointName
+      ? `Body '${bodyLabel}': flexure references joint '${jointName}', which does not exist or is not a 'hinge' or 'slide' joint.`
+      : `Body '${bodyLabel}': flexure requires a 'hinge' or 'slide' joint on the body.`;
+  }
+
+  const jointType = joints[jointIdx].type as 'hinge' | 'slide';
+  const allowed = allowedFlexureKindsForJoint(jointType);
+
+  if (input.kind !== undefined) {
+    if (typeof input.kind !== 'string' || !allowed.includes(input.kind as FlexureKind)) {
+      return `Body '${bodyLabel}': flexure kind '${String(input.kind)}' is not valid for a '${jointType}' joint (allowed: ${allowed.join(', ')}).`;
+    }
+  }
+
+  if (input.filament !== undefined) {
+    if (typeof input.filament !== 'string' || !VALID_FLEXURE_FILAMENTS.includes(input.filament as FilamentId)) {
+      return `Body '${bodyLabel}': unsupported flexure filament '${String(input.filament)}' (supported: ${VALID_FLEXURE_FILAMENTS.join(', ')}).`;
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -152,7 +193,8 @@ export function evaluateFlexureSpec(input: FlexureDesignInput, jointType: 'hinge
 
   const thicknessMm = Math.max(0.4, Math.min(4.0, input.thicknessMm ?? Math.max(1.0, fSpec.minWallMm)));
   const lengthMm = Math.max(4.0, Math.min(80.0, input.lengthMm ?? (jointType === 'hinge' ? 12 : 16)));
-  const widthMm = Math.max(2.0, Math.min(50.0, input.widthMm ?? 8.0));
+  const minWidthMm = kind === 'cross_pivot' ? 4.0 : 2.0;
+  const widthMm = Math.max(minWidthMm, Math.min(50.0, input.widthMm ?? 8.0));
   const folds = kind === 'serpentine' ? Math.max(2, Math.min(8, Math.round(input.folds ?? 4))) : undefined;
   const archRiseMm = kind === 'bistable'
     ? Math.max(0.8, Math.min(12.0, input.archRiseMm ?? Math.max(2.0, thicknessMm * 2.8)))
@@ -492,8 +534,9 @@ export function buildFlexureGeoms(joint: SceneJoint, spec: FlexureSpec, bodyGeom
     } else {
       // Two leaves crossing at the pivot at ±45°, set apart along the axis so they
       // print without fusing; each runs from the frame above to the body below.
+      // Guarantee at least 0.4 mm clear separation (2 * gap - halfB >= 0.0004) for FDM.
       const halfB = Math.max(0.001, b * 0.44);
-      const gap = b * 0.26;
+      const gap = Math.max(b * 0.26, halfB * 0.5 + 0.0002);
       for (const [i, sign, shift] of [[0, 1, -gap], [1, -1, gap]] as const) {
         const dir = up.clone().multiplyScalar(Math.SQRT1_2).addScaledVector(side, sign * Math.SQRT1_2);
         const top = at([dir, L * 0.5], [ez, shift]);
@@ -531,8 +574,15 @@ export function buildFlexureGeoms(joint: SceneJoint, spec: FlexureSpec, bodyGeom
         } else {
           // The anchor pad, where the frame holds the spring.
           const padLen = Math.max(0.002, t * 3);
-          const out = exit === xout ? 1 : -1;
-          geoms.push(leafBetween(`flexure_anchor_${tag}`, at([dir, exit], [ez, z]), at([dir, exit + out * padLen], [ez, z]), ez, Math.max(t * 1.5, 0.0012), b * 0.5, rgba, 0, 0));
+          const padHalfThick = Math.min(Math.max(t * 1.5, 0.0012), L * 0.5);
+          if (exit === xout) {
+            geoms.push(leafBetween(`flexure_anchor_${tag}`, at([dir, exit], [ez, z]), at([dir, exit + padLen], [ez, z]), ez, padHalfThick, b * 0.5, rgba, 0, 0));
+          } else {
+            // Even folds exit at xin (beside the moving body): route the fixed anchor pad
+            // off the +ez end on the outer side of xin so it stays clear of the body by `gap`.
+            const xAnchor = xin + padHalfThick;
+            geoms.push(leafBetween(`flexure_anchor_${tag}`, at([dir, xAnchor], [ez, z - t * 0.5]), at([dir, xAnchor], [ez, z + padLen]), dir, padHalfThick, b * 0.5, rgba, 0, 0));
+          }
         }
       }
     }

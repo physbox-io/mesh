@@ -30,9 +30,9 @@ scale(0.001) {
         translate([-${shaftDiameterMm}, -${shaftDiameterMm / 2 + 0.12 - 0.5}, 0])
           cube([${shaftDiameterMm * 2}, ${shaftDiameterMm * 2}, 15.2]);
       }
-    // M3 Set screw hole
+    // M3 Set screw hole (enters -Y wall onto the D-flat)
     translate([0, 0, 7.5])
-      rotate([0, 90, 0])
+      rotate([90, 0, 0])
         cylinder(r = 1.45, h = ${shaftDiameterMm + 6}, center = false);
   }
 }

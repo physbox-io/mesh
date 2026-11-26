@@ -27,6 +27,16 @@ function all(nodes: SceneNode[], out: SceneNode[] = []): SceneNode[] {
 }
 const byId = (scene: SceneGraph, id: string) => all(scene.nodes).find((n) => n.id === id) ?? null;
 const carriageOf = (part: SceneNode) => all(part.children || []).find((c) => c.hardwarePart?.piece === 'carriage') ?? null;
+const isMovingPiece = (n: SceneNode | null) => !!(n?.hardwarePart?.piece || n?.hardwarePart?.kind === 'vslot_carriage');
+
+function parentOf(nodes: SceneNode[], id: string): SceneNode | null {
+  for (const n of nodes) {
+    if (n.children?.some((c) => c.id === id)) return n;
+    const p = parentOf(n.children || [], id);
+    if (p) return p;
+  }
+  return null;
+}
 
 /** Bodies welded to a moving piece: what rides on it. */
 export function riders(scene: SceneGraph, pieceId: string): SceneNode[] {
@@ -40,7 +50,7 @@ export function riders(scene: SceneGraph, pieceId: string): SceneNode[] {
 export function fixToPiece(scene: SceneGraph, pieceId: string, bodyId: string): Outcome {
   const piece = byId(scene, pieceId);
   const body = byId(scene, bodyId);
-  if (!piece?.hardwarePart?.piece) return { ok: false, problem: 'That is not a moving piece of a rail, rod or runner.' };
+  if (!isMovingPiece(piece)) return { ok: false, problem: 'That is not a moving piece of a rail, rod, runner or V-slot carriage.' };
   if (!body) return { ok: false, problem: `No body '${bodyId}'.` };
   if (isBoughtIn(body)) return { ok: false, problem: `${body.name} is a bought part; fix the part it belongs to.` };
   if (all([body]).some((n) => n.id === pieceId)) return { ok: false, problem: `${body.name} carries this piece; it cannot ride on it.` };
@@ -90,10 +100,35 @@ export function rideOnRod(scene: SceneGraph, hostId: string, group: string): Out
     }
     const ridden = riders(scene, bush.id).filter((r) => r.id !== hostId);
     if (ridden.length) return { ok: false, problem: `${ridden[0].name} already rides that bushing; give this part a rod of its own.` };
+    if (bush.coupleTargetId && bush.coupleTargetId !== host.weldTargetId) {
+      const coupledRiders = riders(scene, bush.coupleTargetId).filter((r) => r.id !== hostId);
+      if (coupledRiders.length) return { ok: false, problem: `${coupledRiders[0].name} already rides that bushing; give this part a rod of its own.` };
+    }
     // The bushing starts where the housing is, and can still go to both ends.
     bush.pos = [0, 0, +along.toFixed(6)];
     const slide = bush.joints.find((j) => j.type === 'slide');
     if (slide) slide.range = [+(-travel - along).toFixed(6), +(travel - along).toFixed(6)];
+    // Dual-rod carriage: when `host` already rides a parallel rod's bushing,
+    // couple the second bushing's slide to the first rather than adding a
+    // second weld round the same closed loop (mirrors addDrawerRunners).
+    if (host.weldTargetId && host.weldTargetId !== bush.id) {
+      const firstBush = byId(scene, host.weldTargetId);
+      const firstRod = firstBush?.hardwarePart?.kind === 'linear_rod' && firstBush.hardwarePart.piece === 'carriage'
+        ? parentOf(scene.nodes, firstBush.id)
+        : null;
+      const firstWorld = firstRod ? documentWorldMatrix(scene, firstRod.id) : null;
+      if (firstBush && firstWorld) {
+        const firstDir = new THREE.Vector3(0, 0, 1).transformDirection(firstWorld);
+        const dot = dir.dot(firstDir);
+        if (Math.abs(dot) >= 0.999) {
+          if (slide && firstBush.joints?.some((j) => j.type === 'slide')) {
+            bush.coupleTargetId = firstBush.id;
+            bush.coupleRatio = dot >= 0 ? 1 : -1;
+          }
+          return { ok: true };
+        }
+      }
+    }
     return fixToPiece(scene, bush.id, hostId);
   }
   return { ok: false, problem: `No Ø${spec.size} rod runs through this housing. Put the rod on its line first.` };

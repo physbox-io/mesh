@@ -49,6 +49,13 @@ function requireEnum<T extends string>(v: unknown, name: string, allowed: readon
   return v as T;
 }
 
+function requireMetricUnits(v: unknown): void {
+  const units = requireEnum(v, 'units', ['mm', 'in'] as const);
+  if (units === 'in') {
+    throw new Error("units 'in' is not supported: exported G-code is always metric (mm / G21). Omit units or pass 'mm'.");
+  }
+}
+
 function requireBool(v: unknown, name: string): boolean | undefined {
   if (v === undefined || v === null) return undefined;
   if (typeof v !== 'boolean') {
@@ -108,6 +115,7 @@ export function reliefOptionsFor(msg: Record<string, unknown>): { options: Relie
   const roughingToolDiaMm = requireFinitePos(msg.roughingToolDiaMm, 'roughingToolDiaMm');
   const finishingToolDiaMm = requireFinitePos(msg.finishingToolDiaMm, 'finishingToolDiaMm');
   const shape = requireEnum(msg.finishingToolType, 'finishingToolType', ['flat', 'ball_nose', 'v_bit'] as const);
+  const finishingVBitAngleDeg = requireFinitePos(msg.finishingVBitAngleDeg, 'finishingVBitAngleDeg');
   const carveDepthMm = requireFinitePos(msg.carveDepthMm, 'carveDepthMm');
   const material = validateMaterial(msg.material);
   const roughingStrategy = requireEnum(msg.roughingStrategy, 'roughingStrategy', ['adaptive', 'raster'] as const);
@@ -123,12 +131,13 @@ export function reliefOptionsFor(msg: Record<string, unknown>): { options: Relie
   const finishingFluteLengthMm = requireFiniteNonNeg(msg.finishingFluteLengthMm, 'finishingFluteLengthMm');
   const finishingShankDiaMm = requireFiniteNonNeg(msg.finishingShankDiaMm, 'finishingShankDiaMm');
   const toolBodyClearance = requireBool(msg.toolBodyClearance, 'toolBodyClearance');
-  requireEnum(msg.units, 'units', ['mm', 'in'] as const);
+  requireMetricUnits(msg.units);
 
   const asked: Partial<ReliefCarveOptions> = {
     ...(roughingToolDiaMm !== undefined ? { roughingToolDiaMm } : {}),
     ...(finishingToolDiaMm !== undefined ? { finishingToolDiaMm } : {}),
     ...(shape !== undefined ? { finishingToolType: shape } : {}),
+    ...(finishingVBitAngleDeg !== undefined ? { finishingVBitAngleDeg } : {}),
     ...(carveDepthMm !== undefined ? { carveDepthMm } : {}),
     ...(material !== undefined ? { material } : {}),
     ...(roughingStrategy !== undefined ? { roughingStrategy } : {}),
@@ -150,7 +159,7 @@ export function reliefOptionsFor(msg: Record<string, unknown>): { options: Relie
   const merged: ReliefCarveOptions = { ...base, ...asked, scalePercent: 100 };
   // The dialog's feeds stand, overrides and all, unless what they were
   // worked out for has been changed here.
-  const rederive = !dialog || ['roughingToolDiaMm', 'finishingToolDiaMm', 'carveDepthMm', 'cutThroughMm', 'material']
+  const rederive = !dialog || ['roughingToolDiaMm', 'finishingToolDiaMm', 'finishingVBitAngleDeg', 'carveDepthMm', 'cutThroughMm', 'material']
     .some((k) => k in asked);
   const options: ReliefCarveOptions = {
     ...merged,
@@ -240,7 +249,7 @@ export function machiningOptionsFor(msg: Record<string, unknown>, scene: SceneGr
   const finishingToolType =
     requireEnum(msg.finishingToolType, 'finishingToolType', ['flat', 'ball_nose', 'v_bit'] as const)
     ?? MCP_MACHINING_DEFAULTS.finishingToolType;
-  requireEnum(msg.units, 'units', ['mm', 'in'] as const);
+  requireMetricUnits(msg.units);
   // Feeds, speeds and stepdowns worked out for the material and the
   // connected machine, as the dialog does; DEFAULT_SOLID_OPTIONS alone is
   // a wood recipe whatever material is named.

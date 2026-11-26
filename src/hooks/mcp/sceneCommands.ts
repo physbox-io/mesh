@@ -18,6 +18,7 @@ import { headlessImpactWarning } from '../../utils/headlessLimits';
 import { headlessImpacts } from './headlessImpacts';
 import { PRESETS } from '../../presets/presetScenes';
 import { parseSTL } from '../../utils/stlParser';
+import { analyzeMesh } from '../../utils/meshIntegrity';
 import { colliderCopyOf, denseFingerprintOf, denseImportNote, headlessMeshBudgetError } from '../../utils/denseMesh';
 import { denseCollidersSettled } from '../../store/denseColliders';
 import {
@@ -72,7 +73,7 @@ const withScriptWarnings = <R extends object>(result: R, nodes: SceneNode[]): R 
 
 const FORBIDDEN_PRESET_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const HEADLESS_SECTIONS = new Set(['bodies', 'joints', 'contacts', 'aero']);
-const STL_IMPORT_MODES = new Set(['scad_parametric', 'scad_raw', 'mesh', 'primitive']);
+const STL_IMPORT_MODES = new Set(['scad_parametric', 'scad_raw', 'scad_csg', 'mesh', 'primitive']);
 
 function validateRawNodeTree(list: unknown[], path = 'bodies'): string | null {
   for (let i = 0; i < list.length; i++) {
@@ -393,7 +394,7 @@ export const sceneCommands: McpCommands = {
         const bytes = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
         data = bytes.buffer;
-      } else if (!stlData.includes('solid')) {
+      } else if (!/^\s*solid\b[\s\S]*?\bfacet\b/i.test(stlData)) {
         try {
           const binary = atob(stlData.trim());
           const bytes = new Uint8Array(binary.length);
@@ -428,14 +429,38 @@ export const sceneCommands: McpCommands = {
     // memory, and the body was left a placeholder box under a reply of ok),
     // and collides as a simplified copy of itself (utils/denseMesh.ts).
     const warnings: string[] = [];
+    if (
+      scale === undefined &&
+      parsed.appliedScale[0] === 0.001 &&
+      parsed.appliedScale[1] === 0.001 &&
+      parsed.appliedScale[2] === 0.001
+    ) {
+      warnings.push('STL coordinates looked like millimetres (diagonal > 2), so it was auto-scaled by 0.001 to metres. Pass scale: 1 if the file was already in metres.');
+    }
+    const integrity = analyzeMesh(parsed.renderVertices, parsed.faces);
+    if (integrity) {
+      if (integrity.volume < 0) {
+        warnings.push('Imported mesh has inverted winding (negative signed volume); normals face inward. Consider repairing it with physics_repair_mesh.');
+      }
+      if (integrity.boundaryEdges > 0) {
+        warnings.push(`Imported mesh is not watertight (${integrity.boundaryEdges} open boundary edge${integrity.boundaryEdges === 1 ? '' : 's'}).`);
+      }
+      if (integrity.nonManifoldEdges > 0) {
+        warnings.push(`Imported mesh has ${integrity.nonManifoldEdges} non-manifold edge${integrity.nonManifoldEdges === 1 ? '' : 's'} (shared by more than 2 triangles).`);
+      }
+    }
     const requested = (importMode as string | undefined) || 'scad_parametric';
-    const scadMode = requested === 'scad_parametric' || requested === 'scad_raw';
-    if (parsed.dense && scadMode) {
+    const scadPolyMode = requested === 'scad_parametric' || requested === 'scad_raw';
+    let mode = requested;
+    if (parsed.dense && scadPolyMode) {
       warnings.push(`importMode '${requested}' was not used: ${parsed.triangleCount.toLocaleString()} triangles is too many for an OpenSCAD polyhedron, which runs out of memory compiling, so the part was imported as a mesh.`);
+      mode = 'mesh';
+    } else if (requested === 'scad_csg' && !parsed.scadCsg) {
+      warnings.push("importMode 'scad_csg' was not used: the mesh could not be represented as clean CSG without a dense polyhedron, so the part was imported as a mesh.");
+      mode = 'mesh';
     }
     // The free joint is named: a nameless one failed every build (the worker
     // looked it up by name), so an imported body never simulated.
-    const mode = parsed.dense && scadMode ? 'mesh' : requested;
     const collider = mode === 'mesh' ? await colliderCopyOf(parsed.renderVertices, parsed.faces) : null;
     if (collider) {
       warnings.push(denseImportNote(collider));
@@ -453,6 +478,8 @@ export const sceneCommands: McpCommands = {
     const effectiveName = (typeof name === 'string' && name) || freshReplacing?.name || 'imported_stl';
     const nodePos: [number, number, number] = isFiniteVec3(pos) ? [...pos] : [0, 0, 0];
     const id = freshReplacing?.id ?? `stl_${Math.random().toString(36).slice(2, 7)}`;
+    const isDynamic = dynamicNow !== false;
+    const joints = isDynamic ? [{ name: `${id}_free`, type: 'free' as const }] : [];
     let newNode: SceneNode;
 
     if (mode === 'scad_parametric') {
@@ -461,8 +488,8 @@ export const sceneCommands: McpCommands = {
         name: effectiveName,
         pos: nodePos,
         scad: parsed.scadParametric,
-        geoms: [{ type: 'mesh', size: [1], dynamic: dynamicNow !== false } as SceneGeom],
-        joints: [{ name: `${id}_free`, type: 'free' }],
+        geoms: [{ type: 'mesh', size: [1], dynamic: isDynamic } as SceneGeom],
+        joints,
         children: [],
       };
     } else if (mode === 'scad_raw') {
@@ -471,8 +498,18 @@ export const sceneCommands: McpCommands = {
         name: effectiveName,
         pos: nodePos,
         scad: parsed.scadRaw,
-        geoms: [{ type: 'mesh', size: [1], dynamic: dynamicNow !== false } as SceneGeom],
-        joints: [{ name: `${id}_free`, type: 'free' }],
+        geoms: [{ type: 'mesh', size: [1], dynamic: isDynamic } as SceneGeom],
+        joints,
+        children: [],
+      };
+    } else if (mode === 'scad_csg') {
+      newNode = {
+        id,
+        name: effectiveName,
+        pos: nodePos,
+        scad: parsed.scadCsg,
+        geoms: [{ type: 'mesh', size: [1], dynamic: isDynamic } as SceneGeom],
+        joints,
         children: [],
       };
     } else if (mode === 'mesh') {
@@ -487,9 +524,9 @@ export const sceneCommands: McpCommands = {
           faces: parsed.faces,
           renderVertices: parsed.renderVertices,
           ...(collider ? { colliderVertices: collider.colliderVertices, colliderFaces: collider.colliderFaces } : {}),
-          dynamic: dynamicNow !== false,
+          dynamic: isDynamic,
         } as SceneGeom],
-        joints: [{ name: `${id}_free`, type: 'free' }],
+        joints,
         children: [],
       };
     } else {
@@ -501,8 +538,9 @@ export const sceneCommands: McpCommands = {
           type: parsed.primitiveGeom.type,
           size: parsed.primitiveGeom.size,
           rgba: [0.3, 0.7, 0.9, 1],
+          dynamic: isDynamic,
         } as SceneGeom],
-        joints: [{ name: `${id}_free`, type: 'free' }],
+        joints,
         children: [],
       };
     }
@@ -520,7 +558,11 @@ export const sceneCommands: McpCommands = {
         pos: isFiniteVec3(pos) ? [...pos] : freshReplacing.pos,
         ...(freshReplacing.quat ? { quat: freshReplacing.quat } : {}),
         ...(freshReplacing.euler ? { euler: freshReplacing.euler } : {}),
-        joints: freshReplacing.joints ?? newNode.joints,
+        joints: dynamicBool === false
+          ? []
+          : dynamicBool === true && !(freshReplacing.joints?.length)
+            ? newNode.joints
+            : (freshReplacing.joints ?? newNode.joints),
         children: freshReplacing.children ?? [],
         geoms: newNode.geoms.map((g, i) => (i === 0 && colour ? { ...g, rgba: colour } : g)),
       };
@@ -549,6 +591,7 @@ export const sceneCommands: McpCommands = {
       ...(freshReplacing ? { replaced: true } : {}),
       posM: (updatedNodes.length && findNodeInScene(updatedNodes, id)?.pos) || nodePos,
       importMode: mode,
+      appliedScale: parsed.appliedScale,
       vertCount: parsed.vertices.length / 3,
       faceCount: parsed.faces.length / 3,
       ...(collider ? { colliderFaceCount: collider.colliderTriangles } : {}),

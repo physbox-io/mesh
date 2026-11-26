@@ -138,11 +138,19 @@ export function finishSurface(
   const layerFinishing =
     opts.finishingDepthMode === 'layered' ||
     (opts.finishingDepthMode === 'auto' && !opts.roughingEnabled);
-  const finishStepdown = !layerFinishing
-    ? Infinity
-    : opts.finishingStepdownMm > 0
+  const autoStepdown =
+    opts.finishingStepdownMm > 0
       ? opts.finishingStepdownMm
       : Math.max(0.2, opts.finishingToolDiaMm * stepdownFractionFor(opts.material));
+  const finishStepdown = !layerFinishing ? Infinity : autoStepdown;
+  // When roughing ran with a larger cutter, inside corners, narrow valleys,
+  // and the stock's outer border still stand at full height. In 'auto' mode,
+  // step those local unroughed patches down in place before the final sweep.
+  const restLayering =
+    !layerFinishing &&
+    opts.finishingDepthMode === 'auto' &&
+    opts.roughingEnabled &&
+    opts.finishingToolDiaMm < opts.roughingToolDiaMm - 1e-3;
 
   let finishDeepest = 0;
   for (let i = 0; i < finishMap.z.length; i++) {
@@ -332,18 +340,25 @@ export function finishSurface(
     const level = plan.length > 0 ? waterlineLevel(plan[0]) : undefined;
     return exact && level !== undefined ? exact.mend(points, level) : points;
   };
+  const roughWin = centreWindow(job, Math.max(0.05, opts.roughingToolDiaMm / 2));
+  const outsideRoughWin = (x: number, y: number) =>
+    x < roughWin.minX || x > roughWin.maxX || y < roughWin.minY || y > roughWin.maxY;
+
   const placed = planGroups.map((group) => group.map((plan) => onScrapWall(plan)
     ? plan.map((pt) => ({ x: pt.x, y: pt.y, z: 0 }))
     : mended(plan, plan.map((pt) => {
       const level = waterlineLevel(pt);
       if (level === undefined) {
         const z = passZ(pt);
-        // Scrap floor already cleared by roughing does not need fine raster finishing;
-        // the part's own perimeter (within finishRad + res) is not scrap and still cuts free.
+        // Scrap inside the roughing window (the moat floor away from the part and
+        // the scrap frame's inner wall) is never kept; the part's own perimeter
+        // (within finishRad + res) is not scrap and still cuts free, and corners
+        // outside `roughWin` (e.g. a datum notch) still finish when unroughed.
         if (
           opts.roughingEnabled &&
           job.scrap?.(pt.x, pt.y) &&
-          materialLevelAt(pt.x, pt.y) <= z + Math.max(0.5, opts.roughingAllowanceMm) + 0.5
+          (!outsideRoughWin(pt.x, pt.y) ||
+            materialLevelAt(pt.x, pt.y) <= z + Math.max(0.5, opts.roughingAllowanceMm) + 0.5)
         ) {
           return { x: pt.x, y: pt.y, z: 0 };
         }
@@ -365,6 +380,337 @@ export function finishSurface(
    * go. Where nothing held the body up, a layer is one sweep, as it always was.
    */
   const hold = bodyHold(w.stock, surface, finishBody);
+
+  // Local rest-cleanup stepdown for unroughed corners, narrow valleys and the
+  // outer stock border left by a larger roughing cutter. Unroughed runs are
+  // grouped into spatial patches (connected within `linkMaxMm`) and each patch
+  // is stepped down locally layer-by-layer with surface linking, avoiding both
+  // full-depth plunges and layer-by-layer flights across the stock.
+  if (restLayering) {
+    const restStepdown = autoStepdown;
+    // Allow normal roughing allowance + curved-flank scallops (up to 2x stepdown)
+    // to finish in the main sweep, while stepping down genuine unroughed corners,
+    // valleys, and outer stock borders in `restStepdown` increments.
+    const restThreshold = Math.max(opts.roughingAllowanceMm + 0.25, restStepdown * 2);
+    // Check near the tool axis (within a stock cell / quarter radius) inside the
+    // roughing window so unroughed inside corners and narrow valleys are caught
+    // without triggering on the thin straight/convex wall skin left by roughing.
+    const restCheckRad = Math.max(0.05, Math.min(w.stock.cell, finishRad * 0.25));
+
+    interface RestPt {
+      x: number;
+      y: number;
+      targetZ: number;
+      standingZ: number;
+    }
+    interface RestRun {
+      pts: RestPt[];
+      minX: number;
+      minY: number;
+      maxX: number;
+      maxY: number;
+    }
+    const restRuns: RestRun[] = [];
+    for (let g = 0; g < placed.length; g++) {
+      for (let k = 0; k < placed[g].length; k++) {
+        const plan = placed[g][k];
+        let stretch: RestPt[] = [];
+        let startIdx = 0;
+        const flushStretch = (endIdx: number) => {
+          if (stretch.length === 0) return;
+          if (stretch.length === 1 && plan.length >= 2) {
+            const p = stretch[0];
+            const prev = startIdx > 0 ? plan[startIdx - 1] : null;
+            const next = endIdx < plan.length ? plan[endIdx] : null;
+            const expanded: RestPt[] = [];
+            if (prev) {
+              const mx = (prev.x + p.x) / 2, my = (prev.y + p.y) / 2;
+              expanded.push({ x: mx, y: my, targetZ: Math.max(p.targetZ, finishZAt(mx, my, p.targetZ)), standingZ: p.standingZ });
+            }
+            expanded.push(p);
+            if (next) {
+              const mx = (p.x + next.x) / 2, my = (p.y + next.y) / 2;
+              expanded.push({ x: mx, y: my, targetZ: Math.max(p.targetZ, finishZAt(mx, my, p.targetZ)), standingZ: p.standingZ });
+            }
+            stretch = expanded;
+          }
+          let len = 0;
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+          for (let i = 0; i < stretch.length; i++) {
+            const p = stretch[i];
+            if (p.x < minX) minX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.x > maxX) maxX = p.x;
+            if (p.y > maxY) maxY = p.y;
+            if (i > 0) len += Math.hypot(p.x - stretch[i - 1].x, p.y - stretch[i - 1].y);
+          }
+          if (len >= res * 0.5 - 1e-6) restRuns.push({ pts: stretch, minX, minY, maxX, maxY });
+          stretch = [];
+        };
+        for (let i = 0; i < plan.length; i++) {
+          const pt = plan[i];
+          const targetZ = Math.min(0, Math.max(floorZ, pt.z));
+          let needsRest = false;
+          let standingZ = -Infinity;
+          if (targetZ < -1e-6) {
+            const outside = outsideRoughWin(pt.x, pt.y);
+            const rad = outside ? finishRad : restCheckRad;
+            standingZ = Math.min(0, w.stock.highestUnder(pt.x, pt.y, rad, w.cutter.profile));
+            needsRest = standingZ - targetZ > restThreshold;
+          }
+          if (needsRest) {
+            if (stretch.length === 0) startIdx = i;
+            stretch.push({ x: pt.x, y: pt.y, targetZ, standingZ });
+          } else {
+            flushStretch(i);
+          }
+        }
+        flushStretch(plan.length);
+      }
+    }
+
+    if (restRuns.length > 0) {
+      w.gcode.push(`; rest-cleanup stepdown (${restStepdown.toFixed(2)} mm) for unroughed corners/border`);
+      // Union-Find to group nearby rest runs (with actual points within linkMaxMm)
+      // into local patches. Using point distance (after bbox reject) prevents a
+      // curved arc's bounding box from merging distant corners into one patch.
+      const parent = new Int32Array(restRuns.length);
+      for (let i = 0; i < restRuns.length; i++) parent[i] = i;
+      const find = (a: number): number => {
+        while (parent[a] !== a) {
+          parent[a] = parent[parent[a]];
+          a = parent[a];
+        }
+        return a;
+      };
+      const pad = linkMaxMm;
+      const padSq = pad * pad;
+      const maxPatchMm = 3 * linkMaxMm;
+      const pMinX = Float64Array.from(restRuns, (r) => r.minX);
+      const pMinY = Float64Array.from(restRuns, (r) => r.minY);
+      const pMaxX = Float64Array.from(restRuns, (r) => r.maxX);
+      const pMaxY = Float64Array.from(restRuns, (r) => r.maxY);
+      const runsClose = (a: RestRun, b: RestRun): boolean => {
+        if (a.maxX + pad < b.minX || b.maxX + pad < a.minX || a.maxY + pad < b.minY || b.maxY + pad < a.minY) {
+          return false;
+        }
+        const sa = Math.max(1, Math.floor(a.pts.length / 8));
+        const sb = Math.max(1, Math.floor(b.pts.length / 8));
+        for (let ia = 0; ia < a.pts.length; ia += sa) {
+          const pa = a.pts[ia];
+          for (let ib = 0; ib < b.pts.length; ib += sb) {
+            const pb = b.pts[ib];
+            const dx = pa.x - pb.x, dy = pa.y - pb.y;
+            if (dx * dx + dy * dy <= padSq) return true;
+          }
+        }
+        return false;
+      };
+      for (let i = 0; i < restRuns.length; i++) {
+        const a = restRuns[i];
+        for (let j = i + 1; j < restRuns.length; j++) {
+          const ra = find(i), rb = find(j);
+          if (ra === rb || !runsClose(a, restRuns[j])) continue;
+          const nMinX = Math.min(pMinX[ra], pMinX[rb]);
+          const nMaxX = Math.max(pMaxX[ra], pMaxX[rb]);
+          const nMinY = Math.min(pMinY[ra], pMinY[rb]);
+          const nMaxY = Math.max(pMaxY[ra], pMaxY[rb]);
+          if (nMaxX - nMinX <= maxPatchMm && nMaxY - nMinY <= maxPatchMm) {
+            parent[rb] = ra;
+            pMinX[ra] = nMinX;
+            pMaxX[ra] = nMaxX;
+            pMinY[ra] = nMinY;
+            pMaxY[ra] = nMaxY;
+          }
+        }
+      }
+      const patchMap = new Map<number, RestRun[]>();
+      for (let i = 0; i < restRuns.length; i++) {
+        const r = find(i);
+        let list = patchMap.get(r);
+        if (!list) {
+          list = [];
+          patchMap.set(r, list);
+        }
+        list.push(restRuns[i]);
+      }
+      const patches = Array.from(patchMap.values());
+      const usedPatch = new Uint8Array(patches.length);
+
+      for (let pi = 0; pi < patches.length; pi++) {
+        let bestP = -1;
+        let bestPD = Infinity;
+        for (let i = 0; i < patches.length; i++) {
+          if (usedPatch[i]) continue;
+          const rep = patches[i][0].pts[0];
+          const d = Math.hypot(rep.x - w.atX, rep.y - w.atY);
+          if (d < bestPD) {
+            bestPD = d;
+            bestP = i;
+          }
+        }
+        if (bestP < 0) break;
+        usedPatch[bestP] = 1;
+        const patch = patches[bestP];
+
+        let topZ = -Infinity;
+        let botZ = 0;
+        for (const run of patch) {
+          for (const p of run.pts) {
+            if (p.standingZ > topZ) topZ = p.standingZ;
+            if (p.targetZ < botZ) botZ = p.targetZ;
+          }
+        }
+
+        let down = false;
+        let prevStepZ = topZ;
+        for (let limit = topZ - restStepdown; limit > botZ + 1e-6; limit -= restStepdown) {
+          const layerSubs: PathPoint[][] = [];
+          for (const run of patch) {
+            let cur: PathPoint[] = [];
+            let curStart = 0;
+            const flushSub = (endIdx: number) => {
+              if (cur.length === 0) return;
+              if (cur.length === 1 && run.pts.length >= 2) {
+                const p = cur[0];
+                const prev = curStart > 0 ? run.pts[curStart - 1] : null;
+                const next = endIdx < run.pts.length ? run.pts[endIdx] : null;
+                const exp: PathPoint[] = [];
+                if (prev) {
+                  const mx = (prev.x + p.x) / 2, my = (prev.y + p.y) / 2;
+                  const mz = Math.max(p.z, finishZAt(mx, my, p.z));
+                  exp.push({ x: mx, y: my, z: hold ? Math.min(0, Math.max(mz, hold(mx, my, mz))) : mz });
+                }
+                exp.push(p);
+                if (next) {
+                  const mx = (p.x + next.x) / 2, my = (p.y + next.y) / 2;
+                  const mz = Math.max(p.z, finishZAt(mx, my, p.z));
+                  exp.push({ x: mx, y: my, z: hold ? Math.min(0, Math.max(mz, hold(mx, my, mz))) : mz });
+                }
+                cur = exp;
+              }
+              let len = 0;
+              for (let i = 1; i < cur.length; i++) {
+                len += Math.hypot(cur[i].x - cur[i - 1].x, cur[i].y - cur[i - 1].y);
+              }
+              if (len >= res * 0.5 - 1e-6) layerSubs.push(cur);
+              cur = [];
+            };
+            for (let i = 0; i < run.pts.length; i++) {
+              const p = run.pts[i];
+              if (p.standingZ > limit + 1e-6 && p.targetZ < limit - 1e-6) {
+                if (cur.length === 0) curStart = i;
+                const z = hold ? Math.min(0, Math.max(limit, hold(p.x, p.y, limit))) : limit;
+                cur.push({ x: p.x, y: p.y, z });
+              } else {
+                flushSub(i);
+              }
+            }
+            flushSub(run.pts.length);
+          }
+
+          const usedSub = new Uint8Array(layerSubs.length);
+          for (let n = 0; n < layerSubs.length; n++) {
+            let best = -1;
+            let bestRev = false;
+            let bestD = Infinity;
+            for (let i = 0; i < layerSubs.length; i++) {
+              if (usedSub[i]) continue;
+              const s = layerSubs[i];
+              const d0 = Math.hypot(s[0].x - w.atX, s[0].y - w.atY);
+              const d1 = Math.hypot(s[s.length - 1].x - w.atX, s[s.length - 1].y - w.atY);
+              if (d0 < bestD) {
+                bestD = d0;
+                best = i;
+                bestRev = false;
+              }
+              if (d1 < bestD) {
+                bestD = d1;
+                best = i;
+                bestRev = true;
+              }
+            }
+            if (best < 0) break;
+            usedSub[best] = 1;
+            const sub = bestRev ? [...layerSubs[best]].reverse() : layerSubs[best];
+
+            let cuts = false;
+            for (let i = 1; i < sub.length && !cuts; i++) {
+              const a = sub[i - 1], b = sub[i];
+              if (w.stock.deepestCut(a.x, a.y, a.z, b.x, b.y, b.z, w.cutter.radius, w.cutter.profile) > 0.02) {
+                cuts = true;
+              }
+            }
+            if (!cuts) continue;
+
+            let pass = simplifyPass(squareUpWalls(sub), PATH_SIMPLIFY_MM);
+            finishingRasterLines++;
+            const head = pass[0];
+
+            // Link directly across the surface when close and within the rest stepdown.
+            let link: PathPoint[] | null = null;
+            const gap = Math.hypot(head.x - w.atX, head.y - w.atY);
+            if (down && gap <= linkMaxMm) {
+              const steps = Math.max(1, Math.ceil(gap / res));
+              const pts: PathPoint[] = [];
+              for (let i = 1; i < steps; i++) {
+                const x = w.atX + ((head.x - w.atX) * i) / steps;
+                const y = w.atY + ((head.y - w.atY) * i) / steps;
+                const z0 = finishZAt(x, y, limit);
+                const z = hold ? Math.min(0, Math.max(z0, hold(x, y, z0))) : z0;
+                pts.push({ x, y, z });
+              }
+              pts.push({ x: head.x, y: head.y, z: head.z });
+              const candidate = simplifyPass(squareUpWalls([{ x: w.atX, y: w.atY, z: w.atZ }, ...pts]), PATH_SIMPLIFY_MM);
+              let ok = true;
+              for (let i = 1; i < candidate.length && ok; i++) {
+                const a = candidate[i - 1], b = candidate[i];
+                ok =
+                  w.stock.deepestCut(a.x, a.y, a.z, b.x, b.y, b.z, w.cutter.radius, w.cutter.profile, restCheckRad) <= restStepdown;
+              }
+              if (hold) ok = ok && candidate.every((p) => hold(p.x, p.y, p.z) <= p.z + 1e-6);
+              if (ok) link = candidate;
+            }
+
+            let linkRate = 0;
+            if (link) {
+              for (let i = 1; i < link.length; i++) {
+                const p = link[i], prev = link[i - 1];
+                const drop = p.z < prev.z - 1e-6 && Math.hypot(p.x - prev.x, p.y - prev.y) < 1e-6;
+                linkRate = drop ? opts.finishingPlungeRate : opts.finishingFeedrate;
+                w.cutTo(p.x, p.y, p.z);
+                w.gcode.push(`G1 X${f(p.x)} Y${f(p.y)} Z${f(p.z)} F${Math.round(linkRate)}`);
+              }
+            } else {
+              const fromHere =
+                down &&
+                Math.hypot(head.x - w.atX, head.y - w.atY) < 1e-6 &&
+                w.atZ >= head.z - 1e-6;
+              pass = w.leadIn(pass, Math.min(0, prevStepZ), opts.finishingPlungeRate, opts.finishingFeedrate, fromHere);
+            }
+
+            let rate = link ? linkRate : 0;
+            for (let i = 1; i < pass.length; i++) {
+              const p = pass[i];
+              const prev = pass[i - 1];
+              const drop = p.z < prev.z - 1e-6 && Math.hypot(p.x - prev.x, p.y - prev.y) < 1e-6;
+              const want = drop ? opts.finishingPlungeRate : opts.finishingFeedrate;
+              w.cutTo(p.x, p.y, p.z);
+              w.gcode.push(`G1 X${f(p.x)} Y${f(p.y)} Z${f(p.z)}${want !== rate ? ` F${Math.round(want)}` : ''}`);
+              rate = want;
+            }
+            down = true;
+            w.segments.push({
+              type: 'finishing',
+              points: link ? [...link.slice(0, -1), ...pass] : pass,
+              traverseZ: link ? link[0].z : w.lastTraverseZ,
+            });
+          }
+          prevStepZ = limit;
+        }
+      }
+    }
+  }
   /*
    * Whether the body could meet anything here at all, from what roughing and
    * the layer above left (`materialLevelAt`, the previous limit) rather than

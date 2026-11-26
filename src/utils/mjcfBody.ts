@@ -1,5 +1,7 @@
 import type { SceneGeom, SceneJoint, SceneNode } from '../types/scene';
-import { isNodeRotationBaked } from './sceneTree';
+import { isNodeRotationBaked, quatRotateVecInv, type QuatWXYZ } from './sceneTree';
+import { restPoses } from './sceneCouplings';
+import { canCrumple } from './breakThresholds';
 import { geomSizeProblem } from './geomSize';
 import { geomFriction } from './contactFriction';
 import { clutchDriverBodyXml, isClutchedMotor } from './motorClutch';
@@ -167,8 +169,9 @@ const buildJoint = (joint: SceneJoint) => {
   if (joint.frictionloss) attrs += ` frictionloss="${joint.frictionloss}" solimpfriction="0.9999 0.9999 0.001 0.5 2"`;
   // A crumple's travel is its range: it is held rigid by its lock until that
   // gives, and then it may fold this far and no further.
-  const range = joint.range ?? joint.crumpleRangeDeg;
-  const limited = joint.limited ?? (joint.crumpleRangeDeg ? true : undefined);
+  const crumpleRange = canCrumple(joint) ? joint.crumpleRangeDeg : undefined;
+  const range = crumpleRange ?? joint.range;
+  const limited = crumpleRange ? true : joint.limited;
   if (limited !== undefined) attrs += ` limited="${limited}"`;
   if (range !== undefined) attrs += ` range="${range.join(' ')}"`;
   // Steel end stops: a stiff, near-rigid limit, its time constant a few of
@@ -177,23 +180,29 @@ const buildJoint = (joint: SceneJoint) => {
   return `<joint ${attrs} />`;
 };
 
-export type WorldPosMap = Map<string, [number, number, number]>;
+export interface WorldPoseEntry {
+  pos: [number, number, number];
+  quat: QuatWXYZ;
+}
 
-/** Collect world-space positions (by node id and name) for anchored composite sag geometry. */
+export type WorldPosMap = Map<string, WorldPoseEntry>;
+
+/** Collect world-space poses (by node id and name) for anchored composite sag geometry. */
 export function collectWorldPositions(nodes: SceneNode[]): WorldPosMap {
+  const posesById = restPoses(nodes);
   const map: WorldPosMap = new Map();
-  const walk = (list: SceneNode[] | undefined, ox: number, oy: number, oz: number) => {
+  const walk = (list: SceneNode[] | undefined) => {
     for (const n of list || []) {
-      const x = ox + (n.pos?.[0] ?? 0);
-      const y = oy + (n.pos?.[1] ?? 0);
-      const z = oz + (n.pos?.[2] ?? 0);
-      const pt: [number, number, number] = [x, y, z];
-      if (n.id) map.set(n.id, pt);
-      if (n.name) map.set(n.name, pt);
-      walk(n.children, x, y, z);
+      const pose = posesById[n.id];
+      if (pose) {
+        const entry: WorldPoseEntry = { pos: pose.pos, quat: pose.quat };
+        if (n.id) map.set(n.id, entry);
+        if (n.name) map.set(n.name, entry);
+      }
+      walk(n.children);
     }
   };
-  walk(nodes, 0, 0, 0);
+  walk(nodes);
   return map;
 }
 
@@ -201,29 +210,36 @@ export function collectWorldPositions(nodes: SceneNode[]): WorldPosMap {
  * Build a sagging parabolic vertex list from `start` to `end` whose piecewise-linear
  * arc length matches `targetLength` (when `targetLength > span`), so increasing a
  * welded cable's length sags smoothly between both anchors instead of jutting past
- * the far anchor.
+ * the far anchor. Vertices are emitted in `start`'s local frame so rotated cables
+ * (or cables under rotated parents) still land `B_last` on `end` and sag along world -Z.
  */
 function buildSlackCableVertices(
-  start: [number, number, number],
+  start: WorldPoseEntry,
   end: [number, number, number],
   vertexCount: number,
   targetLength: number,
 ): string | null {
-  const dx = end[0] - start[0];
-  const dy = end[1] - start[1];
-  const dz = end[2] - start[2];
-  const span = Math.hypot(dx, dy, dz);
+  const worldDelta: [number, number, number] = [
+    end[0] - start.pos[0],
+    end[1] - start.pos[1],
+    end[2] - start.pos[2],
+  ];
+  const span = Math.hypot(worldDelta[0], worldDelta[1], worldDelta[2]);
   if (!(span > 1e-4) || !Number.isFinite(targetLength) || targetLength <= span + 1e-4) return null;
   const n = Math.max(3, Math.floor(vertexCount));
+
+  const [dx, dy, dz] = quatRotateVecInv(start.quat, worldDelta);
+  const [gx, gy, gz] = quatRotateVecInv(start.quat, [0, 0, -1]);
 
   const arcLen = (sag: number): number => {
     let total = 0;
     let px = 0, py = 0, pz = 0;
     for (let i = 1; i < n; i++) {
       const t = i / (n - 1);
-      const x = t * dx;
-      const y = t * dy;
-      const z = t * dz - 4 * sag * t * (1 - t);
+      const drop = 4 * sag * t * (1 - t);
+      const x = t * dx + drop * gx;
+      const y = t * dy + drop * gy;
+      const z = t * dz + drop * gz;
       total += Math.hypot(x - px, y - py, z - pz);
       px = x; py = y; pz = z;
     }
@@ -241,9 +257,10 @@ function buildSlackCableVertices(
   const coords: string[] = [];
   for (let i = 0; i < n; i++) {
     const t = i / (n - 1);
-    const x = t * dx;
-    const y = t * dy;
-    const z = t * dz - 4 * sag * t * (1 - t);
+    const drop = 4 * sag * t * (1 - t);
+    const x = t * dx + drop * gx;
+    const y = t * dy + drop * gy;
+    const z = t * dz + drop * gz;
     coords.push(x.toFixed(5), y.toFixed(5), z.toFixed(5));
   }
   return coords.join(' ');
@@ -316,11 +333,11 @@ export const buildNode = (node: SceneNode, worldPositions?: WorldPosMap): string
       : (geom?.size ? geom.size.join(' ') : '0.02');
     const geomRgba = geom?.rgba ? geom.rgba.join(' ') : '0.8 0.4 0.2 1';
 
-    const startPos = worldPositions?.get(node.id) ?? (node.name ? worldPositions?.get(node.name) : undefined);
-    const endPos = node.weldLastToId ? worldPositions?.get(node.weldLastToId) : undefined;
+    const startPose = worldPositions?.get(node.id) ?? (node.name ? worldPositions?.get(node.name) : undefined);
+    const endPose = node.weldLastToId ? worldPositions?.get(node.weldLastToId) : undefined;
     const targetLen = parseFloat(size);
-    const slackVertices = startPos && endPos
-      ? buildSlackCableVertices(startPos, endPos, clampedCount, targetLen)
+    const slackVertices = startPose && endPose
+      ? buildSlackCableVertices(startPose, endPose.pos, clampedCount, targetLen)
       : null;
 
     const compositeXml = slackVertices

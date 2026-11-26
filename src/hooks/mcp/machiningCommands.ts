@@ -333,7 +333,17 @@ export const machiningCommands: McpCommands = {
         if (!result.success || !result.stockTransform) {
           return { ok: false, error: result.error || 'The machining program could not be generated.', warnings: result.warnings ?? [] };
         }
-        if (msg.stage !== undefined) return addMcpSimulationSteps(result, options, msg.stage);
+        if (msg.stage !== undefined) {
+          const staged = await addMcpSimulationSteps(result, options, msg.stage);
+          if (staged.ok && msg.placement === 'overlay') {
+            const overlayNote = "Staged machining replay uses 'beside' placement (ignoring placement: 'overlay').";
+            return {
+              ...staged,
+              note: 'note' in staged && staged.note ? `${staged.note} ${overlayNote}` : overlayNote,
+            };
+          }
+          return staged;
+        }
         const added = await addSimulationToScene({
           job: {
             gcode: result.sides[0].gcode,

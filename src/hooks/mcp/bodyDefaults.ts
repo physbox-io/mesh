@@ -33,7 +33,7 @@ import { tuneMembraneToPitch } from '../../utils/membraneAcoustics';
 import { tuneResonatorTubeToPitch } from '../../utils/resonatorAcoustics';
 import { geomSizeProblem } from '../../utils/geomSize';
 import { withoutNulls } from '../../utils/withoutNulls';
-import { applyFlexureToNode, type FlexureDesignInput } from '../../utils/flexure';
+import { applyFlexureToNode, validateFlexureInput, type FlexureDesignInput } from '../../utils/flexure';
 import { clampBodyForm } from '../../utils/cloth/bodyForm';
 import type { BodyFormMeasurements } from '../../types/cloth';
 
@@ -690,6 +690,7 @@ export const fillBodyDefaults = (
       : null;
 
   const bodyRgba = normalizeRgba(b.rgba);
+  const joinMat = b.joinMaterial ? joinMaterial(b.joinMaterial) : undefined;
 
   // Synthesize single geom when body-level geom properties are supplied without `geoms`
   const synthesizedSingleGeom: RawGeom[] = b.scad !== undefined
@@ -707,7 +708,34 @@ export const fillBodyDefaults = (
         ...(bAny.solref !== undefined ? { solref: bAny.solref } : {}),
         ...(bAny.solimp !== undefined ? { solimp: bAny.solimp } : {}),
       }]
-    : [{
+    : joinMat
+      ? [{
+          type: (bAny.type && bAny.type !== 'body') ? bAny.type : 'ellipsoid',
+          size: bAny.size !== undefined ? bAny.size : [0.006, 0.006, 0.006],
+          rgba: bodyRgba ?? [...joinMat.rgba],
+          ...(bAny.mass !== undefined ? { mass: bAny.mass } : { density: bAny.density !== undefined ? bAny.density : joinMat.density }),
+          ...(bAny.friction !== undefined ? { friction: bAny.friction } : {}),
+          ...(bAny.contype !== undefined ? { contype: bAny.contype } : {}),
+          ...(bAny.conaffinity !== undefined ? { conaffinity: bAny.conaffinity } : {}),
+          ...(bAny.condim !== undefined ? { condim: bAny.condim } : {}),
+          ...(bAny.solref !== undefined ? { solref: bAny.solref } : {}),
+          ...(bAny.solimp !== undefined ? { solimp: bAny.solimp } : {}),
+        }]
+      : b.isComposite
+        ? [{
+            type: (bAny.type && bAny.type !== 'body') ? bAny.type : 'capsule',
+            size: bAny.size !== undefined ? bAny.size : [0.012],
+            rgba: bodyRgba ?? [0.76, 0.56, 0.34, 1],
+            ...(bAny.mass !== undefined ? { mass: bAny.mass } : {}),
+            ...(bAny.density !== undefined ? { density: bAny.density } : {}),
+            ...(bAny.friction !== undefined ? { friction: bAny.friction } : {}),
+            ...(bAny.contype !== undefined ? { contype: bAny.contype } : {}),
+            ...(bAny.conaffinity !== undefined ? { conaffinity: bAny.conaffinity } : {}),
+            ...(bAny.condim !== undefined ? { condim: bAny.condim } : {}),
+            ...(bAny.solref !== undefined ? { solref: bAny.solref } : {}),
+            ...(bAny.solimp !== undefined ? { solimp: bAny.solimp } : {}),
+          }]
+        : [{
         type: (bAny.type && bAny.type !== 'body') ? bAny.type : 'box',
         ...(bAny.size !== undefined ? { size: bAny.size } : {}),
         ...(bodyRgba !== undefined ? { rgba: bodyRgba } : {}),
@@ -891,9 +919,17 @@ export const fillBodyDefaults = (
       out = applyTuneTo(node, spec);
       if (node.acousticString || node.acousticMembrane) retuneWithScene.set(out, spec);
     }
-    if (isPlainObject(bAny.flexure)) {
+    if (bAny.flexure !== undefined && bAny.flexure !== null) {
+      if (!isPlainObject(bAny.flexure)) {
+        throw new Error(`Body '${out.name || out.id}': flexure must be a plain object.`);
+      }
+      const flexureErr = validateFlexureInput(out, bAny.flexure);
+      if (flexureErr) throw new Error(flexureErr);
       const applied = applyFlexureToNode(out, bAny.flexure as FlexureDesignInput);
-      if (applied) out = applied.node;
+      if (!applied) {
+        throw new Error(`Body '${out.name || out.id}': flexure requires a 'hinge' or 'slide' joint on the body.`);
+      }
+      out = applied.node;
     }
     checkIncomingBody(out, resolvedJoints.length > 0);
     if (declarativeOps) opsMap.set(id, declarativeOps);

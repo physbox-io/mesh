@@ -43,6 +43,7 @@ import { normalizeRgba, pendingDeclarativeOps, type PendingDeclarativeOps } from
  * inner race, a stepper's shaft.
  */
 export function movingPieceOf(part: SceneNode): SceneNode | null {
+  if (part.hardwarePart?.piece || part.hardwarePart?.kind === 'vslot_carriage') return part;
   const pieces: SceneNode[] = [];
   const walk = (n: SceneNode) => { for (const c of n.children || []) if (c.hardwarePart?.piece) { pieces.push(c); walk(c); } };
   walk(part);

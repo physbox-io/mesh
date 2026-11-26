@@ -113,11 +113,12 @@ function buildStepper(node: SceneNode, p: HardwarePart, id: string) {
   const rotorMass = (2 * rotorI) / (rotorR * rotorR);
   const body = boxGeom(`${id}_body`, [mm(w / 2), mm(w / 2), mm(len / 2)], [0, 0, -mm(len / 2)], BLACK_OXIDE);
   body.mass = mass;
+  const pilotR = p.size.startsWith('NEMA23') ? 19.05 : 11;
   node.geoms = [
     body,
     // The aluminium end caps and the pilot boss, drawn.
     visual(boxGeom(`${id}_cap`, [mm(w / 2 + 0.1), mm(w / 2 + 0.1), mm(4)], [0, 0, -mm(4)], BRIGHT)),
-    visual(cylinderGeom(`${id}_pilot`, mm(11), mm(2), mm(1), BRIGHT)),
+    visual(cylinderGeom(`${id}_pilot`, mm(pilotR), mm(2), mm(1), BRIGHT)),
   ];
   node.children = [{
     id: `${id}_shaft`, name: `${p.size} shaft`, type: 'body', pos: [0, 0, 0],

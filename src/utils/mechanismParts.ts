@@ -1782,7 +1782,9 @@ export function buildCamProfile(spec: CamSpec = {}): CamProfileResult {
   for (let i = 0; i < samples; i++) {
     const a = (i / samples) * 2 * Math.PI;
     const r = baseRadiusMm + displacementAtAngle(a);
-    outline.push([+(r * Math.cos(a)).toFixed(6), +(r * Math.sin(a)).toFixed(6)]);
+    // Align a = 0 (zero displacement) with +Y (π/2) where the follower roller rides.
+    const phi = a + Math.PI / 2;
+    outline.push([+(r * Math.cos(phi)).toFixed(6), +(r * Math.sin(phi)).toFixed(6)]);
   }
 
   const bore = buildBoreLoop(boreKind, boreDiameterMm, baseRadiusMm * 0.75);
@@ -1911,7 +1913,34 @@ export function buildCamMechanism(spec: CamSpec = {}): CamMechanismResult {
   const stemLengthMm = Math.max(30, profile.liftMm * 3);
   const rollerRadiusMm = 4;
   const stemHalfWidthMm = 2.5;
-  const followerStartYMm = profile.baseRadiusMm + rollerRadiusMm;
+  // Minimum Y for a roller of radius rollerRadiusMm centered on x = 0 so it
+  // starts tangent to (never penetrating) any vertex or edge of the cam outline.
+  let minRollerYMm = profile.baseRadiusMm + rollerRadiusMm;
+  const nPts = profile.outline.length;
+  for (let i = 0; i < nPts; i++) {
+    const [px, py] = profile.outline[i];
+    if (Math.abs(px) < rollerRadiusMm) {
+      const yV = py + Math.sqrt(rollerRadiusMm * rollerRadiusMm - px * px);
+      if (yV > minRollerYMm) minRollerYMm = yV;
+    }
+    const [qx, qy] = profile.outline[(i + 1) % nPts];
+    const dx = qx - px;
+    const dy = qy - py;
+    const segLen = Math.hypot(dx, dy);
+    if (segLen > 1e-9) {
+      // Outward unit normal for anticlockwise outline
+      const nx = dy / segLen;
+      const ny = -dx / segLen;
+      if (ny > 1e-6) {
+        const yE = (nx * px + ny * py + rollerRadiusMm) / ny;
+        const tx = -nx * rollerRadiusMm;
+        const ty = yE - ny * rollerRadiusMm;
+        const u = ((tx - px) * dx + (ty - py) * dy) / (segLen * segLen);
+        if (u >= 0 && u <= 1 && yE > minRollerYMm) minRollerYMm = yE;
+      }
+    }
+  }
+  const followerStartYMm = minRollerYMm + 0.05;
   // The return spring: its rest point sits a full lift below the base circle,
   // so it pushes the roller onto the cam over the whole stroke.
   const springNPerM = 60;
@@ -2187,6 +2216,9 @@ export interface FourBarResult {
   /** The top-level bodies: ground, crank (carrying the coupler) and rocker. */
   nodes: [SceneNode, SceneNode, SceneNode];
   metrics: FourBarMetrics;
+  linkWidthMm: number;
+  thicknessMm: number;
+  pinDiameterMm: number;
 }
 
 /**
@@ -2210,7 +2242,7 @@ export function buildFourBarLinkage(
     : [mm(-metrics.groundMm / 2), 0, mm(thicknessMm * 2 + 10)];
 
   const makeLinkBody = (
-    prefix: string,
+    id: string,
     name: string,
     startXY: [number, number],
     endXY: [number, number],
@@ -2218,7 +2250,6 @@ export function buildFourBarLinkage(
     rgba: [number, number, number, number],
     jointSpec: SceneJoint | null,
   ): SceneNode => {
-    const id = makeId(prefix);
     const dx = endXY[0] - startXY[0];
     const dy = endXY[1] - startXY[1];
     const lenMm = Math.hypot(dx, dy);
@@ -2267,8 +2298,9 @@ export function buildFourBarLinkage(
     };
   };
 
+  const groundId = makeId('fourbar_ground');
   const groundNode = makeLinkBody(
-    'fourbar_ground',
+    groundId,
     `4-Bar Ground (${metrics.groundMm} mm)`,
     A,
     D,
@@ -2303,7 +2335,6 @@ export function buildFourBarLinkage(
         : {}),
     },
   );
-  crankNode.id = crankId;
 
   const couplerId = makeId('fourbar_coupler');
   const couplerNode = makeLinkBody(
@@ -2321,7 +2352,6 @@ export function buildFourBarLinkage(
       damping: 0.001,
     },
   );
-  couplerNode.id = couplerId;
   // Hung off the crank, so its hinge at B rides on the crank's end. Built as a
   // top-level body it was hinged to the world at B, and the loop pulled apart
   // as soon as the crank turned. Positions are in the parent's frame, and no
@@ -2347,7 +2377,6 @@ export function buildFourBarLinkage(
       damping: 0.002,
     },
   );
-  rockerNode.id = rockerId;
 
   // Close the 4-bar loop at pin C using MuJoCo's <connect> equality constraint
   const pinCWorld: [number, number, number] = [
@@ -2365,5 +2394,8 @@ export function buildFourBarLinkage(
     rockerNode,
     nodes: [groundNode, crankNode, rockerNode],
     metrics,
+    linkWidthMm: widthMm,
+    thicknessMm,
+    pinDiameterMm,
   };
 }

@@ -244,12 +244,15 @@ export function crumpleKey(jointName: string): string {
 
 /** What a joint says about when it stops being rigid. */
 export interface CrumpleConfig {
+  type?: string;
   crumpleTorqueNm?: number;
   crumpleDampingAfter?: number;
 }
 
 export function canCrumple(cfg: CrumpleConfig | undefined): boolean {
-  return !!cfg && typeof cfg.crumpleTorqueNm === 'number'
+  if (!cfg) return false;
+  if (cfg.type !== undefined && cfg.type !== 'hinge') return false;
+  return typeof cfg.crumpleTorqueNm === 'number'
     && Number.isFinite(cfg.crumpleTorqueNm) && cfg.crumpleTorqueNm >= 0;
 }
 

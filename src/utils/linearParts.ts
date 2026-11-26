@@ -64,7 +64,7 @@ function buildRail(node: SceneNode, p: HardwarePart, id: string) {
     boxGeom(`${id}_rail`, [mm(L / 2), mm(w / 2), mm(h / 2)], [0, 0, mm(h / 2)], BRIGHT),
     ...Array.from({ length: holes }, (_, i) => visual(cylinderGeom(`${id}_hole${i}`, mm(3), mm(0.1), mm(h), [0.1, 0.1, 0.11, 1], { pos: [mm(first + i * pitch), 0, mm(h)] }))),
   ];
-  const travel = Math.max(0, (L - bl) / 2);
+  const travelM = +mm(Math.max(0, (L - bl) / 2)).toFixed(6);
   const top = bh - gap;
   node.children = [{
     id: `${id}_carriage`, name: `${p.size}H carriage`, type: 'body', pos: [0, 0, 0],
@@ -74,7 +74,7 @@ function buildRail(node: SceneNode, p: HardwarePart, id: string) {
       ...[[-1, -1], [-1, 1], [1, -1], [1, 1]].map(([sx, sy], i) =>
         visual(cylinderGeom(`${id}_tap${i}`, mm(1.5), mm(0.1), mm(bh), [0.1, 0.1, 0.11, 1], { pos: [mm(sx * bl * 0.22), mm(sy * bw * 0.3), mm(bh)] }))),
     ]),
-    joints: [slide(`${id}_travel`, [1, 0, 0], -mm(travel), mm(travel), 0.02)],
+    joints: travelM > 0 ? [slide(`${id}_travel`, [1, 0, 0], -travelM, travelM, 0.02)] : [],
     children: [],
     hardwarePart: { ...p, piece: 'carriage' },
   }];
@@ -85,11 +85,11 @@ function buildRod(node: SceneNode, p: HardwarePart, id: string) {
   const [od, bl] = LM_UU[p.size];
   const L = p.lengthMm!;
   node.geoms = [cylinderGeom(`${id}_rod`, mm(d / 2), mm(L), 0, BRIGHT)];
-  const travel = Math.max(0, (L - bl) / 2);
+  const travelM = +mm(Math.max(0, (L - bl) / 2)).toFixed(6);
   node.children = [{
     id: `${id}_carriage`, name: `LM${p.size}UU bushing`, type: 'body', pos: [0, 0, 0],
     geoms: silent([ringGeom(`${id}_bush`, mm(od / 2), mm(d / 2 + 0.5), mm(bl), 0, ZINC)]),
-    joints: [slide(`${id}_travel`, [0, 0, 1], -mm(travel), mm(travel), 0.02)],
+    joints: travelM > 0 ? [slide(`${id}_travel`, [0, 0, 1], -travelM, travelM, 0.02)] : [],
     children: [],
     hardwarePart: { ...p, piece: 'carriage' },
   }];

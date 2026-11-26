@@ -7,7 +7,7 @@
 // ---------------------------------------------------------------------------
 
 import type { SceneGraph, SceneNode } from '../types/scene';
-import { carriageRange, joinPose, meeting, type JoinKind } from '../utils/extrusionParts';
+import { CARRIAGE_REACH, carriageRange, joinPose, meeting, type JoinKind } from '../utils/extrusionParts';
 import { hardwarePartNode } from '../utils/hardwareParts';
 import { findNodeById } from '../utils/sceneTree';
 import type { PhysicsState } from './useStore';
@@ -80,6 +80,10 @@ export function extrusionActions({ set, get, clone }: Deps): ExtrusionActions {
       if (profile?.hardwarePart?.kind !== 'extrusion' || profile.hardwarePart.size !== '2020V') {
         return { problem: 'A wheel carriage runs on V-slot: select a V-slot 2020 profile.' };
       }
+      const lengthMm = profile.hardwarePart.lengthMm ?? 300;
+      if (lengthMm <= 2 * CARRIAGE_REACH) {
+        return { problem: `This V-slot profile is ${lengthMm} mm long; a wheel carriage needs more than ${2 * CARRIAGE_REACH} mm to run.` };
+      }
       get().prepareForDiscreteChange();
       const scene = clone(get().sceneGraph);
       const host = findNodeById(scene.nodes, profileId)!;
@@ -88,7 +92,7 @@ export function extrusionActions({ set, get, clone }: Deps): ExtrusionActions {
       part.pos = [0, 0, 0];
       part.joints = [{
         name: `${id}_slide`, type: 'slide', axis: [0, 0, 1], pos: [0, 0, 0],
-        limited: true, range: carriageRange(host.hardwarePart!.lengthMm ?? 300, 0), damping: 0.05,
+        limited: true, range: carriageRange(lengthMm, 0), damping: 0.05,
       }];
       quiet(part);
       host.children = [...(host.children || []), part];

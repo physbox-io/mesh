@@ -600,7 +600,7 @@ function scoreSplit(
   const undercut = new Array<number>(sides + 1).fill(0);
   const wedge = (2 * Math.PI) / sides;
   for (const s of samples) {
-    if (overBase && s.nz < -0.3 && overBase(s)) {
+    if (overBase && overBase(s)) {
       if (-s.nz < UNDERCUT_COS) undercut[sides] += s.area;
       continue;
     }
@@ -715,7 +715,7 @@ export function splitByVerticalPlanes(
  */
 function draftForPieces(
   wasm: ManifoldToplevel, m: Manifold, axis: [number, number], sides: number, theta: number, deg: number,
-  overBase: ((x: number, y: number, nz: number) => boolean) | null,
+  overBase: ((x: number, y: number, z: number, nz: number) => boolean) | null,
 ): Manifold {
   // Vertices on every parting line first, so the draft can leave them there.
   const raw = meshOf(m);
@@ -754,7 +754,7 @@ function draftForPieces(
     // The rim has no say: drafted down away from the parting, it folds its
     // edge over the wall below it, and the spare is over it anyway.
     if (nz > 0.7 && (P[ia + 2] + P[ib + 2] + P[ic + 2]) / 3 > rimZ) continue;
-    if (overBase && nz < -0.3 && overBase((P[ia] + P[ib] + P[ic]) / 3, (P[ia + 1] + P[ib + 1] + P[ic + 1]) / 3, nz)) continue;
+    if (overBase && overBase((P[ia] + P[ib] + P[ic]) / 3, (P[ia + 1] + P[ib + 1] + P[ic + 1]) / 3, (P[ia + 2] + P[ib + 2] + P[ic + 2]) / 3, nz)) continue;
     for (let q = 0; q < 3; q++) {
       const v = T[f + q];
       const bis = theta + (sectorOf[v] + 0.5) * wedge;
@@ -1386,7 +1386,9 @@ function build(
     fill = o.fillInside ? insideFill(wasm, part, zMin, zTop) : null;
     if (fill) filled = part.add(fill);
     const zBlockTop = zTop + Math.max(5, o.spareHeightMm);
-    const spareAt = o.spareAtMm && o.spareAtMm.every(Number.isFinite) ? o.spareAtMm : null;
+    const spareAt: [number, number] | null = o.spareAtMm && o.spareAtMm.every(Number.isFinite)
+      ? [foot[0] + (o.spareAtMm[0] - foot[0]) * scale, foot[1] + (o.spareAtMm[1] - foot[1]) * scale]
+      : null;
     // The inside itself: the fill less the part (a fill slab borrows the part's
     // outlines next to a filled slice, so it holds lumps of wall too).
     inside = fill ? fill.subtract(part) : null;
@@ -1427,7 +1429,39 @@ function build(
   // --- The split --------------------------------------------------------------
   const samples = surfaceSamples(filled);
   const plugContours = plugTop ? plugTop.toPolygons() : null;
-  const overBase = plugContours ? (s: SurfaceSample) => insideContours(plugContours, s.x, s.y) : null;
+  // Walled-in recesses over the base plug (e.g. a recessed foot ring) are
+  // molded by the base plug rather than the side pieces, so their steep/vertical
+  // inner walls must be scored against the base pull (-Z) and kept out of side draft.
+  const baseRecessBoxes: { min: [number, number, number]; max: [number, number, number] }[] = [];
+  if (plugTop && zTop > zPlug + 0.5) {
+    const prismRaw = plugTop.extrude(zTop - zPlug);
+    const prism = prismRaw.translate([0, 0, zPlug]);
+    const shrunk = plugTop.offset(-0.5, 'Round', 2, 32);
+    const innerPrismRaw = shrunk.isEmpty() ? null : shrunk.extrude(zTop + 2 - zPlug);
+    const innerPrism = innerPrismRaw ? innerPrismRaw.translate([0, 0, zPlug - 1]) : null;
+    const cavityOver = prism.subtract(filled);
+    for (const lump of cavityOver.decompose()) {
+      const lb = lump.boundingBox();
+      const outside = innerPrism ? lump.subtract(innerPrism) : null;
+      const walledIn = Boolean(innerPrism && lump.volume() > 1 && outside!.volume() < 1e-3 && lb.min[2] <= zPlug + 0.05 && lb.max[2] < zTop - 0.05);
+      free(outside);
+      if (walledIn) baseRecessBoxes.push({ min: [lb.min[0], lb.min[1], lb.min[2]], max: [lb.max[0], lb.max[1], lb.max[2]] });
+      free(lump);
+    }
+    free(prismRaw, prism, shrunk, innerPrismRaw, innerPrism, cavityOver);
+  }
+  const inBaseZone = plugContours
+    ? (x: number, y: number, z: number, nz: number) => {
+        if (!insideContours(plugContours, x, y)) return false;
+        if (nz < -0.3 && z <= zPlug + 1.0) return true;
+        return baseRecessBoxes.some(
+          (b) => x >= b.min[0] - 0.3 && x <= b.max[0] + 0.3
+            && y >= b.min[1] - 0.3 && y <= b.max[1] + 0.3
+            && z >= zMin - 0.1 && z <= b.max[2] + 0.3,
+        );
+      }
+    : null;
+  const overBase = inBaseZone ? (s: SurfaceSample) => inBaseZone(s.x, s.y, s.z, s.nz) : null;
   const split = chooseSplit(samples, axis, o.sides, overBase);
   const k = split.sides;
   const wedge = (2 * Math.PI) / k;
@@ -1441,7 +1475,7 @@ function build(
   if (draftDeg > 0) {
     let drafted: Manifold;
     try {
-      drafted = draftForPieces(wasm, filled, axis, k, split.theta, draftDeg, plugContours ? (x, y) => insideContours(plugContours, x, y) : null);
+      drafted = draftForPieces(wasm, filled, axis, k, split.theta, draftDeg, inBaseZone);
     } catch (err) {
       free(filled, sp.spare, plugTop);
       throw err;

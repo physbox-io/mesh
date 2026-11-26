@@ -202,27 +202,23 @@ function scaleGeomAlongSingleAxis(g: SceneGeom, axis: 0 | 1 | 2, lenScale: numbe
       next.size[1] = +(next.size[1] * lenScale).toFixed(6);
     }
   } else if (g.type === 'mesh') {
-    if (g.renderVertices) {
-      const rv = new Array<number>(g.renderVertices.length);
-      for (let i = 0; i + 2 < g.renderVertices.length; i += 3) {
-        rv[i] = axis === 0 ? +(g.renderVertices[i] * lenScale).toFixed(6) : g.renderVertices[i];
-        rv[i + 1] = axis === 1 ? +(g.renderVertices[i + 1] * lenScale).toFixed(6) : g.renderVertices[i + 1];
-        rv[i + 2] = axis === 2 ? +(g.renderVertices[i + 2] * lenScale).toFixed(6) : g.renderVertices[i + 2];
+    const scaleAxisVec = (src: number[], targetAxis: 0 | 1 | 2): number[] => {
+      const out = new Array<number>(src.length);
+      for (let i = 0; i + 2 < src.length; i += 3) {
+        out[i] = targetAxis === 0 ? +(src[i] * lenScale).toFixed(6) : src[i];
+        out[i + 1] = targetAxis === 1 ? +(src[i + 1] * lenScale).toFixed(6) : src[i + 1];
+        out[i + 2] = targetAxis === 2 ? +(src[i + 2] * lenScale).toFixed(6) : src[i + 2];
       }
-      next.renderVertices = rv;
-    }
-    if (g.vertices) {
-      // Three.js Y-up `vertices` corresponds to Z-up via (x_y, y_y, z_y) = (x_z, z_z, -y_z):
-      // Z-up X -> Y-up 0, Z-up Y -> Y-up 2, Z-up Z -> Y-up 1!
-      const yupAxis = axis === 0 ? 0 : axis === 1 ? 2 : 1;
-      const yv = new Array<number>(g.vertices.length);
-      for (let i = 0; i + 2 < g.vertices.length; i += 3) {
-        yv[i] = yupAxis === 0 ? +(g.vertices[i] * lenScale).toFixed(6) : g.vertices[i];
-        yv[i + 1] = yupAxis === 1 ? +(g.vertices[i + 1] * lenScale).toFixed(6) : g.vertices[i + 1];
-        yv[i + 2] = yupAxis === 2 ? +(g.vertices[i + 2] * lenScale).toFixed(6) : g.vertices[i + 2];
-      }
-      next.vertices = yv;
-    }
+      return out;
+    };
+    // Three.js Y-up (`vertices`, `baseVertices`) corresponds to Z-up via (x_y, y_y, z_y) = (x_z, z_z, -y_z):
+    // Z-up X -> Y-up 0, Z-up Y -> Y-up 2, Z-up Z -> Y-up 1!
+    const yupAxis: 0 | 1 | 2 = axis === 0 ? 0 : axis === 1 ? 2 : 1;
+    if (g.renderVertices) next.renderVertices = scaleAxisVec(g.renderVertices, axis);
+    if (g.colliderVertices) next.colliderVertices = scaleAxisVec(g.colliderVertices, axis);
+    if (g.baseRenderVertices) next.baseRenderVertices = scaleAxisVec(g.baseRenderVertices, axis);
+    if (g.vertices) next.vertices = scaleAxisVec(g.vertices, yupAxis);
+    if (g.baseVertices) next.baseVertices = scaleAxisVec(g.baseVertices, yupAxis);
   }
   return next;
 }
@@ -242,13 +238,9 @@ export function tuneWindInstrumentToPitch(
   const safeTargetHz = Number.isFinite(targetHzRaw) ? targetHzRaw : 261.63;
   const targetHz = Math.max(24, Math.min(3500, safeTargetHz));
 
-  // Autonomous compliant flap-valve (`flap_valve` / short sub-resonant whoopee nozzle):
+  // Autonomous compliant flap-valve (`flap_valve`):
   // oscillation pitch is governed directly by the valve's mechanical natural frequency `embouchureHz`!
-  const curBore = extractBoreWaveguide(node, jointPositions);
-  if (
-    spec.exciter === 'flap_valve' ||
-    (curBore && spec.embouchureHz < (curBore.resonantModesHz[0] ?? 500) * 0.45)
-  ) {
+  if (spec.exciter === 'flap_valve') {
     return {
       ...node,
       tunedPitchHz: +targetHz.toFixed(2),
@@ -259,6 +251,7 @@ export function tuneWindInstrumentToPitch(
     };
   }
 
+  const curBore = extractBoreWaveguide(node, jointPositions);
   if (!curBore) {
     return {
       ...node,
@@ -348,8 +341,8 @@ export function tuneWindInstrumentToPitch(
     return { scale: cs, node: cand, hz };
   };
 
-  // Iterative TMM refinement across nonlinear Norris-Sheng radiation impedance Z_rad & end corrections (<= ~2 cents)
-  const tolRel = 0.0012;
+  // Iterative TMM refinement across nonlinear Norris-Sheng radiation impedance Z_rad & end corrections (<= ~0.2 cents)
+  const tolRel = 0.0001;
   let p0 = evalCandidate(curHz / targetHz);
   if (Math.abs(p0.hz - targetHz) / targetHz > tolRel) {
     let p1 = evalCandidate(p0.scale * (p0.hz / targetHz));
@@ -370,7 +363,7 @@ export function tuneWindInstrumentToPitch(
       if ((p0.hz - targetHz) * (p1.hz - targetHz) < 0) {
         let lo = p0.hz > p1.hz ? p0 : p1;
         let hi = p0.hz > p1.hz ? p1 : p0;
-        for (let iter = 0; iter < 4; iter++) {
+        for (let iter = 0; iter < 6; iter++) {
           if (Math.abs(bestHz - targetHz) / targetHz <= tolRel) break;
           if (Math.abs(hi.scale - lo.scale) <= 1e-5) break;
           const denom = lo.hz - hi.hz;
@@ -392,7 +385,7 @@ export function tuneWindInstrumentToPitch(
           }
         }
       } else {
-        for (let iter = 0; iter < 2; iter++) {
+        for (let iter = 0; iter < 4; iter++) {
           if (Math.abs(bestHz - targetHz) / targetHz <= tolRel) break;
           const df = p1.hz - p0.hz;
           let nextS =
@@ -408,7 +401,7 @@ export function tuneWindInstrumentToPitch(
     }
   }
 
-  bestNode.tunedPitchHz = +targetHz.toFixed(2);
+  bestNode.tunedPitchHz = +bestHz.toFixed(2);
   return bestNode;
 }
 
