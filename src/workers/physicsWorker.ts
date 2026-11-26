@@ -289,6 +289,10 @@ const rebuildIdCaches = () => {
   const mj = mujoco!;
   const mdl = model!;
   const bCache: Record<string, number> = {};
+  for (let b = 0; b < mdl.nbody; b++) {
+    const name = mj.mj_id2name(mdl, mj.mjtObj.mjOBJ_BODY.value, b);
+    if (name) bCache[name] = b;
+  }
   const jCache: Record<string, number> = {};
   const collectIds = (nodes: SceneNode[]) => {
     if (!nodes || !mj || !mdl) return;
