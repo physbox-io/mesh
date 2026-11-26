@@ -710,7 +710,10 @@ export function applyPaintStrokeToBody(targetId: string, m: Record<string, any>)
   if (!isPaintable(geom.type, !!node.isWedge)) {
     throw new Error(`A '${geom.type}' geom cannot hold paint — paintable types are box, sphere, ellipsoid, cylinder, capsule and mesh`);
   }
-  const normColor = normalizeRgba(rgba);
+  const isErase = erase === true;
+  const normColor = isErase && (rgba === undefined || rgba === null)
+    ? [0, 0, 0, 1]
+    : normalizeRgba(rgba);
   if (!normColor) throw new Error('rgba must be [r, g, b] or [r, g, b, a], each a finite number in 0..1');
 
   const rawPoints: number[][] = at !== undefined
@@ -767,6 +770,7 @@ export function applyPaintStrokeToBody(targetId: string, m: Record<string, any>)
   if (!positions?.length) throw new Error('That geom has no surface to paint');
 
   const canvas = canvasFromLayer(geom.paint, positions.length / 3, res);
+  const beforeData = new Float32Array(canvas.data);
   const pointRuns: number[][][] = [points];
   if (symmetry) {
     const axis = symmetry === 'x' ? 0 : symmetry === 'y' ? 1 : 2;
@@ -792,7 +796,7 @@ export function applyPaintStrokeToBody(targetId: string, m: Record<string, any>)
       radius: brush,
       color: normColor,
       flow: typeof flow === 'number' ? flow : 1,
-      erase: !!erase,
+      erase: isErase,
       hardness: typeof hardness === 'number' ? hardness : DEFAULT_PAINT_HARDNESS,
     }, faces)) landed++;
   }
@@ -800,12 +804,28 @@ export function applyPaintStrokeToBody(targetId: string, m: Record<string, any>)
 
   if (!landed) {
     return {
-      ok: false, geomName: geom.name, dabsLanded: 0, dabsRequested: dabs.length,
+      ok: false, geomName: geom.name, dabsLanded: 0, dabsRequested: dabs.length, verticesPainted: 0,
       error: `No vertices within ${brush} m of any of those points — 'at' must be on the surface in the geom's own frame in METRES (or pass 'atMm' in millimetres)`,
     };
   }
+  let verticesPainted = 0;
+  const afterData = canvas.data;
+  for (let v = 0; v < canvas.count; v++) {
+    const o = v * 4;
+    const beforeA = beforeData[o + 3] < 1 / 255 ? 0 : Math.round(beforeData[o + 3] * 255);
+    const afterA = afterData[o + 3] < 1 / 255 ? 0 : Math.round(afterData[o + 3] * 255);
+    if (beforeA !== afterA) {
+      verticesPainted++;
+    } else if (afterA > 0 && (
+      Math.round(beforeData[o] * 255) !== Math.round(afterData[o] * 255) ||
+      Math.round(beforeData[o + 1] * 255) !== Math.round(afterData[o + 1] * 255) ||
+      Math.round(beforeData[o + 2] * 255) !== Math.round(afterData[o + 2] * 255)
+    )) {
+      verticesPainted++;
+    }
+  }
   useStore.getState().setGeomPaint(targetId, geom.name, layerFromCanvas(canvas));
-  return { ok: true, geomName: geom.name, dabsLanded: landed, dabsRequested: dabs.length };
+  return { ok: true, geomName: geom.name, dabsLanded: landed, dabsRequested: dabs.length, verticesPainted };
 }
 
 /** Points `step` apart along a polyline, each moved to the nearest surface vertex. */

@@ -286,6 +286,9 @@ export interface WallSpanSample {
   spanExNx: Float32Array;
   spanExNy: Float32Array;
   spanExNz: Float32Array;
+  /** Entry/exit triangle offset (multiple of 9 in `tris`) of every closed solid span. */
+  spanEnTri: Int32Array;
+  spanExTri: Int32Array;
   /** Minimum valid wall span thickness in each column (Infinity if no valid wall span). */
   minWall: Float32Array;
   /** Midpoint Z of that thinnest valid wall span. */
@@ -343,6 +346,8 @@ export function sampleWallSpans(
       spanExNx: new Float32Array(0),
       spanExNy: new Float32Array(0),
       spanExNz: new Float32Array(0),
+      spanEnTri: new Int32Array(0),
+      spanExTri: new Int32Array(0),
       minWall,
       minWallMid,
       minWallZ0,
@@ -392,6 +397,7 @@ export function sampleWallSpans(
   const hitNx: number[] = [];
   const hitNy: number[] = [];
   const hitNz: number[] = [];
+  const hitTri: number[] = [];
   const order: number[] = [];
   const rawZ0: number[] = [];
   const rawZ1: number[] = [];
@@ -401,6 +407,8 @@ export function sampleWallSpans(
   const rawExNx: number[] = [];
   const rawExNy: number[] = [];
   const rawExNz: number[] = [];
+  const rawEnTri: number[] = [];
+  const rawExTri: number[] = [];
 
   for (let row = 0; row < safeRows; row++) {
     const nudgeY = row < midRow ? NUDGE : row > midRow ? -NUDGE : 0;
@@ -419,6 +427,7 @@ export function sampleWallSpans(
       hitNx.length = 0;
       hitNy.length = 0;
       hitNz.length = 0;
+      hitTri.length = 0;
 
       for (const i of bucket) {
         const ax = tris[i], ay = tris[i + 1], az = tris[i + 2];
@@ -443,6 +452,7 @@ export function sampleWallSpans(
         hitNx.push(nx / nLen);
         hitNy.push(ny / nLen);
         hitNz.push(nz / nLen);
+        hitTri.push(i);
       }
       if (hitZ.length === 0) continue;
 
@@ -454,7 +464,7 @@ export function sampleWallSpans(
       let lastZ = NaN;
       let lastDir = 0;
       let enteredAt = 0;
-      let enX = 0, enY = 0, enZ = 0;
+      let enX = 0, enY = 0, enZ = 0, enTri = -1;
       let bestThick = Infinity;
       let bestZ0 = 0, bestZ1 = 0;
       let anySpan = false;
@@ -468,6 +478,7 @@ export function sampleWallSpans(
           if (depth === 0) {
             enteredAt = z;
             enX = hitNx[idx]; enY = hitNy[idx]; enZ = hitNz[idx];
+            enTri = hitTri[idx];
           }
           depth++;
         } else if (depth > 0) {
@@ -479,6 +490,7 @@ export function sampleWallSpans(
             rawZ1.push(z);
             rawEnNx.push(enX); rawEnNy.push(enY); rawEnNz.push(enZ);
             rawExNx.push(exX); rawExNy.push(exY); rawExNz.push(exZ);
+            rawEnTri.push(enTri); rawExTri.push(hitTri[idx]);
             const thick = z - enteredAt;
             // A real wall has entry and exit faces aligned with the ray axis
             // and opposing each other (not a grazing surface crest or sharp ridge).
@@ -517,6 +529,8 @@ export function sampleWallSpans(
     spanExNx: Float32Array.from(rawExNx),
     spanExNy: Float32Array.from(rawExNy),
     spanExNz: Float32Array.from(rawExNz),
+    spanEnTri: Int32Array.from(rawEnTri),
+    spanExTri: Int32Array.from(rawExTri),
     minWall,
     minWallMid,
     minWallZ0,

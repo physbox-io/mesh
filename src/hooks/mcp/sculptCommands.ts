@@ -1,6 +1,8 @@
 // ---------------------------------------------------------------------------
-// MCP sculpt commands. The ones that change the clay run one at a time
-// (SERIAL_SCULPT_COMMANDS in the bridge).
+// MCP sculpt commands. Mutations on the same target body are serialized via
+// `withSculptBodyLock` so overlapping `SCULPT` (especially dynamicTopology),
+// `SCULPT_CUT`, `SCULPT_CARVE`, and `UNDO_SCULPT` calls cannot race on stale
+// mesh snapshots or corrupt sculptHistory.
 // ---------------------------------------------------------------------------
 
 import { useStore } from '../../store/useStore';
@@ -18,6 +20,24 @@ import type { SculptUndoEntry } from '../../utils/sculptMesh';
 import { collectNodeIds, waitForNewNode, type Msg, pointList, resolveParent, findNodeInScene } from './bridgeUtils';
 import { sculptHistory, SCULPT_HISTORY_DEPTH, sculptMeshOf, applySculptCutResult, sculptTarget } from './sculptState';
 import type { McpCommands } from './types';
+
+const bodySculptQueues = new Map<string, Promise<unknown>>();
+
+/**
+ * Serializes async sculpt mutations targeting the same body ID in arrival
+ * order. Different bodies run independently, and a failing operation cleanly
+ * releases the lock so subsequent operations on that body proceed.
+ */
+export function withSculptBodyLock<T>(targetId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = bodySculptQueues.get(targetId) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  const tracked = next.then(
+    () => { if (bodySculptQueues.get(targetId) === tracked) bodySculptQueues.delete(targetId); },
+    () => { if (bodySculptQueues.get(targetId) === tracked) bodySculptQueues.delete(targetId); },
+  );
+  bodySculptQueues.set(targetId, tracked);
+  return next;
+}
 
 export const sculptCommands: McpCommands = {
   /*
@@ -91,29 +111,29 @@ export const sculptCommands: McpCommands = {
       ...sculptSummary(sculptMeshOf(after)),
     };
   },
-  SET_SCULPT_BASE: async (msg, { store }) => {
+  SET_SCULPT_BASE: async (msg) => {
     const { targetId, base } = msg as Msg<{ targetId: string; base: SculptBaseId }>;
     if (!targetId) throw new Error('Missing targetId');
     if (!SCULPT_BASES.some(b => b.id === base)) {
       throw new Error(`Unknown base '${base}'. Available: ${SCULPT_BASES.map(b => b.id).join(', ')}`);
     }
-    const node = findNodeInScene(store.sceneGraph.nodes, targetId);
-    if (!node) throw new Error(`No object with id '${targetId}'`);
-    if (!node.isSculpt) throw new Error(`'${targetId}' is not a sculpt body`);
+    return withSculptBodyLock(targetId, async () => {
+      const liveStore = useStore.getState();
+      const node = findNodeInScene(liveStore.sceneGraph.nodes, targetId);
+      if (!node) throw new Error(`No object with id '${targetId}'`);
+      if (!node.isSculpt) throw new Error(`'${targetId}' is not a sculpt body`);
 
-    // Wholesale replacement: whatever was sculpted is discarded, including any
-    // delta undo entries keyed to the previous base's vertex indices.
-    store.setSculptBase(targetId, base);
-    sculptHistory.delete(targetId);
-    const after = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
-    return { ok: true, id: targetId, base, ...sculptSummary(sculptMeshOf(after)), undoDepth: 0 };
+      // Wholesale replacement: whatever was sculpted is discarded, including any
+      // delta undo entries keyed to the previous base's vertex indices.
+      liveStore.setSculptBase(targetId, base);
+      sculptHistory.delete(targetId);
+      const after = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+      return { ok: true, id: targetId, base, ...sculptSummary(sculptMeshOf(after)), undoDepth: 0 };
+    });
   },
-  RESIZE_SCULPT: async (msg, { store }) => {
+  RESIZE_SCULPT: async (msg) => {
     const { targetId, sizeMm } = msg as Msg<{ targetId: string; sizeMm: number | (number | null)[] }>;
     if (!targetId) throw new Error('Missing targetId');
-    const node = findNodeInScene(store.sceneGraph.nodes, targetId);
-    if (!node) throw new Error(`No object with id '${targetId}'`);
-    if (!node.isSculpt) throw new Error(`'${targetId}' is not a sculpt body`);
     const limits = [MIN_SCULPT_SIZE * 1000, MAX_SCULPT_SIZE * 1000];
     const valid = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= limits[0] && v <= limits[1];
     // A number is the longest side; [width, depth, height] sizes each
@@ -125,18 +145,27 @@ export const sculptCommands: McpCommands = {
       if (sizeMm.every((v) => v === null)) {
         throw new Error('sizeMm must specify at least one axis (cannot be [null, null, null])');
       }
-      store.resizeSculpt(targetId, sizeMm.map((v) => (v === null ? null : v / 1000)));
-    } else {
-      if (!valid(sizeMm)) throw new Error(`sizeMm must be between ${limits[0]} and ${limits[1]}, or [width, depth, height]`);
-      store.resizeSculpt(targetId, sizeMm / 1000);
+    } else if (!valid(sizeMm)) {
+      throw new Error(`sizeMm must be between ${limits[0]} and ${limits[1]}, or [width, depth, height]`);
     }
-    // Delta undo entries hold positions at the old scale; replaying one
-    // would drag those vertices back to it.
-    sculptHistory.delete(targetId);
-    const after = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
-    return { ok: true, id: targetId, ...sculptSummary(sculptMeshOf(after)), undoDepth: 0 };
+    return withSculptBodyLock(targetId, async () => {
+      const liveStore = useStore.getState();
+      const node = findNodeInScene(liveStore.sceneGraph.nodes, targetId);
+      if (!node) throw new Error(`No object with id '${targetId}'`);
+      if (!node.isSculpt) throw new Error(`'${targetId}' is not a sculpt body`);
+      if (Array.isArray(sizeMm)) {
+        liveStore.resizeSculpt(targetId, sizeMm.map((v) => (v === null ? null : v / 1000)));
+      } else {
+        liveStore.resizeSculpt(targetId, sizeMm / 1000);
+      }
+      // Delta undo entries hold positions at the old scale; replaying one
+      // would drag those vertices back to it.
+      sculptHistory.delete(targetId);
+      const after = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+      return { ok: true, id: targetId, ...sculptSummary(sculptMeshOf(after)), undoDepth: 0 };
+    });
   },
-  SCULPT: async (msg, { store }) => {
+  SCULPT: async (msg) => {
     // Every option below is handed straight to applySculptStroke, which
     // supplies its own default for each one it does not get.
     // Also accepts `strokes: [...]` to run a whole batch of brushes/strokes
@@ -150,7 +179,7 @@ export const sculptCommands: McpCommands = {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         strokes?: Record<string, any>[];
       }>;
-    const { node, geomIndex } = sculptTarget(store, targetId);
+    if (!targetId) throw new Error('Missing targetId');
 
     if (strokes !== undefined) {
       if (!Array.isArray(strokes) || strokes.length === 0) {
@@ -166,7 +195,7 @@ export const sculptCommands: McpCommands = {
       typeof p[0] === 'number' && typeof p[1] === 'number' && typeof p[2] === 'number' &&
       Number.isFinite(p[0] + p[1] + p[2]);
 
-    // Validate ALL strokes upfront before mutating mesh or sculptHistory.
+    // Validate ALL strokes upfront before acquiring the lock or mutating mesh/sculptHistory.
     const validatedStrokes: { spec: Record<string, unknown>; points: number[][]; resolvedRadius?: number }[] = [];
     for (const s of strokeList) {
       if (!s || typeof s !== 'object' || Array.isArray(s)) {
@@ -215,94 +244,103 @@ export const sculptCommands: McpCommands = {
       validatedStrokes.push({ spec: s, points, resolvedRadius });
     }
 
-    const mesh = sculptMeshOf(node, geomIndex);
-    let lastResult: ReturnType<typeof applySculptStroke> | null = null;
-    const perStroke: { brush?: string; applied: number; missed: number; moved: number; maxDisplacement: number; topologyChanged?: boolean }[] = [];
-    const pendingUndos: SculptUndoEntry[] = [];
+    return withSculptBodyLock(targetId, async () => {
+      const liveStore = useStore.getState();
+      const { node, geomIndex } = sculptTarget(liveStore, targetId);
+      const mesh = sculptMeshOf(node, geomIndex);
+      let lastResult: ReturnType<typeof applySculptStroke> | null = null;
+      const perStroke: { brush?: string; applied: number; missed: number; moved: number; maxDisplacement: number; topologyChanged?: boolean }[] = [];
+      const pendingUndos: SculptUndoEntry[] = [];
 
-    for (const { spec: s, points, resolvedRadius } of validatedStrokes) {
-      const sink: { undo?: SculptUndoEntry | null } = {};
-      lastResult = applySculptStroke(mesh, {
-        brush: s.brush as BrushType | undefined,
-        at: points,
-        radius: resolvedRadius,
-        strength: s.strength as number | undefined,
-        invert: s.invert as boolean | undefined,
-        symmetryX: s.symmetryX as boolean | undefined,
-        symmetry: s.symmetry as 'x' | 'y' | 'z' | undefined,
-        detail: s.detail as number | undefined,
-        dynamicTopology: s.dynamicTopology as boolean | undefined,
-        delta: s.delta as number[] | undefined,
-        depthMm: s.depthMm as number | undefined,
-        hardness: s.hardness as number | undefined,
-      }, sink);
-      perStroke.push({
-        brush: (s.brush as string | undefined) ?? 'draw',
-        applied: Number(lastResult.applied ?? 0),
-        missed: Array.isArray(lastResult.missed) ? lastResult.missed.length : 0,
-        moved: lastResult.moved ?? 0,
-        maxDisplacement: lastResult.maxDisplacement,
-        ...(lastResult.topologyChanged ? { topologyChanged: true } : {}),
-      });
+      for (const { spec: s, points, resolvedRadius } of validatedStrokes) {
+        const sink: { undo?: SculptUndoEntry | null } = {};
+        lastResult = applySculptStroke(mesh, {
+          brush: s.brush as BrushType | undefined,
+          at: points,
+          radius: resolvedRadius,
+          strength: s.strength as number | undefined,
+          invert: s.invert as boolean | undefined,
+          symmetryX: s.symmetryX as boolean | undefined,
+          symmetry: s.symmetry as 'x' | 'y' | 'z' | undefined,
+          detail: s.detail as number | undefined,
+          dynamicTopology: s.dynamicTopology as boolean | undefined,
+          delta: s.delta as number[] | undefined,
+          depthMm: s.depthMm as number | undefined,
+          hardness: s.hardness as number | undefined,
+        }, sink);
+        perStroke.push({
+          brush: (s.brush as string | undefined) ?? 'draw',
+          applied: Number(lastResult.applied ?? 0),
+          missed: Array.isArray(lastResult.missed) ? lastResult.missed.length : 0,
+          moved: lastResult.moved ?? 0,
+          maxDisplacement: lastResult.maxDisplacement,
+          ...(lastResult.topologyChanged ? { topologyChanged: true } : {}),
+        });
 
-      if (sink.undo) pendingUndos.push(sink.undo);
-    }
-
-    /*
-      Metadata and geometry coalesced into a single 'node-geom' undo entry
-      and a single structural recompile.
-    */
-    store.recordInteraction('node-geom');
-    store.updateNode(targetId, {
-      sculptEdited: true,
-      sculptVersion: (node.sculptVersion ?? 1) + 1,
-    }, true);
-    const { vertices, renderVertices, faces } = toSceneGeom(mesh);
-    store.updateNodeGeom(targetId, { vertices, renderVertices, faces }, geomIndex);
-
-    if (pendingUndos.length > 0) {
-      const stack = sculptHistory.get(targetId) ?? [];
-      for (const entry of pendingUndos) {
-        stack.push(entry);
-        while (stack.length > SCULPT_HISTORY_DEPTH) stack.shift();
+        if (sink.undo) pendingUndos.push(sink.undo);
       }
-      sculptHistory.set(targetId, stack);
-    }
 
-    // A batch reports each stroke and their totals. It used to spread the
-    // LAST stroke's applied/missed/moved over the whole reply beside a
-    // total of its own, and the two never agreed.
-    const batch = validatedStrokes.length > 1;
-    const { applied: _a, missed: _m, moved: _v, maxDisplacement: _d, topologyChanged: _t, ...meshFields } = lastResult ?? ({} as Partial<ReturnType<typeof applySculptStroke>>);
-    return {
-      ok: true, id: targetId,
-      ...(batch ? meshFields : lastResult ?? {}),
-      ...(batch ? {
-        strokesApplied: validatedStrokes.length,
-        dabsApplied: perStroke.reduce((n, r) => n + r.applied, 0),
-        pointsMissed: perStroke.reduce((n, r) => n + r.missed, 0),
-        strokes: perStroke,
-      } : {}),
-      undoDepth: (sculptHistory.get(targetId) ?? []).length,
-    };
+      /*
+        Metadata and geometry coalesced into a single 'node-geom' undo entry
+        and a single structural recompile.
+      */
+      const freshStore = useStore.getState();
+      freshStore.recordInteraction('node-geom');
+      freshStore.updateNode(targetId, {
+        sculptEdited: true,
+        sculptVersion: (node.sculptVersion ?? 1) + 1,
+      }, true);
+      const { vertices, renderVertices, faces } = toSceneGeom(mesh);
+      freshStore.updateNodeGeom(targetId, { vertices, renderVertices, faces }, geomIndex);
+
+      if (pendingUndos.length > 0) {
+        const stack = sculptHistory.get(targetId) ?? [];
+        for (const entry of pendingUndos) {
+          stack.push(entry);
+          while (stack.length > SCULPT_HISTORY_DEPTH) stack.shift();
+        }
+        sculptHistory.set(targetId, stack);
+      }
+
+      // A batch reports each stroke and their totals. It used to spread the
+      // LAST stroke's applied/missed/moved over the whole reply beside a
+      // total of its own, and the two never agreed.
+      const batch = validatedStrokes.length > 1;
+      const { applied: _a, missed: _m, moved: _v, maxDisplacement: _d, topologyChanged: _t, ...meshFields } = lastResult ?? ({} as Partial<ReturnType<typeof applySculptStroke>>);
+      return {
+        ok: true, id: targetId,
+        ...(batch ? meshFields : lastResult ?? {}),
+        ...(batch ? {
+          strokesApplied: validatedStrokes.length,
+          dabsApplied: perStroke.reduce((n, r) => n + r.applied, 0),
+          pointsMissed: perStroke.reduce((n, r) => n + r.missed, 0),
+          strokes: perStroke,
+        } : {}),
+        undoDepth: (sculptHistory.get(targetId) ?? []).length,
+      };
+    });
   },
-  UNDO_SCULPT: async (msg, { store }) => {
+  UNDO_SCULPT: async (msg) => {
     const { targetId } = msg as Msg<{ targetId: string }>;
-    const { node, geomIndex } = sculptTarget(store, targetId);
+    if (!targetId) throw new Error('Missing targetId');
+    return withSculptBodyLock(targetId, async () => {
+      const liveStore = useStore.getState();
+      const { node, geomIndex } = sculptTarget(liveStore, targetId);
 
-    const stack = sculptHistory.get(targetId) ?? [];
-    const entry = stack.pop();
-    if (!entry) return { ok: false, error: 'No sculpt stroke of mine left to undo on this body', undoDepth: 0 };
-    sculptHistory.set(targetId, stack);
+      const stack = sculptHistory.get(targetId) ?? [];
+      const entry = stack.pop();
+      if (!entry) return { ok: false, error: 'No sculpt stroke of mine left to undo on this body', undoDepth: 0 };
+      sculptHistory.set(targetId, stack);
 
-    const mesh = sculptMeshOf(node, geomIndex);
-    undoSculptStroke(mesh, entry);
-    store.recordInteraction('node-geom');
-    store.updateNode(targetId, { sculptVersion: (node.sculptVersion ?? 1) + 1 }, true);
-    const { vertices, renderVertices, faces } = toSceneGeom(mesh);
-    store.updateNodeGeom(targetId, { vertices, renderVertices, faces }, geomIndex);
+      const mesh = sculptMeshOf(node, geomIndex);
+      undoSculptStroke(mesh, entry);
+      liveStore.recordInteraction('node-geom');
+      liveStore.updateNode(targetId, { sculptVersion: (node.sculptVersion ?? 1) + 1 }, true);
+      const { vertices, renderVertices, faces } = toSceneGeom(mesh);
+      liveStore.updateNodeGeom(targetId, { vertices, renderVertices, faces }, geomIndex);
 
-    return { ok: true, id: targetId, undoDepth: stack.length, ...sculptSummary(mesh) };
+      return { ok: true, id: targetId, undoDepth: stack.length, ...sculptSummary(mesh) };
+    });
   },
   /*
     The scissors, without a screen: a polygon in the body's own frame,
@@ -314,7 +352,7 @@ export const sculptCommands: McpCommands = {
     stall the page, and is one entry in the same history UNDO_SCULPT
     pops.
   */
-  SCULPT_CUT: async (msg, { store }) => {
+  SCULPT_CUT: async (msg) => {
     const {
       targetId, polygon, direction, mode, cap,
       depthMm, wallMm, floorMm, radiusMm, center, segments,
@@ -322,7 +360,7 @@ export const sculptCommands: McpCommands = {
       targetId: string; polygon?: number[][]; direction?: number[]; mode?: 'remove' | 'keep' | 'hollow'; cap?: boolean;
       depthMm?: number; wallMm?: number; floorMm?: number; radiusMm?: number; center?: number[]; segments?: number;
     }>;
-    const { node, geomIndex } = sculptTarget(store, targetId);
+    if (!targetId) throw new Error('Missing targetId');
     const isFiniteVec3 = (p: unknown): p is number[] =>
       Array.isArray(p) && p.length >= 3 &&
       typeof p[0] === 'number' && typeof p[1] === 'number' && typeof p[2] === 'number' &&
@@ -334,9 +372,6 @@ export const sculptCommands: McpCommands = {
     if (depthMm !== undefined && (!isFiniteNum(depthMm) || depthMm <= 0)) {
       throw new Error('depthMm must be a positive finite number of millimetres');
     }
-
-    const geomBefore = node.geoms?.[geomIndex];
-    const mesh = sculptMeshOf(node, geomIndex);
 
     if (mode === 'hollow') {
       if (wallMm !== undefined && (!isFiniteNum(wallMm) || wallMm <= 0)) {
@@ -354,41 +389,51 @@ export const sculptCommands: McpCommands = {
       if (polygon !== undefined && (!Array.isArray(polygon) || polygon.length < 3 || polygon.some((p: unknown) => !Array.isArray(p) || p.length < 2 || !isFiniteNum(p[0]) || !isFiniteNum(p[1])))) {
         throw new Error("polygon must be three or more [x, y] or [x, y, z] points in the body's own frame (metres)");
       }
-      const result = await cutSculptOffThread(mesh, {
-        kind: 'hollow',
-        ...(wallMm !== undefined ? { wall: wallMm / 1000 } : {}),
-        ...(floorMm !== undefined ? { floor: floorMm / 1000 } : {}),
-        ...(radiusMm !== undefined ? { radius: radiusMm / 1000 } : {}),
-        ...(depthMm !== undefined ? { depth: depthMm / 1000 } : {}),
-        ...(center !== undefined ? { center: [center[0], center[1]] as [number, number] } : {}),
-        ...(segments !== undefined && isFiniteNum(segments) ? { segments } : {}),
-        ...(polygon !== undefined ? { polygon } : {}),
-      }, { mode: 'remove', cap: true });
+    } else {
+      if (!Array.isArray(polygon) || polygon.length < 3 || polygon.some((p: unknown) => !isFiniteVec3(p))) {
+        throw new Error("polygon must be three or more [x, y, z] points, in the body's own frame (metres)");
+      }
+      if (direction !== undefined && (!isFiniteVec3(direction) || Math.hypot(direction[0], direction[1], direction[2]) <= 1e-12)) {
+        throw new Error('direction must be a non-zero [x, y, z] vector');
+      }
+    }
+
+    return withSculptBodyLock(targetId, async () => {
+      const liveStore = useStore.getState();
+      const { node, geomIndex } = sculptTarget(liveStore, targetId);
+      const geomBefore = node.geoms?.[geomIndex];
+      const mesh = sculptMeshOf(node, geomIndex);
+
+      if (mode === 'hollow') {
+        const result = await cutSculptOffThread(mesh, {
+          kind: 'hollow',
+          ...(wallMm !== undefined ? { wall: wallMm / 1000 } : {}),
+          ...(floorMm !== undefined ? { floor: floorMm / 1000 } : {}),
+          ...(radiusMm !== undefined ? { radius: radiusMm / 1000 } : {}),
+          ...(depthMm !== undefined ? { depth: depthMm / 1000 } : {}),
+          ...(center !== undefined ? { center: [center[0], center[1]] as [number, number] } : {}),
+          ...(segments !== undefined && isFiniteNum(segments) ? { segments } : {}),
+          ...(polygon !== undefined ? { polygon } : {}),
+        }, { mode: 'remove', cap: true });
+        return applySculptCutResult(targetId, geomIndex, geomBefore, mesh, result);
+      }
+
+      const result = await cutSculptOffThread(
+        mesh,
+        { kind: 'polygon', polygon: polygon!, direction, ...(depthMm !== undefined ? { depth: depthMm / 1000 } : {}) },
+        { mode, cap },
+      );
       return applySculptCutResult(targetId, geomIndex, geomBefore, mesh, result);
-    }
-
-    if (!Array.isArray(polygon) || polygon.length < 3 || polygon.some((p: unknown) => !isFiniteVec3(p))) {
-      throw new Error("polygon must be three or more [x, y, z] points, in the body's own frame (metres)");
-    }
-    if (direction !== undefined && (!isFiniteVec3(direction) || Math.hypot(direction[0], direction[1], direction[2]) <= 1e-12)) {
-      throw new Error('direction must be a non-zero [x, y, z] vector');
-    }
-
-    const result = await cutSculptOffThread(
-      mesh,
-      { kind: 'polygon', polygon, direction, ...(depthMm !== undefined ? { depth: depthMm / 1000 } : {}) },
-      { mode, cap },
-    );
-    return applySculptCutResult(targetId, geomIndex, geomBefore, mesh, result);
+    });
   },
-  SCULPT_CARVE: async (msg, { store }) => {
+  SCULPT_CARVE: async (msg) => {
     const { targetId, path, pathMm, widthMm, depthMm, profile = 'round', symmetry, fill, taper, angleDeg, mode = 'cut', thicknessMm, flatAxis = 'z' } = msg as Msg<{
       targetId: string; path?: number[][]; pathMm?: number[][]; widthMm: number; depthMm?: number;
       profile?: CarveProfile; symmetry?: 'x' | 'y' | 'z'; fill?: boolean;
       taper?: number; angleDeg?: number; mode?: 'cut' | 'add';
       thicknessMm?: number; flatAxis?: 'x' | 'y' | 'z';
     }>;
-    const { node, geomIndex } = sculptTarget(store, targetId);
+    if (!targetId) throw new Error('Missing targetId');
     const isFiniteVec3 = (p: unknown): p is number[] =>
       Array.isArray(p) && p.length >= 3 &&
       typeof p[0] === 'number' && typeof p[1] === 'number' && typeof p[2] === 'number' &&
@@ -423,23 +468,27 @@ export const sculptCommands: McpCommands = {
     }
     if (!['x', 'y', 'z'].includes(flatAxis)) throw new Error("flatAxis must be 'x', 'y' or 'z'");
 
-    // Snapped, filled and cut in the worker, which already holds the
-    // mesh: done here, the closest-point searches on 80 k vertices held
-    // the page long enough for the browser to call it crashed.
-    const geomBefore = node.geoms?.[geomIndex];
-    const mesh = sculptMeshOf(node, geomIndex);
-    const result = await cutSculptOffThread(mesh, {
-      kind: 'carvePath', path: points, width: widthMm / 1000, depth: (depthMm ?? 0) / 1000, profile,
-      ...(symmetry ? { mirror: symmetry } : {}),
-      fill: fill === true && !add,
-      ...(taper ? { taper } : {}),
-      ...(angleDeg ? { tilt: (angleDeg * Math.PI) / 180 } : {}),
-      ...(thicknessMm !== undefined && thicknessMm < widthMm
-        ? { flatten: { normal: [flatAxis === 'x' ? 1 : 0, flatAxis === 'y' ? 1 : 0, flatAxis === 'z' ? 1 : 0], ratio: thicknessMm / widthMm } }
-        : {}),
-      add,
-    }, { mode: add ? 'add' : 'remove', cap: true });
-    return applySculptCutResult(targetId, geomIndex, geomBefore, mesh, result, { add });
+    return withSculptBodyLock(targetId, async () => {
+      const liveStore = useStore.getState();
+      const { node, geomIndex } = sculptTarget(liveStore, targetId);
+      // Snapped, filled and cut in the worker, which already holds the
+      // mesh: done here, the closest-point searches on 80 k vertices held
+      // the page long enough for the browser to call it crashed.
+      const geomBefore = node.geoms?.[geomIndex];
+      const mesh = sculptMeshOf(node, geomIndex);
+      const result = await cutSculptOffThread(mesh, {
+        kind: 'carvePath', path: points, width: widthMm / 1000, depth: (depthMm ?? 0) / 1000, profile,
+        ...(symmetry ? { mirror: symmetry } : {}),
+        fill: fill === true && !add,
+        ...(taper ? { taper } : {}),
+        ...(angleDeg ? { tilt: (angleDeg * Math.PI) / 180 } : {}),
+        ...(thicknessMm !== undefined && thicknessMm < widthMm
+          ? { flatten: { normal: [flatAxis === 'x' ? 1 : 0, flatAxis === 'y' ? 1 : 0, flatAxis === 'z' ? 1 : 0], ratio: thicknessMm / widthMm } }
+          : {}),
+        add,
+      }, { mode: add ? 'add' : 'remove', cap: true });
+      return applySculptCutResult(targetId, geomIndex, geomBefore, mesh, result, { add });
+    });
   },
   PROBE_SCULPT: async (msg, { store }) => {
     const { targetId, at, atMm } = msg as Msg<{ targetId: string; atMm?: unknown }>;

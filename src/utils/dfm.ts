@@ -1196,11 +1196,31 @@ export function narrowestAirGap(
       spanExNx,
       spanExNy,
       spanExNz,
+      spanEnTri,
+      spanExTri,
     } = sampleWallSpans(rotated, rb, cols, rows);
     const stepX = spanX / (cols - 1);
     const stepY = spanY / (rows - 1);
     const stepMax = Math.max(stepX, stepY);
     const margin = stepMax * 2.5 + maxGapMm / 1000;
+
+    // Two opposing triangles that directly share a vertex or edge (within 0.01 mm,
+    // well below MIN_GAP_MM) meet at a concave crease/corner rather than being
+    // two separate opposing walls across a print-in-place clearance gap.
+    const VERT_WELD_TOL2 = 1e-10; // (1e-5 m)^2 = (0.01 mm)^2
+    const trisShareVertex = (offA: number, offB: number): boolean => {
+      if (offA < 0 || offB < 0) return false;
+      for (let a = 0; a < 9; a += 3) {
+        const ax = rotated[offA + a], ay = rotated[offA + a + 1], az = rotated[offA + a + 2];
+        for (let b = 0; b < 9; b += 3) {
+          const dx = ax - rotated[offB + b];
+          const dy = ay - rotated[offB + b + 1];
+          const dz = az - rotated[offB + b + 2];
+          if (dx * dx + dy * dy + dz * dz <= VERT_WELD_TOL2) return true;
+        }
+      }
+      return false;
+    };
 
     const isOpposingGap = (sA: number, sB: number): boolean => {
       const exNz = spanExNz[sA];
@@ -1220,9 +1240,10 @@ export function narrowestAirGap(
       return false;
     };
 
-    // Detect sharp acute interior V-creases (e.g., steep > 60° gable ridge apex)
-    // where two non-parallel walls converge to 0 and merge into a solid right next
-    // to this cell. Parallel opposing walls have dot <= -0.98 and gMag ~ 0.
+    // Detect sharp acute interior V-creases (e.g., steep gable ridge apex or
+    // sculpted organic V-grooves) where two non-parallel walls converge to 0
+    // and merge into a solid right next to this cell. Parallel opposing walls
+    // have dot ~ -1 and gMag ~ 0.
     const isConvergingCrease = (
       c: number,
       r: number,
@@ -1231,15 +1252,16 @@ export function narrowestAirGap(
       g0: number,
       g1: number,
     ): boolean => {
+      if (trisShareVertex(spanExTri[sA], spanEnTri[sB])) return true;
       const exNx = spanExNx[sA], exNy = spanExNy[sA], exNz = spanExNz[sA];
       const enNx = spanEnNx[sB], enNy = spanEnNy[sB], enNz = spanEnNz[sB];
       const dot = exNx * enNx + exNy * enNy + exNz * enNz;
-      if (dot <= -0.98) return false;
+      if (dot <= -0.999) return false;
       // Gradient of gap(x, y) = zB(x, y) - zA(x, y) in rotated XY.
       const gx = exNx / exNz - enNx / enNz;
       const gy = exNy / exNz - enNy / enNz;
       const gMag = Math.hypot(gx, gy);
-      if (gMag <= 0.15) return false;
+      if (gMag <= 0.05) return false;
       const dApex = (g1 - g0) / gMag;
       const maxSearch = stepMax * 4 + (maxGapMm / 1000) * 6;
       if (dApex > maxSearch) return false;
@@ -1247,7 +1269,7 @@ export function narrowestAirGap(
       const dirY = -gy / gMag;
       const zMid = (g0 + g1) * 0.5;
       const probeLimit = dApex + stepMax * 1.25;
-      const probeStep = Math.max(Math.min(stepX, stepY) * 0.5, 1e-6);
+      const probeStep = Math.max(Math.min(stepX, stepY) * 0.35, 1e-6);
       let lastC = c, lastR = r;
       for (let d = probeStep; d <= probeLimit; d += probeStep) {
         const pc = Math.round(c + (dirX * d) / stepX);

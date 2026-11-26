@@ -822,19 +822,17 @@ export function applyDab(
     if (erase) {
       canvas.data[o + 3] = a * (1 - amount);
     } else {
-      // Painting over, the way a wash does: each pass closes some fraction of
-      // what is still uncovered, so going over the same spot repeatedly
-      // approaches full strength without ever banding past it.
-      const next = a + (1 - a) * amount;
+      // Porter-Duff src-over: new paint with coverage `amount` laid over
+      // existing paint with coverage `a`. Each pass closes `amount` of what is
+      // uncovered while blending the new colour over whatever is already down,
+      // so `flow = 1` cleanly overwrites already-painted vertices and partial
+      // flow walks through intermediate colours without stalling at `a = 1`.
+      const keep = a * (1 - amount);
+      const next = amount + keep;
       if (next > 0) {
-        // The colour already down keeps its share; the new colour takes the
-        // coverage this dab just added. Painting red over blue therefore walks
-        // through purple rather than flipping, which is what makes a second
-        // colour over a first behave like paint.
-        const added = next - a;
-        canvas.data[o] = (canvas.data[o] * a + (color[0] ?? 0) * added) / next;
-        canvas.data[o + 1] = (canvas.data[o + 1] * a + (color[1] ?? 0) * added) / next;
-        canvas.data[o + 2] = (canvas.data[o + 2] * a + (color[2] ?? 0) * added) / next;
+        canvas.data[o] = (canvas.data[o] * keep + (color[0] ?? 0) * amount) / next;
+        canvas.data[o + 1] = (canvas.data[o + 1] * keep + (color[1] ?? 0) * amount) / next;
+        canvas.data[o + 2] = (canvas.data[o + 2] * keep + (color[2] ?? 0) * amount) / next;
       }
       canvas.data[o + 3] = next;
     }
