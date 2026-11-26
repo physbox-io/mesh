@@ -440,9 +440,64 @@ export const objectCommands: McpCommands = {
     if (!gone) return { ok: false, error: `'${targetId}' could not be deleted` };
     return { ok: true, deleted: targetId, name, childrenRemoved: childCount };
   },
-  SET_COLOR: async (msg, { store }) => {
-    // The base colour of a body — what "make the imported bracket blue"
-    // means. Paint (below) sits on top of this and is not disturbed by it.
+  SET_COLOR: async (msg, { store, toId }) => {
+    // The base colour of a body (or batch of bodies) — what "make the imported
+    // bracket blue" means. Paint (below) sits on top of this and is not disturbed by it.
+    const resolveId = (v: unknown) => (toId ? toId(v) : v);
+    const rawBatch = (msg as Record<string, unknown>).colors ?? (msg as Record<string, unknown>).items;
+    if (rawBatch !== undefined) {
+      if (!Array.isArray(rawBatch) || rawBatch.length === 0) {
+        throw new Error('colors must be a non-empty array of { id, rgba, geomName? } objects');
+      }
+      const entries: Array<{ nodeId: string; geomName?: string; rgba: number[] }> = [];
+      const seenBodies = new Set<string>();
+      for (let i = 0; i < rawBatch.length; i++) {
+        const item = rawBatch[i];
+        if (!item || typeof item !== 'object' || Array.isArray(item)) {
+          throw new Error(`colors[${i}] must be an object with id and rgba`);
+        }
+        const rec = item as Record<string, unknown>;
+        const rawId = rec.id ?? rec.targetId;
+        if (typeof rawId !== 'string' || !rawId) {
+          throw new Error(`colors[${i}] is missing id`);
+        }
+        const resolvedId = String(resolveId(rawId));
+        const node = findNodeInScene(store.sceneGraph.nodes, resolvedId);
+        if (!node) throw new Error(`colors[${i}]: No object with id '${rawId}'`);
+        const rawRgbaInput = rec.rgba ?? rec.color;
+        const validated = normalizeRgba(rawRgbaInput);
+        if (!validated) {
+          throw new Error(`colors[${i}]: rgba must be [r, g, b] or [r, g, b, a], each a finite number in 0..1`);
+        }
+        const geomName = typeof rec.geomName === 'string' && rec.geomName ? rec.geomName : undefined;
+        if (geomName) {
+          if (node.cloth) {
+            if (node.cloth.garment) {
+              const attached = node.cloth.garment.attached ?? [];
+              if (!attached.some((a) => a.name === geomName)) {
+                throw new Error(`colors[${i}]: Garment '${rawId}' has no attached piece named '${geomName}'`);
+              }
+            } else {
+              const pieces = node.cloth.pieces ?? [];
+              if (!pieces.some((p) => p.name === geomName)) {
+                throw new Error(`colors[${i}]: Cloth '${rawId}' has no piece named '${geomName}'`);
+              }
+            }
+          } else if (!(node.geoms || []).some((g: SceneGeom) => g.name === geomName)) {
+            throw new Error(`colors[${i}]: Object '${rawId}' has no geom named '${geomName}'`);
+          }
+        }
+        const rawArr = rawRgbaInput as number[];
+        entries.push({
+          nodeId: node.id,
+          ...(geomName ? { geomName } : {}),
+          rgba: rawArr.length === 4 ? validated : rawArr.slice(0, 3),
+        });
+        seenBodies.add(node.id);
+      }
+      const geomsColored = store.setGeomColorsBatch(entries);
+      return { ok: true, bodiesColored: seenBodies.size, geomsColored };
+    }
     const { targetId, geomName, rgba } = msg as Msg<{ targetId: string; geomName?: string; rgba: unknown }>;
     if (!targetId) throw new Error('Missing targetId');
     const validatedRgba = normalizeRgba(rgba);

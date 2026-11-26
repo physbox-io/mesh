@@ -345,6 +345,42 @@ export function collisionReport(node: SceneNode): Record<string, unknown> {
 }
 
 /**
+ * Bodies whose hollow cavities genuinely fall back to a convex hull collider.
+ * Bodies that already have convex decomposition colliders (`csgDerived: 'collider'`,
+ * `collisionDecomposed`, `colliderGeoms`, `role: 'collision'`, `contactClass`),
+ * or whose decomposition is currently running, are excluded.
+ */
+export function collectFilledCavities(nodes: SceneNode[]): Array<{ body: string; solidity: number }> {
+  const out: Array<{ body: string; solidity: number }> = [];
+  const walk = (ns: SceneNode[]) => {
+    for (const n of ns || []) {
+      const geoms = n.geoms || [];
+      const hasDecomposedColliders =
+        Boolean(n.collisionDecomposed) ||
+        Number((n as unknown as { colliderGeoms?: number }).colliderGeoms) > 0 ||
+        geoms.some(
+          (g: SceneGeom) =>
+            g.csgDerived === 'collider' || g.role === 'collision' || Boolean(g.contactClass),
+        );
+      if (
+        !n.cloth &&
+        !(n.bodyForm && n.collision !== 'decompose') &&
+        !hasDecomposedColliders &&
+        !collidersAreStale(n) &&
+        solidMeshGeoms(n).length > 0 &&
+        n.collisionSolidity !== undefined &&
+        n.collisionSolidity < SOLIDITY_DECOMPOSE_BELOW
+      ) {
+        out.push({ body: n.name || n.id, solidity: n.collisionSolidity });
+      }
+      walk(n.children || []);
+    }
+  };
+  walk(nodes);
+  return out;
+}
+
+/**
  * One geom. A capsule or cylinder written with `fromto` carries it: its size
  * is then only the radius, and `{type: 'capsule', size: [0.0012]}` alone reads
  * as the stub pill the docs warn about.

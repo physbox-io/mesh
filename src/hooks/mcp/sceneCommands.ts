@@ -193,7 +193,13 @@ export const sceneCommands: McpCommands = {
       return {
         ...rest,
         final: final ? finalLean : final,
-        digest: trajectory ? digestTelemetry(trajectory, { jointTypes: jointTypes(reportGraph), nameOf: bodyNamer(reportGraph) }) : null,
+        digest: trajectory
+          ? digestTelemetry(trajectory, {
+              jointTypes: jointTypes(reportGraph),
+              nameOf: bodyNamer(reportGraph),
+              settled: final?.settled,
+            })
+          : null,
         ...(impacts.shattered.length ? { shattered: impacts.shattered } : {}),
         ...(impacts.dented.length ? { dented: impacts.dented } : {}),
       };

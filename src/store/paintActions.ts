@@ -8,6 +8,12 @@ import type { FaceSplit, SurfaceTexture } from '../utils/surfaceTexture';
 import { cloneSceneGraph, findNode } from './sceneClone';
 import type { SliceDeps } from './sliceDeps';
 
+export interface BatchColorEntry {
+  nodeId: string;
+  geomName?: string;
+  rgba: number[];
+}
+
 export interface PaintActions {
   // --- Coloring -----------------------------------------------------------
   //
@@ -38,6 +44,8 @@ export interface PaintActions {
   setGeomFaceSplits: (nodeId: string, geomName: string, splits: FaceSplit[] | undefined, recordUndo?: boolean) => void;
   /** Sets a body's base colour — one geom by name, or all of them. */
   setGeomColor: (nodeId: string, geomName: string | undefined, rgba: number[]) => void;
+  /** Sets base colours for multiple bodies/geoms in one store transaction + one recompile. */
+  setGeomColorsBatch: (entries: BatchColorEntry[]) => number;
   /** Takes the paint off every geom of the scene. */
   clearAllPaint: () => void;
 }
@@ -137,6 +145,64 @@ export function paintActions({ set, get }: SliceDeps): PaintActions {
       // once for the whole body rather than once per geom.
       set({ sceneGraph: newScene });
       get().recompile(newScene, undefined, true);
+    },
+
+    setGeomColorsBatch: (entries) => {
+      if (!entries.length) return 0;
+      get().recordInteraction('node-geom');
+      const newScene = cloneSceneGraph(get().sceneGraph);
+      let colored = 0;
+      for (const entry of entries) {
+        const node = findNode(newScene.nodes, entry.nodeId);
+        if (!node) continue;
+        const explicitAlpha = entry.rgba.length === 4 ? entry.rgba[3] : undefined;
+        if (node.cloth) {
+          if (node.cloth.garment) {
+            if (entry.geomName) {
+              const attached = node.cloth.garment.attached ?? [];
+              node.cloth = {
+                ...node.cloth,
+                garment: {
+                  ...node.cloth.garment,
+                  attached: attached.map((a) =>
+                    a.name === entry.geomName
+                      ? { ...a, rgba: [entry.rgba[0], entry.rgba[1], entry.rgba[2], explicitAlpha ?? a.rgba?.[3] ?? 1] }
+                      : a,
+                  ),
+                },
+              };
+              colored += 1;
+            } else {
+              const c = [entry.rgba[0], entry.rgba[1], entry.rgba[2], explicitAlpha ?? node.cloth.garment.rgba?.[3] ?? 1];
+              node.cloth = { ...node.cloth, garment: { ...node.cloth.garment, rgba: c } };
+              colored += 1;
+            }
+          } else {
+            const pieces = node.cloth.pieces ?? [];
+            node.cloth = {
+              ...node.cloth,
+              pieces: pieces.map((p) =>
+                !entry.geomName || p.name === entry.geomName
+                  ? { ...p, rgba: [entry.rgba[0], entry.rgba[1], entry.rgba[2], explicitAlpha ?? p.rgba?.[3] ?? 1] }
+                  : p,
+              ),
+            };
+            colored += entry.geomName ? 1 : pieces.length;
+          }
+          continue;
+        }
+        if (!node.geoms?.length) continue;
+        const targets = entry.geomName ? node.geoms.filter((g: SceneGeom) => g.name === entry.geomName) : node.geoms;
+        for (const geom of targets) {
+          geom.rgba = [entry.rgba[0] ?? 0.8, entry.rgba[1] ?? 0.8, entry.rgba[2] ?? 0.8, explicitAlpha ?? geom.rgba?.[3] ?? 1];
+          colored += 1;
+        }
+      }
+      if (colored > 0) {
+        set({ sceneGraph: newScene });
+        get().recompile(newScene, undefined, true);
+      }
+      return colored;
     },
 
     clearAllPaint: () => {

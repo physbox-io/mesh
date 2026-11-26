@@ -1905,6 +1905,20 @@ function buildLayFlatMesh(
  * planks with interlocking `rabbet`, `miter`, `finger`, or `butt` joinery,
  * alignment dowel holes, explosion vectors, and a 2D Lay-Flat Sheet layout.
  */
+/**
+ * Classifies whether `mode: 'auto'` should treat a timber joinery breakdown as
+ * leg-and-rail `'frame'` furniture or as `'planks'` (e.g. a single slab/panel,
+ * even rotated/tilted, or an unframed solid block with no leg/rail members).
+ */
+export function classifyTimberAutoMode(
+  outcome: { parts: ReadonlyArray<{ member: { role: MemberRole } }> },
+): 'frame' | 'planks' {
+  const hasFramingMember = outcome.parts.some(
+    (p) => p.member.role === 'leg' || p.member.role === 'rail',
+  );
+  return hasFramingMember ? 'frame' : 'planks';
+}
+
 export function decomposeSolidIntoPlanks(
   wasm: ManifoldToplevel,
   soupsMetres: ArrayLike<number>[],
@@ -1950,7 +1964,7 @@ export function decomposeSolidIntoPlanks(
     boardLike: boolean;
   }[] = [];
 
-  if (inputPieces.length >= 2) {
+  if (inputPieces.length >= 1) {
     const maxBoardThickMm = Math.max(45, options.boardThicknessMm * 2.2);
     let boardLikeCount = 0;
     let boardLikeVol = 0;
@@ -1961,7 +1975,12 @@ export function decomposeSolidIntoPlanks(
       const solidity = mesh.volumeMm3 / Math.max(1e-6, hull.volume());
       hull.delete();
       const thickMm = obb.dimsMm[2];
-      const boardLike = thickMm >= 3 && thickMm <= maxBoardThickMm && solidity >= 0.72;
+      const isSingleSlab = inputPieces.length === 1;
+      const boardLike =
+        thickMm >= 3 &&
+        thickMm <= maxBoardThickMm &&
+        solidity >= 0.72 &&
+        (!isSingleSlab || (obb.dimsMm[0] >= thickMm * 2 && obb.dimsMm[1] >= thickMm * 2));
       if (boardLike) {
         boardLikeCount++;
         boardLikeVol += mesh.volumeMm3;
@@ -2148,7 +2167,7 @@ export function decomposeSolidIntoPlanks(
 
     if (isAlreadyPaneled) {
       warnings.push(
-        `Input already consists of ${inputPieces.length} individual boards; preserved real board geometry instead of hollow-shell slicing.`,
+        `Input already consists of ${inputPieces.length} individual board${inputPieces.length === 1 ? '' : 's'}; preserved real board geometry instead of hollow-shell slicing.`,
       );
       const axisNames: GrainAxis[] = ['x', 'y', 'z'];
       const usedBoardIds = new Set<string>();

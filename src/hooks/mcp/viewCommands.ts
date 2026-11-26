@@ -14,14 +14,13 @@ import { PRINT_CONTACT_TIME } from '../../utils/contactClasses';
 import { getLiveCameraPose } from '../../utils/liveCamera';
 import { bodyEdges, bodyUp, whyNotRoundable } from '../../utils/edgeRoundBase';
 import { maxSizeFor, sameEdge, type EdgeCandidate } from '../../utils/featureEdges';
-import { SOLIDITY_DECOMPOSE_BELOW } from '../../utils/convexDecomposition';
 import {
   describeReferenceImage, normalizeReferencePicture, readReferencePatch, upsertReferenceImage,
 } from '../../utils/referenceImages';
 import { sceneContentBounds } from '../../utils/frameScene';
 import { measureInScene } from '../../utils/measureScene';
 import type { Object3D } from 'three';
-import type { SceneNode, SceneGeom } from '../../types/scene';
+import type { SceneNode } from '../../types/scene';
 import { hardwareList } from '../../utils/hardwareList';
 import { CAMERA_VIEWS, type CameraView } from '../../utils/cameraViews';
 import { getLiveDimensions } from '../../utils/liveDimensions';
@@ -31,7 +30,7 @@ import { objectReply } from '../../utils/objectReply';
 import { meshPage } from '../../utils/meshPage';
 import { initialContacts } from '../initialContacts';
 import {
-  isFabricationScene, staleBodies, stockReport, summarizeNode,
+  collectFilledCavities, isFabricationScene, staleBodies, stockReport, summarizeNode,
 } from '../../utils/sceneSummary';
 import { recompilesInFlight } from '../../store/simulationActions';
 import { modelBuiltFrom } from '../../store/modelProvenance';
@@ -641,17 +640,8 @@ export const viewCommands: McpCommands = {
     // not behave: nothing overlaps, and the ball still will not go in.
     // This is the command someone runs when that happens, so say it here
     // rather than make them go looking in the scene summary.
-    const filledCavities: Array<{ body: string; solidity: number }> = [];
-    const collectFilled = (ns: SceneNode[]) => {
-      for (const n of ns || []) {
-        const hasColliders = (n.geoms || []).some((g: SceneGeom) => g.csgDerived === 'collider');
-        if (!hasColliders && n.collisionSolidity !== undefined && n.collisionSolidity < SOLIDITY_DECOMPOSE_BELOW) {
-          filledCavities.push({ body: n.name || n.id, solidity: n.collisionSolidity });
-        }
-        collectFilled(n.children || []);
-      }
-    };
-    collectFilled(nodes);
+    const latestNodes = useStore.getState().sceneGraph.nodes || [];
+    const filledCavities = collectFilledCavities(latestNodes);
 
     return {
       ok: true,
