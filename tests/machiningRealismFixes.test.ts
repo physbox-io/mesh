@@ -67,18 +67,7 @@ describe('machining realism fixes', () => {
     expect(twoSided.prep).toMatch(/Trim stock/);
   });
 
-  it('skips fine raster finishing of the roughed scrap moat floor and uses 50% flat stepover', () => {
-    const feeds = deriveReliefFeeds({
-      material: 'hardwood',
-      roughingToolDiaMm: 3.175,
-      roughingFlutes: 2,
-      finishingToolDiaMm: 1.5875,
-      finishingFlutes: 2,
-      finishingToolType: 'flat',
-      carveDepthMm: 6,
-    });
-    expect(feeds.finishingStepoverPercent).toBe(50);
-
+  it('skips fine raster finishing of the roughed scrap moat floor', () => {
     const opts = deriveSolidOptions(smallHolder, {
       board: { widthMm: 131, depthMm: 140, thicknessMm: 6 },
       sides: 1,

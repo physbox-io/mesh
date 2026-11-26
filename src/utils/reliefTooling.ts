@@ -342,9 +342,10 @@ export function deriveReliefFeeds(
     finishingPlungeRate: finish.plungeMmMin,
     // A ball nose leaves a scallop of about 3% of its radius at 25% spacing,
     // which sands out; a V-bit's ridge is set by its angle instead. A flat mill
-    // leaves no scallop on a flat face, so 40% stepover clears pockets and
-    // flat tops cleanly while keeping tight corner accuracy.
-    finishingStepoverPercent: opts.finishingToolType === 'flat' ? 50 : 25,
+    // leaves none on a flat, so it strides further - as far as the solid
+    // dialog has always set, and no further: on the slopes a hybrid still
+    // rasters, its steps grow with the stride.
+    finishingStepoverPercent: opts.finishingToolType === 'flat' ? 30 : 25,
     // 0 means "use the material-appropriate clearing stepdown when layered",
     // matching roughing when finishing clears solid stock on its own.
     finishingStepdownMm: 0,
