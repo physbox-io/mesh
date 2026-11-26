@@ -811,9 +811,9 @@ export function extrudeFace(
   const dominant = dominantAxis(normal);
   const along = axis ?? dominant.axis;
   const a = AXIS_INDEX[along];
-  // Along the face's own axis, "out" is where the normal points; along any
-  // other, the sign the caller gave is the whole instruction.
-  const travel = axis && axis !== dominant.axis ? steps : steps * dominant.sign;
+  // When an explicit axis is given, the caller's sign is along that positive
+  // cage axis (+X, +Y, +Z). When omitted, "out" is along the face's normal.
+  const travel = axis ? steps : steps * dominant.sign;
 
   const moved = ring.map((v) => {
     const c = coordOf(lattice, v);
@@ -2117,6 +2117,23 @@ export function isWatertight(lattice: Lattice): boolean {
     }
   }
   if (!any) return false;
+  for (const count of uses.values()) if (count !== 2) return false;
+  return true;
+}
+
+/** Whether a triangulated mesh (3 vertex indices per triangle) is closed and manifold (every edge shared by 2 triangles). */
+export function isTriangleMeshWatertight(faces: readonly number[] | undefined | null): boolean {
+  if (!faces || faces.length < 3 || faces.length % 3 !== 0) return false;
+  const uses = new Map<string, number>();
+  for (let i = 0; i < faces.length; i += 3) {
+    const a = faces[i], b = faces[i + 1], c = faces[i + 2];
+    const edges: [number, number][] = [[a, b], [b, c], [c, a]];
+    for (const [p, q] of edges) {
+      const key = p < q ? `${p}:${q}` : `${q}:${p}`;
+      uses.set(key, (uses.get(key) ?? 0) + 1);
+    }
+  }
+  if (uses.size === 0) return false;
   for (const count of uses.values()) if (count !== 2) return false;
   return true;
 }

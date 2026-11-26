@@ -5,8 +5,9 @@
 
 import { useStore } from '../../store/useStore';
 import {
-  addFacesMm, addRingMm, bevelEdgesMm, bevelFaceMm, bridgeFacesMm, dimensionSelectionMm, extrudeMm,
-  insetFaceMm, MAX_RING_SIDES, removeFacesMm, revolveMm, sharpenEdgesMm,
+  addFacesMm, addRingMm, bevelEdgesMm, bevelFaceMm, bridgeFacesMm, dimensionSelectionBatchMm, dimensionSelectionMm,
+  extrudeMm, insetFaceMm, MAX_RING_SIDES, removeFacesMm, revolveMm, sharpenEdgesMm,
+  type DimensionSpec,
 } from '../../utils/latticeCommands';
 import type { SceneNode } from '../../types/scene';
 import {
@@ -71,6 +72,28 @@ export function parseRingCount(v: unknown, field: string): number {
     throw new Error(`${field} must be 0 (auto) or an integer from 3 to ${MAX_RING_SIDES}`);
   }
   return v;
+}
+
+/** Validates a batch `dimensions` array: `[{ axis, mode?, valueMm }, ...]`. */
+export function parseDimensionSpecs(raw: unknown): DimensionSpec[] {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error('dimensions must be a non-empty array of { axis, mode?, valueMm } entries');
+  }
+  return raw.map((entry, idx) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`dimensions[${idx}] must be an object { axis, mode?, valueMm }`);
+    }
+    const obj = entry as Record<string, unknown>;
+    const axis = parseAxis(obj.axis, `dimensions[${idx}].axis`, true)!;
+    if (obj.mode !== undefined && obj.mode !== 'size' && obj.mode !== 'position') {
+      throw new Error(`dimensions[${idx}].mode must be 'size' or 'position'`);
+    }
+    const mode: 'size' | 'position' = obj.mode === 'position' ? 'position' : 'size';
+    if (typeof obj.valueMm !== 'number' || !Number.isFinite(obj.valueMm)) {
+      throw new Error(`dimensions[${idx}].valueMm must be a finite number, in millimetres`);
+    }
+    return { axis, mode, valueMm: obj.valueMm };
+  });
 }
 
 /** The editable cage on a node, or a refusal that says what to do instead. */
@@ -248,6 +271,11 @@ export function runLatticeOps(
         break;
       }
       case 'dimension': {
+        if (item.dimensions !== undefined) {
+          const specs = parseDimensionSpecs(item.dimensions);
+          results.push({ op: 'dimension', ...dimensionSelectionBatchMm(lattice, item.corners, specs) });
+          break;
+        }
         const which = item.axis === undefined ? 'x' : parseAxis(item.axis, 'axis', true)!;
         if (item.mode !== undefined && item.mode !== 'size' && item.mode !== 'position') {
           throw new Error("mode must be 'size' or 'position'");

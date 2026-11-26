@@ -6,18 +6,18 @@ import { useStore } from '../../store/useStore';
 import { framingPatch } from '../../store/sceneFraming';
 import {
   addFacesMm, addRingMm, bevelEdgesMm, bevelFaceMm, bridgeFacesMm, describeLattice,
-  dimensionSelectionMm, extrudeMm, insetFaceMm, latticeSummary, removeFacesMm, revolveMm,
-  sharpenEdgesMm,
+  dimensionSelectionBatchMm, dimensionSelectionMm, extrudeMm, insetFaceMm, latticeSummary,
+  removeFacesMm, revolveMm, sharpenEdgesMm,
 } from '../../utils/latticeCommands';
 import type { SceneNode, SceneGeom } from '../../types/scene';
 import {
-  boxLattice, cloneLattice, createLattice, deserializeCage, faceCount, orientFaces, serializeCage,
-  toSceneGeom as latticeToSceneGeom, DEFAULT_UNIT as LATTICE_UNIT,
+  boxLattice, cloneLattice, createLattice, deserializeCage, faceCount, isTriangleMeshWatertight,
+  orientFaces, serializeCage, toSceneGeom as latticeToSceneGeom, DEFAULT_UNIT as LATTICE_UNIT,
 } from '../../utils/latticeMesh';
 import { type Msg, resolveParent, withChild, findNodeInScene } from './bridgeUtils';
 import {
   latticeHistory, latticeOf, latticeTarget, pushLatticeHistory, commitLattice, runLatticeOps,
-  parseAxis, parseBevelMode, parseSubdiv, parseThicknessMm, parseRingCount,
+  parseAxis, parseBevelMode, parseDimensionSpecs, parseSubdiv, parseThicknessMm, parseRingCount,
 } from './latticeState';
 import { settleScene } from './settleScene';
 import { collidersAreStale } from '../../utils/convexDecomposition';
@@ -129,11 +129,15 @@ export const latticeCommands: McpCommands = {
     // exactly what is wanted when a person is about to carry on by hand.
     if (edit) useStore.getState().setLatticeNodeId(id);
 
+    const summary = latticeSummary(deserializeCage(cage));
+    const meshWatertight = thicknessMm > 0 ? isTriangleMeshWatertight(faces) : summary.watertight;
+
     return {
       ok: true, id, name: newNode.name,
       ...(parent ? { parent: parent.id } : {}),
       ...(Array.isArray(ops) && ops.length > 0 ? { opsApplied: ops.length } : {}),
-      ...latticeSummary(deserializeCage(cage)),
+      ...summary,
+      ...(thicknessMm > 0 ? { cageWatertight: summary.watertight, watertight: meshWatertight } : {}),
       // Joint anchors and child bodies are in the body frame, whose origin is
       // the centre of mass: cage point c (mm) is at body-frame c + this.
       cageOriginMm: cageOriginInBodyMm(newNode),
@@ -303,23 +307,34 @@ export const latticeCommands: McpCommands = {
     return { ok: true, id: targetId, ...result, ...latticeSummary(lattice), undoDepth: (latticeHistory.get(targetId) ?? []).length };
   },
   LATTICE_DIMENSION: async (msg, { store }) => {
-    const { targetId, corners, axis, mode, valueMm } = msg as Msg<{ targetId: string }>;
+    const { targetId, corners, axis, mode, valueMm, dimensions } = msg as Msg<{ targetId: string }>;
     const { node, lattice } = latticeTarget(store, targetId);
-    let which;
-    try {
-      which = parseAxis(axis, 'axis', true)!;
-    } catch (e) {
-      return { ok: false, error: e instanceof Error ? e.message : String(e) };
-    }
-    if (mode !== undefined && mode !== 'size' && mode !== 'position') {
-      return { ok: false, error: "mode must be 'size' or 'position'" };
-    }
-    const how = mode === 'position' ? 'position' : 'size';
-    if (typeof valueMm !== 'number' || !Number.isFinite(valueMm)) {
-      return { ok: false, error: 'valueMm must be a number, in millimetres' };
-    }
     const before = cloneLattice(lattice);
-    const result = dimensionSelectionMm(lattice, corners, which, how, valueMm);
+    let result: { changed: boolean; corners: number[][]; missing: number[][]; applied?: number };
+    if (dimensions !== undefined) {
+      let specs;
+      try {
+        specs = parseDimensionSpecs(dimensions);
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+      result = dimensionSelectionBatchMm(lattice, corners, specs);
+    } else {
+      let which;
+      try {
+        which = parseAxis(axis, 'axis', true)!;
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+      if (mode !== undefined && mode !== 'size' && mode !== 'position') {
+        return { ok: false, error: "mode must be 'size' or 'position'" };
+      }
+      const how = mode === 'position' ? 'position' : 'size';
+      if (typeof valueMm !== 'number' || !Number.isFinite(valueMm)) {
+        return { ok: false, error: 'valueMm must be a number, in millimetres' };
+      }
+      result = dimensionSelectionMm(lattice, corners, which, how, valueMm);
+    }
     if (!result.changed) {
       // Not an error. Asking for the size something already is, or for a
       // size on an axis it is flat along, is a no-op and saying so is
@@ -353,12 +368,15 @@ export const latticeCommands: McpCommands = {
     const after = findNodeInScene(useStore.getState().sceneGraph.nodes, node.id);
     const mesh = after?.geoms?.find((g: SceneGeom) => g.latticeGeom)
       ?? after?.geoms?.find((g: SceneGeom) => g.type === 'mesh' && !g.csgDerived);
+    const summary = latticeSummary(latticeOf(after));
+    const meshWatertight = mm > 0 ? isTriangleMeshWatertight(mesh?.faces) : summary.watertight;
     return {
       ok: true, id: node.id, thicknessMm: mm,
-      ...latticeSummary(latticeOf(after)),
-      // The CAGE stays open — the wall is built when the mesh is, so the
-      // watertight figure above is about the surface being edited and
-      // this is about the thing that gets exported.
+      ...summary,
+      ...(mm > 0 ? { cageWatertight: summary.watertight, watertight: meshWatertight } : {}),
+      // The CAGE stays open — the wall is built when the mesh is, so
+      // `cageWatertight` is about the surface being edited and `watertight`
+      // is about the thickened mesh that gets exported.
       meshTriangles: mesh?.faces ? mesh.faces.length / 3 : 0,
     };
   },

@@ -674,6 +674,9 @@ export const sceneCommands: McpCommands = {
       sceneFields = fields;
       if (Array.isArray(cards)) noteCards = cards as NoteCard[];
     }
+    if (typeof msg.name === 'string' && msg.name.trim()) {
+      sceneFields = { ...sceneFields, name: msg.name.trim() };
+    }
     const result = await settleScene(nodes, { sceneFields, opsMap });
     const liveNodes = useStore.getState().sceneGraph.nodes;
     if (typeof window !== 'undefined') {
@@ -689,11 +692,14 @@ export const sceneCommands: McpCommands = {
     return withRenamedIds(withScriptWarnings(result, liveNodes), renamed);
   },
   SET_ENVIRONMENT: async (msg, { store }) => {
-    const { gravityZ, windX, windY, density, floorFriction, floorBounce, background, waterLevel, fidelity, stockWidthMm, stockDepthMm, stockThicknessMm, sound, reverb } =
-      msg as Msg<{ sound?: unknown; reverb?: unknown; gravityZ?: unknown; windX?: unknown; windY?: unknown; density?: unknown; floorFriction?: unknown; floorBounce?: unknown; background?: unknown; waterLevel?: unknown; fidelity?: unknown; stockWidthMm?: unknown; stockDepthMm?: unknown; stockThicknessMm?: unknown }>;
+    const { name, gravityZ, windX, windY, density, floorFriction, floorBounce, background, waterLevel, fidelity, stockWidthMm, stockDepthMm, stockThicknessMm, sound, reverb } =
+      msg as Msg<{ name?: unknown; sound?: unknown; reverb?: unknown; gravityZ?: unknown; windX?: unknown; windY?: unknown; density?: unknown; floorFriction?: unknown; floorBounce?: unknown; background?: unknown; waterLevel?: unknown; fidelity?: unknown; stockWidthMm?: unknown; stockDepthMm?: unknown; stockThicknessMm?: unknown }>;
 
     // Validate EVERY field before mutating any store state so a rejected call
     // never leaves partial stock/fidelity/environment edits behind.
+    if (name !== undefined && name !== null && typeof name !== 'string') {
+      return { ok: false, error: 'name must be a string or null.' };
+    }
     if (stockWidthMm !== undefined && (!isFiniteNumber(stockWidthMm) || stockWidthMm <= 0)) {
       return { ok: false, error: 'stockWidthMm must be a positive finite number.' };
     }
@@ -769,8 +775,25 @@ export const sceneCommands: McpCommands = {
       getPhysicsWorkerClient().setSound(sound);
     }
     if (typeof reverb === 'boolean') useSoundStore.getState().setReverbEnabled(reverb);
+    let appliedName: string | null | undefined;
+    if (name !== undefined) {
+      const trimmed = typeof name === 'string' ? name.trim() : '';
+      const cur = useStore.getState().sceneGraph;
+      const next = { ...cur };
+      if (trimmed) {
+        next.name = trimmed;
+      } else {
+        delete next.name;
+      }
+      useStore.getState().updateScene(next, true);
+      if (trimmed && useStore.getState().activePreset && useStore.getState().activePreset !== 'empty') {
+        useStore.getState().setActivePreset('empty');
+      }
+      appliedName = trimmed || null;
+    }
     return {
       ok: true,
+      ...(appliedName !== undefined ? { name: appliedName } : {}),
       ...(Object.keys(stockPatch).length > 0
         ? { stock: stockReport(useStore.getState().sceneGraph, useStore.getState().stock) }
         : {}),

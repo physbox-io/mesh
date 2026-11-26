@@ -15,24 +15,27 @@ import { DEFAULT_TAB_DRAFT } from '../../utils/moldTabs';
 import { selectionSoups, splitOffThread, testAssemblyOffThread } from '../../utils/printSplitClient';
 import { filamentSpec } from '../../utils/filaments';
 import { exportPrintFiles } from '../../utils/printExport';
+import { isBoughtIn } from '../../utils/boughtIn';
 import { findNodeInScene, describeFiles } from './bridgeUtils';
 import type { McpCommands } from './types';
 import type { SceneNode } from '../../types/scene';
 
 /**
  * What an export is called: the one body asked for by id, else the scene's
- * name, else the one body in the scene, else the preset it came from. A
- * single body exported out of a named scene used to be named for the scene.
- * Never 'empty', the blank scene's preset id, which named every file built
- * from scratch empty.stl.
+ * name, else the one body in the scene, else the preset it came from, else
+ * the first printable body's name, else 'scene'. Never 'empty', the blank
+ * scene's preset id, which named every file built from scratch empty.stl.
  */
 function exportFileBase(store: { sceneGraph: { name?: string; nodes: SceneNode[] }; activePreset?: string }, ids: string[]): string {
   const asked = ids.length === 1 ? findNodeInScene(store.sceneGraph.nodes, ids[0]) : undefined;
   if (asked) return asked.name || asked.id;
-  const bodies = ids.length ? ids : store.sceneGraph.nodes.filter((n) => !n.simulation).map((n) => n.id);
+  const bodies = ids.length
+    ? ids
+    : store.sceneGraph.nodes.filter((n) => !n.simulation && !isBoughtIn(n)).map((n) => n.id);
   const only = bodies.length === 1 ? store.sceneGraph.nodes.find((n) => n.id === bodies[0])?.name : undefined;
+  const first = bodies.length > 0 ? store.sceneGraph.nodes.find((n) => n.id === bodies[0])?.name : undefined;
   const preset = store.activePreset && store.activePreset !== 'empty' ? store.activePreset.replace(/^user:/, '') : undefined;
-  return store.sceneGraph.name || only || preset || 'model';
+  return store.sceneGraph.name || only || preset || first || 'scene';
 }
 
 function checkPos(v: unknown, name: string): { ok: true; value: number | undefined } | { ok: false; error: string } {

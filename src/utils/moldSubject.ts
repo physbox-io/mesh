@@ -13,6 +13,7 @@
 
 import * as THREE from 'three';
 import type { SceneGraph, SceneNode } from '../types/scene';
+import { isBoughtIn } from './boughtIn';
 import { getNodeWorldTransform } from './laserCutExporter';
 import { isPourTooling, withoutTooling } from './pourTooling';
 import { isNodeRotationBaked } from './sceneTree';
@@ -57,7 +58,9 @@ export function moldSubject(scene: SceneGraph, selection: readonly string[]): Mo
   // Simulation selects what it adds) counts as nothing selected.
   const ids = selection.filter((id) => !isSimulation(scene.nodes, id));
   if (ids.length === 0) {
-    const nodes = scene.nodes.filter(real).map(withoutTooling);
+    // Whole-scene default excludes bought-in hardware (both welded top-level
+    // parts and seated children) as well as simulations and pour tooling.
+    const nodes = scene.nodes.filter((n) => real(n) && !isBoughtIn(n)).map(withoutTooling);
     return {
       scene: nodes.length === scene.nodes.length && nodes.every((n, i) => n === scene.nodes[i]) ? scene : { ...scene, nodes },
       ids: nodes.map((n) => n.id),

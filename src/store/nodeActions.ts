@@ -537,7 +537,14 @@ export function nodeActions({ set, get }: SliceDeps): NodeActions {
         newScene.nodes = releaseGarments(newScene.nodes, goneForms);
         const sculptTarget = useGarmentSculpt.getState().target;
         if (sculptTarget && gone.includes(sculptTarget)) useGarmentSculpt.getState().set({ target: null });
-        set({ sceneGraph: newScene, selectedNodeId: null, extraSelectedIds: [] });
+        if (newScene.nodes.length === 0) {
+          // Deleting the last body empties the scene, so any inherited preset
+          // identity is gone and subsequent exports won't inherit e.g. 'pendulum'.
+          delete newScene.name;
+          set({ sceneGraph: newScene, selectedNodeId: null, extraSelectedIds: [], activePreset: 'empty' });
+        } else {
+          set({ sceneGraph: newScene, selectedNodeId: null, extraSelectedIds: [] });
+        }
         get().recompile(newScene, null);
       }
     },
