@@ -125,15 +125,59 @@ export async function decomposeMesh(
     messages: 'none',
   };
 
+  // High-aspect-ratio meshes (e.g. a 22:1 extruded V-bar) get only 1-2 cubic
+  // voxels across their thin cross-section in V-HACD. Positive per-axis scaling
+  // preserves convexity, planes, and flood-fill topology exactly, so normalize
+  // extreme aspect ratios (> 8:1) to <= 4:1 before voxelization and unscale back.
+  let loX = Infinity, loY = Infinity, loZ = Infinity;
+  let hiX = -Infinity, hiY = -Infinity, hiZ = -Infinity;
+  for (let i = 0; i < verts.length; i += 3) {
+    const x = verts[i], y = verts[i + 1], z = verts[i + 2];
+    if (x < loX) loX = x; if (x > hiX) hiX = x;
+    if (y < loY) loY = y; if (y > hiY) hiY = y;
+    if (z < loZ) loZ = z; if (z > hiZ) hiZ = z;
+  }
+  const ext = [hiX - loX, hiY - loY, hiZ - loZ];
+  const maxExt = Math.max(ext[0], ext[1], ext[2]);
+  const minExt = Math.min(ext[0], ext[1], ext[2]);
+  const mid = [(loX + hiX) / 2, (loY + hiY) / 2, (loZ + hiZ) / 2];
+  const scale: [number, number, number] = [1, 1, 1];
+  let normalized = false;
+  if (minExt > 1e-6 && maxExt / minExt > 8) {
+    const targetMin = maxExt / 4;
+    for (let k = 0; k < 3; k++) {
+      if (ext[k] < targetMin) {
+        scale[k] = targetMin / ext[k];
+        normalized = true;
+      }
+    }
+  }
+  const positions = Float64Array.from(verts);
+  if (normalized) {
+    for (let i = 0; i < positions.length; i += 3) {
+      positions[i] = mid[0] + (positions[i] - mid[0]) * scale[0];
+      positions[i + 1] = mid[1] + (positions[i + 1] - mid[1]) * scale[1];
+      positions[i + 2] = mid[2] + (positions[i + 2] - mid[2]) * scale[2];
+    }
+  }
+
   const out = vhacd.computeConvexHulls(
-    { positions: Float64Array.from(verts), indices: Uint32Array.from(faces) },
+    { positions, indices: Uint32Array.from(faces) },
     options,
   );
 
   const hulls: Hull[] = [];
   for (const m of out) {
     const hv: number[] = new Array(m.positions.length);
-    for (let i = 0; i < m.positions.length; i++) hv[i] = Math.round(m.positions[i] * QUANTUM) / QUANTUM;
+    if (normalized) {
+      for (let i = 0; i < m.positions.length; i += 3) {
+        hv[i] = Math.round((mid[0] + (m.positions[i] - mid[0]) / scale[0]) * QUANTUM) / QUANTUM;
+        hv[i + 1] = Math.round((mid[1] + (m.positions[i + 1] - mid[1]) / scale[1]) * QUANTUM) / QUANTUM;
+        hv[i + 2] = Math.round((mid[2] + (m.positions[i + 2] - mid[2]) / scale[2]) * QUANTUM) / QUANTUM;
+      }
+    } else {
+      for (let i = 0; i < m.positions.length; i++) hv[i] = Math.round(m.positions[i] * QUANTUM) / QUANTUM;
+    }
     const hf = Array.from(m.indices);
     const { volume, centroid } = meshVolumeAndCentroid(hv, hf);
     // V-HACD can hand back a hull wound inward; its volume then integrates

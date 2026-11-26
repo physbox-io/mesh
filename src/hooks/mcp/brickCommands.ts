@@ -103,6 +103,7 @@ export const brickCommands: McpCommands = {
     return {
       ok: true,
       laid: placement !== 'none',
+      ...(placement !== 'none' ? { createdIds: outcome.createdIds } : {}),
       brick: r.standard.label,
       bondType: r.bondType,
       jointMm: r.jointMm,

@@ -432,10 +432,22 @@ export const summarizeGeom = (g: SceneGeom) => ({
  * and a dynamic test was the only other way to check them. The centre of mass
  * and the principal axes are in the body's own frame.
  */
+/** True when every geom on the body is visual-only (and carries no explicit positive mass). */
+export const isVisualOnlyNode = (node: SceneNode): boolean =>
+  (node.geoms?.length ?? 0) > 0 &&
+  node.geoms!.every((g) => g.role === 'visual' && !(typeof g.mass === 'number' && g.mass > 0));
+
 const inertialOf = (model: ModelMirror | null, node: SceneNode): Record<string, unknown> | null => {
   const bId = model?._idMaps?.body?.[node.id];
   if (bId === undefined || bId < 0 || !model?.body_mass) return null;
   const r = (v: number, d: number) => +v.toPrecision(d);
+  if (isVisualOnlyNode(node)) {
+    const out: Record<string, unknown> = { massKg: 0 };
+    if (model.body_ipos) out.comMm = [0, 1, 2].map(i => +(model.body_ipos![bId * 3 + i] * 1000).toFixed(3));
+    if (model.body_inertia) out.principalInertiaKgM2 = [0, 0, 0];
+    if (model.body_iquat) out.principalAxesQuat = [0, 1, 2, 3].map(i => +model.body_iquat![bId * 4 + i].toFixed(6));
+    return out;
+  }
   const out: Record<string, unknown> = { massKg: r(model.body_mass[bId], 6) };
   if (model.body_ipos) out.comMm = [0, 1, 2].map(i => +(model.body_ipos![bId * 3 + i] * 1000).toFixed(3));
   if (model.body_inertia) out.principalInertiaKgM2 = [0, 1, 2].map(i => r(model.body_inertia![bId * 3 + i], 6));

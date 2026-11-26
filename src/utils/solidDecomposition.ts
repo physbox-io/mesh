@@ -214,7 +214,9 @@ export async function decomposeSolid(verts: number[], faces: number[], opts: Sol
   const tolerance = opts.tolerance ?? toleranceFor(verts);
   const sectors = opts.voxelResolution === undefined ? await sectorPieces(verts, faces, opts, tolerance) : null;
   if (sectors && sectors.intrusion <= SECTORS_GOOD_ENOUGH && sectors.uncovered <= SECTORS_GOOD_ENOUGH) return sectors;
-  const exact = opts.voxelResolution === undefined ? await reflexPieces(verts, faces, opts, tolerance) : null;
+  const exact = (opts.voxelResolution === undefined || faces.length / 3 <= 200)
+    ? await reflexPieces(verts, faces, opts, tolerance)
+    : null;
   const worst = (r: SolidResult) => (r.cavities.length > 0 ? Infinity : Math.max(r.intrusion, r.uncovered));
   if (exact && worst(exact) <= SECTORS_GOOD_ENOUGH) return exact;
   const chunked = await chunkedPieces(verts, faces, opts, tolerance);
@@ -246,7 +248,7 @@ async function reflexPieces(verts: number[], faces: number[], opts: SolidOptions
     return null;
   }
   if (!cut) return null;
-  const { convexHullOf } = await import('./csg');
+  const { convexHullOf, meshVolumeAndCentroid } = await import('./csg');
   const hullOfCell = (c: Chunk): Hull | null => {
     const pts: number[][] = [];
     for (let i = 0; i < c.verts.length; i += 3) pts.push([c.verts[i], c.verts[i + 1], c.verts[i + 2]]);
@@ -257,6 +259,25 @@ async function reflexPieces(verts: number[], faces: number[], opts: SolidOptions
   for (const c of cut.convex) {
     const h = hullOfCell(c);
     if (h) hulls.push(h);
+  }
+  // Purely flat polyhedral decomposition (every cell is already convex with no
+  // reflex edges left, e.g. an extruded V-bar or bracket): verify volume and
+  // surface coverage directly instead of sampling a 1.5M-cell cavity grid.
+  if (cut.rest.length === 0 && hulls.length >= 2 && hulls.length <= opts.maxPieces) {
+    const origVol = Math.abs(meshVolumeAndCentroid(verts, faces).volume);
+    const hullVol = hulls.reduce((sum, h) => sum + h.volume, 0);
+    if (origVol > 0 && Math.abs(hullVol - origVol) <= origVol * 0.005) {
+      const cov = coverageOf(verts, faces, hulls);
+      if (cov.uncovered <= tolerance) {
+        return {
+          hulls,
+          cavities: [],
+          intrusion: 0,
+          ...cov,
+          chunks: cut.convex.length,
+        };
+      }
+    }
   }
   const left = opts.maxPieces - hulls.length;
   if (cut.rest.length > 0 && left < cut.rest.length) return null;

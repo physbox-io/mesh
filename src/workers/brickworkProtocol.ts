@@ -6,7 +6,7 @@ import type { BrickPlacement, BrickworkOptions, BrickworkResult } from '../utils
 
 export type BrickworkRequestOptions = Partial<BrickworkOptions> & { placement?: BrickPlacement };
 
-export interface BrickworkOutcome { nodes: SceneNode[]; result: BrickworkResult }
+export interface BrickworkOutcome { nodes: SceneNode[]; result: BrickworkResult; createdIds: string[] }
 
 export type BrickworkRequest =
   | { type: 'LAY'; id: number; scene?: SceneGraph; bodyId: string | null; options: BrickworkRequestOptions }
