@@ -443,6 +443,38 @@ export const objectCommands: McpCommands = {
   SET_COLOR: async (msg, { store, toId }) => {
     // The base colour of a body (or batch of bodies) — what "make the imported
     // bracket blue" means. Paint (below) sits on top of this and is not disturbed by it.
+    const parseColorInput = (raw: unknown): { rgba: [number, number, number, number]; hasAlpha: boolean } | undefined => {
+      if (typeof raw === 'string') {
+        const s = raw.trim();
+        const m6 = /^#([0-9a-fA-F]{6})([0-9a-fA-F]{2})?$/.exec(s);
+        if (m6) {
+          const rgb = m6[1];
+          const aHex = m6[2];
+          const r = parseInt(rgb.slice(0, 2), 16) / 255;
+          const g = parseInt(rgb.slice(2, 4), 16) / 255;
+          const b = parseInt(rgb.slice(4, 6), 16) / 255;
+          const hasAlpha = aHex !== undefined;
+          const a = hasAlpha ? parseInt(aHex, 16) / 255 : 1;
+          return { rgba: [r, g, b, a], hasAlpha };
+        }
+        const m3 = /^#([0-9a-fA-F]{3})([0-9a-fA-F])?$/.exec(s);
+        if (m3) {
+          const rgb = m3[1];
+          const aHex = m3[2];
+          const r = parseInt(rgb[0] + rgb[0], 16) / 255;
+          const g = parseInt(rgb[1] + rgb[1], 16) / 255;
+          const b = parseInt(rgb[2] + rgb[2], 16) / 255;
+          const hasAlpha = aHex !== undefined;
+          const a = hasAlpha ? parseInt(aHex + aHex, 16) / 255 : 1;
+          return { rgba: [r, g, b, a], hasAlpha };
+        }
+        return undefined;
+      }
+      const norm = normalizeRgba(raw);
+      if (!norm) return undefined;
+      return { rgba: norm, hasAlpha: Array.isArray(raw) && raw.length === 4 };
+    };
+
     const resolveId = (v: unknown) => (toId ? toId(v) : v);
     const rawBatch = (msg as Record<string, unknown>).colors ?? (msg as Record<string, unknown>).items;
     if (rawBatch !== undefined) {
@@ -465,9 +497,9 @@ export const objectCommands: McpCommands = {
         const node = findNodeInScene(store.sceneGraph.nodes, resolvedId);
         if (!node) throw new Error(`colors[${i}]: No object with id '${rawId}'`);
         const rawRgbaInput = rec.rgba ?? rec.color;
-        const validated = normalizeRgba(rawRgbaInput);
-        if (!validated) {
-          throw new Error(`colors[${i}]: rgba must be [r, g, b] or [r, g, b, a], each a finite number in 0..1`);
+        const parsed = parseColorInput(rawRgbaInput);
+        if (!parsed) {
+          throw new Error(`colors[${i}]: rgba must be [r, g, b] or [r, g, b, a] (each in 0..1) or a CSS hex string ("#rrggbb" / "#rrggbbaa")`);
         }
         const geomName = typeof rec.geomName === 'string' && rec.geomName ? rec.geomName : undefined;
         if (geomName) {
@@ -487,25 +519,26 @@ export const objectCommands: McpCommands = {
             throw new Error(`colors[${i}]: Object '${rawId}' has no geom named '${geomName}'`);
           }
         }
-        const rawArr = rawRgbaInput as number[];
         entries.push({
           nodeId: node.id,
           ...(geomName ? { geomName } : {}),
-          rgba: rawArr.length === 4 ? validated : rawArr.slice(0, 3),
+          rgba: parsed.hasAlpha ? parsed.rgba : parsed.rgba.slice(0, 3),
         });
         seenBodies.add(node.id);
       }
       const geomsColored = store.setGeomColorsBatch(entries);
       return { ok: true, bodiesColored: seenBodies.size, geomsColored };
     }
-    const { targetId, geomName, rgba } = msg as Msg<{ targetId: string; geomName?: string; rgba: unknown }>;
+    const { targetId, geomName, rgba, color } = msg as Msg<{ targetId: string; geomName?: string; rgba?: unknown; color?: unknown }>;
     if (!targetId) throw new Error('Missing targetId');
-    const validatedRgba = normalizeRgba(rgba);
-    if (!validatedRgba) {
-      throw new Error('rgba must be [r, g, b] or [r, g, b, a], each a finite number in 0..1');
+    const rawColorInput = rgba !== undefined ? rgba : color;
+    const parsedColor = parseColorInput(rawColorInput);
+    if (!parsedColor) {
+      throw new Error('rgba must be [r, g, b] or [r, g, b, a] (each in 0..1) or a CSS hex string ("#rrggbb" / "#rrggbbaa")');
     }
-    const rawRgba = rgba as number[];
-    const explicitAlpha = rawRgba.length === 4 ? rawRgba[3] : undefined;
+    const validatedRgba = parsedColor.rgba;
+    const rawRgba = parsedColor.rgba;
+    const explicitAlpha = parsedColor.hasAlpha ? parsedColor.rgba[3] : undefined;
     const node = findNodeInScene(store.sceneGraph.nodes, targetId);
     if (!node) throw new Error(`No object with id '${targetId}'`);
     if (node.cloth) {
@@ -821,6 +854,10 @@ export const objectCommands: McpCommands = {
       return { ok: false, error: 'into must be a body id or name (string)' };
     }
     if (into && !findNodeInScene(store.sceneGraph.nodes, into)) return { ok: false, error: `No object with id '${rawInto}'` };
+    // Snapshot scene before inserting hardware so validation failures (e.g. invalid fixTo)
+    // can roll back cleanly without leaving an orphan body in the scene graph.
+    const beforeScene = structuredClone(useStore.getState().sceneGraph);
+    const beforeSelectedId = useStore.getState().selectedNodeId;
     let id: string | null;
     let usedJoinProfiles = false;
     const housing = into && group ? findNodeInScene(store.sceneGraph.nodes, into)?.geoms?.find((g) => g.hardware?.group === group)?.hardware?.kind === 'lm_housing' : false;
@@ -1003,7 +1040,10 @@ export const objectCommands: McpCommands = {
       const added = findNodeInScene(useStore.getState().sceneGraph.nodes, id);
       const piece = added && movingPieceOf(added);
       const why = piece ? useStore.getState().fixToPiece(piece.id, fixTo) : `A ${info.label.toLowerCase()} has no moving piece to fix a body to`;
-      if (why) return { ok: false, error: why, id };
+      if (why) {
+        useStore.setState({ sceneGraph: beforeScene, selectedNodeId: beforeSelectedId });
+        return { ok: false, error: why };
+      }
     }
     await compileCsgNodes(true);
     await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);

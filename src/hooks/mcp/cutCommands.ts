@@ -19,6 +19,7 @@ import {
   DEFAULT_SHEET_UNFOLD_OPTIONS,
   SHEET_PRESETS,
   exportSheetUnfold,
+  renderSingleSheetUnfoldSvg,
   type SheetPreset,
   type SheetUnfoldOptions,
 } from '../../utils/sheetUnfoldExporter';
@@ -182,6 +183,7 @@ export const cutCommands: McpCommands = {
       summary: Record<string, unknown>,
       warnings: string[],
       sheets?: EtchSheetSpec[],
+      fileEntries?: Array<{ name: string; bytes: Uint8Array }>,
     ) => ({
       ok: true,
       kind,
@@ -191,7 +193,10 @@ export const cutCommands: McpCommands = {
       etch: { name, thicknessMm, machine, material: state.material, ...(sheets && sheets.length > 1 ? { sheets } : {}) },
       summary: { ...summary, thicknessMm },
       warnings,
-      files: describeFiles([{ name: `${fileSafe(name)}.svg`, bytes: new TextEncoder().encode(svg) }], msg.includeFiles !== false),
+      files: describeFiles(
+        fileEntries ?? [{ name: `${fileSafe(name)}.svg`, bytes: new TextEncoder().encode(svg) }],
+        msg.includeFiles !== false,
+      ),
     });
 
     if (kind === 'unfold') {
@@ -213,6 +218,11 @@ export const cutCommands: McpCommands = {
       if (rawOnePartPerSheet !== undefined && rawOnePartPerSheet !== null && typeof rawOnePartPerSheet !== 'boolean') {
         return { ok: false, error: 'onePartPerSheet must be a boolean.' };
       }
+      const rawSplitSheets = msg.splitSheets !== undefined ? msg.splitSheets : msg.split_sheets;
+      if (rawSplitSheets !== undefined && rawSplitSheets !== null && typeof rawSplitSheets !== 'boolean') {
+        return { ok: false, error: 'splitSheets must be a boolean.' };
+      }
+      const splitSheets = rawSplitSheets === true;
       const t1 = checkPos(msg.thicknessMm, 'thicknessMm');
       if (!t1.ok) return t1;
       const t2 = checkPos(msg.materialThicknessMm, 'materialThicknessMm');
@@ -256,7 +266,21 @@ export const cutCommands: McpCommands = {
         const res = exportSheetUnfold(subject.scene, options);
         if (!res.success || !res.svg) return { ok: false, error: res.error || 'Nothing here unfolds.', warnings: res.warnings };
         const sheets: EtchSheetSpec[] = res.sheets.map((s) => ({ widthMm: s.widthMm, heightMm: s.heightMm, thicknessMm: thick }));
-        const suggestedTabWidthMm = Math.max(1.5, Math.round(options.tabWidthMm * 0.5 * 10) / 10);
+        const cornerBlocked = res.cornerBlockedTabCount ?? 0;
+        const suggestedTabWidthMm = Math.round(options.tabWidthMm * 0.5 * 10) / 10;
+        let omittedTabsHint: string | undefined;
+        if (res.omittedTabCount > 0) {
+          if (cornerBlocked >= res.omittedTabCount) {
+            omittedTabsHint = `${res.omittedTabCount} glue tab(s) were omitted in tight/zero-clearance inside corners where adjacent unfolded faces meet with no room for a tab; narrowing tab_width_mm further will not fit these corners (tape or bridge those seams on assembly, or split the net).`;
+          } else if (suggestedTabWidthMm < 2) {
+            omittedTabsHint = `${res.omittedTabCount} glue tab(s) were omitted due to tight corner/face clearance; tab_width_mm (${options.tabWidthMm} mm) is already near the minimum practical width (2 mm), so assemble those seams with tape or split the net.`;
+          } else if (cornerBlocked > 0) {
+            const nonCorner = res.omittedTabCount - cornerBlocked;
+            omittedTabsHint = `${res.omittedTabCount} glue tab(s) were omitted (${cornerBlocked} in tight/zero-clearance inside corners, ${nonCorner} due to overlap clearance); try a narrower tab_width_mm (e.g. ${suggestedTabWidthMm} mm) to fit the non-corner tabs.`;
+          } else {
+            omittedTabsHint = `${res.omittedTabCount} glue tab(s) were omitted due to overlap/clearance collisions; try a narrower tab_width_mm (e.g. ${suggestedTabWidthMm} mm) to fit more tabs.`;
+          }
+        }
         const sheetGroups = res.sheets.some((s) => s.groupLabel || s.colorHex)
           ? res.sheets.map((s) => ({
               sheet: s.index + 1,
@@ -267,6 +291,17 @@ export const cutCommands: McpCommands = {
               ...(s.colorHex ? { colorHex: s.colorHex } : {}),
             }))
           : undefined;
+        const splitFileEntries = splitSheets && res.sheets.length > 0
+          ? res.sheets.map((s) => {
+              const rawLabel = s.groupLabel || (s.colorHex ? s.colorHex.replace(/^#/, '') : '');
+              const labelSuffix = rawLabel ? `_${fileSafe(rawLabel)}` : '';
+              const sheetSvg = renderSingleSheetUnfoldSvg(res.islands, s, options);
+              return {
+                name: `${fileSafe(name)}_sheet_${s.index + 1}${labelSuffix}.svg`,
+                bytes: new TextEncoder().encode(sheetSvg),
+              };
+            })
+          : undefined;
         return pack(
           res.svg,
           thick,
@@ -276,16 +311,15 @@ export const cutCommands: McpCommands = {
             sheets: res.sheets.length || 1,
             glueTabs: res.glueTabCount,
             omittedTabs: res.omittedTabCount,
-            ...(res.omittedTabCount > 0
-              ? {
-                  omittedTabsHint: `${res.omittedTabCount} glue tab(s) were omitted due to overlap/clearance collisions; try a narrower tab_width_mm (e.g. ${suggestedTabWidthMm} mm) to fit more tabs.`,
-                }
-              : {}),
+            ...(cornerBlocked > 0 ? { cornerBlockedTabs: cornerBlocked } : {}),
+            ...(omittedTabsHint ? { omittedTabsHint } : {}),
             ...(sheetPreset ? { sheetPreset } : {}),
             ...(sheetGroups ? { sheetGroups } : {}),
+            ...(splitSheets ? { splitSheets: true } : {}),
           },
           res.warnings,
           sheets,
+          splitFileEntries,
         );
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : String(err) };

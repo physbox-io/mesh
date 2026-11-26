@@ -216,6 +216,8 @@ export interface SheetUnfoldResult {
   glueTabCount: number;
   /** Number of glue tabs omitted due to overlap/clearance collisions in papercraft mode. */
   omittedTabCount: number;
+  /** Subset of omitted tabs blocked even at minimal (1 mm) width in tight/zero-clearance inside corners. */
+  cornerBlockedTabCount: number;
   stitchHoleCount: number;
   /** Total bend allowance added across all fold edges in sheet_metal mode (mm). */
   totalBendAllowanceMm: number;
@@ -2721,10 +2723,11 @@ function unfoldSurfaceToIslands(
   nextPairId: number;
   totalBendAllowanceMm: number;
   omittedTabCount: number;
+  cornerBlockedTabCount: number;
 } {
   const { faces, vertices } = surface;
   if (faces.length === 0) {
-    return { islands: [], nextPairId: startPairId, totalBendAllowanceMm: 0, omittedTabCount: 0 };
+    return { islands: [], nextPairId: startPairId, totalBendAllowanceMm: 0, omittedTabCount: 0, cornerBlockedTabCount: 0 };
   }
 
   // 1. Build face adjacency graph across shared 3D edges
@@ -3059,6 +3062,7 @@ function unfoldSurfaceToIslands(
   const glueTabOwnerFace = new Map<number, number>();
   const glueTabEffectiveWidth = new Map<number, number>();
   const omittedGlueTabPairs: number[] = [];
+  let cornerBlockedTabCount = 0;
 
   // Map faceIndex -> its RawIsland
   const faceToIsland = new Map<number, RawIsland>();
@@ -3191,6 +3195,14 @@ function unfoldSurfaceToIslands(
         placedTabPolysByIsland.get(chosenIsl)!.push(chosenTab);
       } else {
         omittedGlueTabPairs.push(pairId);
+        // Probe at minimal width (<= 1 mm) to distinguish zero-clearance inside corners
+        // from seams where a narrower practical tab_width_mm could still fit.
+        const probeW = Math.min(options.tabWidthMm, 1.0);
+        const probeA = buildGlueTabPolygon(a1, a2, probeW, options.tabAngleDeg);
+        const probeB = buildGlueTabPolygon(b1, b2, probeW, options.tabAngleDeg);
+        if (clearanceScore(probeA, islA, se.faceA) < 0 && clearanceScore(probeB, islB, se.faceB) < 0) {
+          cornerBlockedTabCount++;
+        }
       }
     }
   }
@@ -3776,7 +3788,7 @@ function unfoldSurfaceToIslands(
     });
   }
 
-  return { islands, nextPairId, totalBendAllowanceMm, omittedTabCount: omittedGlueTabPairs.length };
+  return { islands, nextPairId, totalBendAllowanceMm, omittedTabCount: omittedGlueTabPairs.length, cornerBlockedTabCount };
 }
 
 // ---------------------------------------------------------------------------
@@ -3990,15 +4002,16 @@ function packIslandsOntoSheets(
 function renderSheetUnfoldSvg(
   islands: UnfoldIsland[],
   sheets: UnfoldSheet[],
-  options: SheetUnfoldOptions
+  options: SheetUnfoldOptions,
+  singleSheet?: UnfoldSheet
 ): string {
-  const sheetW = Math.max(50, options.sheetWidthMm);
-  const sheetH = Math.max(50, options.sheetHeightMm);
-  const numSheets = Math.max(1, sheets.length);
+  const sheetW = Math.max(50, singleSheet ? singleSheet.widthMm : options.sheetWidthMm);
+  const sheetH = Math.max(50, singleSheet ? singleSheet.heightMm : options.sheetHeightMm);
+  const numSheets = singleSheet ? 1 : Math.max(1, sheets.length);
   const totalHeight = numSheets * sheetH;
 
   const fmt = (n: number) => Number(n.toFixed(3));
-  const sheetYOffset = (sheetIdx: number) => sheetIdx * sheetH;
+  const sheetYOffset = (sheetIdx: number) => (singleSheet ? 0 : sheetIdx * sheetH);
 
   const sheetOutlineParts: string[] = [];
   const cutParts: string[] = [];
@@ -4009,21 +4022,37 @@ function renderSheetUnfoldSvg(
   const labelParts: string[] = [];
 
   if (options.includeSheetOutline) {
-    for (let s = 0; s < numSheets; s++) {
-      const y0 = sheetYOffset(s);
+    if (singleSheet) {
       sheetOutlineParts.push(
-        `    <rect x="0" y="${fmt(y0)}" width="${fmt(sheetW)}" height="${fmt(sheetH)}" data-operation="ghost" fill="none" stroke="#94a3b8" stroke-width="0.35" stroke-dasharray="6,4" />`
+        `    <rect x="0" y="0" width="${fmt(sheetW)}" height="${fmt(sheetH)}" data-operation="ghost" fill="none" stroke="#94a3b8" stroke-width="0.35" stroke-dasharray="6,4" />`
       );
       if (options.includeLabels) {
-        const groupSuffix = sheets[s]?.groupLabel ? ` — ${escapeXml(sheets[s].groupLabel!)}` : '';
+        const groupSuffix = singleSheet.groupLabel ? ` — ${escapeXml(singleSheet.groupLabel)}` : '';
         sheetOutlineParts.push(
-          `    <text x="10" y="${fmt(y0 + 20)}" data-operation="ghost" font-family="sans-serif" font-size="12" font-weight="bold" fill="#64748b">Sheet ${s + 1}${groupSuffix} (${fmt(sheetW)}mm x ${fmt(sheetH)}mm, ${options.mode})</text>`
+          `    <text x="10" y="20" data-operation="ghost" font-family="sans-serif" font-size="12" font-weight="bold" fill="#64748b">Sheet ${singleSheet.index + 1}${groupSuffix} (${fmt(sheetW)}mm x ${fmt(sheetH)}mm, ${options.mode})</text>`
         );
+      }
+    } else {
+      for (let s = 0; s < numSheets; s++) {
+        const y0 = sheetYOffset(s);
+        sheetOutlineParts.push(
+          `    <rect x="0" y="${fmt(y0)}" width="${fmt(sheetW)}" height="${fmt(sheetH)}" data-operation="ghost" fill="none" stroke="#94a3b8" stroke-width="0.35" stroke-dasharray="6,4" />`
+        );
+        if (options.includeLabels) {
+          const groupSuffix = sheets[s]?.groupLabel ? ` — ${escapeXml(sheets[s].groupLabel!)}` : '';
+          sheetOutlineParts.push(
+            `    <text x="10" y="${fmt(y0 + 20)}" data-operation="ghost" font-family="sans-serif" font-size="12" font-weight="bold" fill="#64748b">Sheet ${s + 1}${groupSuffix} (${fmt(sheetW)}mm x ${fmt(sheetH)}mm, ${options.mode})</text>`
+          );
+        }
       }
     }
   }
 
-  for (const isl of islands) {
+  const islandsToRender = singleSheet
+    ? islands.filter((isl) => isl.sheetIndex === singleSheet.index)
+    : islands;
+
+  for (const isl of islandsToRender) {
     const yOff = sheetYOffset(isl.sheetIndex);
     const loopToPath = (pts: Point2D[]): string => {
       if (pts.length === 0) return '';
@@ -4148,6 +4177,19 @@ function renderSheetUnfoldSvg(
     .join('\n');
 }
 
+/**
+ * Renders a single standalone SVG for one packed sheet (with y=0 at the top of
+ * that sheet) so craft cutters (Cricut, Silhouette, LightBurn) can cut each
+ * sheet / cardstock color independently.
+ */
+export function renderSingleSheetUnfoldSvg(
+  islands: UnfoldIsland[],
+  sheet: UnfoldSheet,
+  options: SheetUnfoldOptions
+): string {
+  return renderSheetUnfoldSvg(islands, [sheet], options, sheet);
+}
+
 // ---------------------------------------------------------------------------
 // Public API: exportSheetUnfold & buildSheetUnfoldEtchUrl
 // ---------------------------------------------------------------------------
@@ -4179,6 +4221,7 @@ export function exportSheetUnfold(
       seamCount: 0,
       glueTabCount: 0,
       omittedTabCount: 0,
+      cornerBlockedTabCount: 0,
       stitchHoleCount: 0,
       totalBendAllowanceMm: 0,
       warnings,
@@ -4190,6 +4233,7 @@ export function exportSheetUnfold(
   let nextPairId = 1;
   let totalBendAllowanceMm = 0;
   let omittedTabCount = 0;
+  let cornerBlockedTabCount = 0;
 
   for (const surface of surfaces) {
     const res = unfoldSurfaceToIslands(surface, opts, nextPairId, allIslands.length, warnings);
@@ -4197,6 +4241,7 @@ export function exportSheetUnfold(
     nextPairId = res.nextPairId;
     totalBendAllowanceMm += res.totalBendAllowanceMm;
     omittedTabCount += res.omittedTabCount;
+    cornerBlockedTabCount += res.cornerBlockedTabCount;
   }
 
   const sheets = packIslandsOntoSheets(allIslands, opts, warnings);
@@ -4272,6 +4317,7 @@ export function exportSheetUnfold(
     seamCount,
     glueTabCount,
     omittedTabCount,
+    cornerBlockedTabCount,
     stitchHoleCount,
     totalBendAllowanceMm,
     warnings,
