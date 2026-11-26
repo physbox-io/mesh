@@ -116,6 +116,13 @@ export function reliefOptionsFor(msg: Record<string, unknown>): { options: Relie
   const verticalExaggeration = requireFinitePos(msg.verticalExaggeration, 'verticalExaggeration');
   const rawFitMode = requireEnum(msg.fitMode, 'fitMode', ['fit', 'actual', 'manual'] as const);
   const backgroundMode = requireEnum(msg.backgroundMode, 'backgroundMode', ['auto', 'carve', 'skip'] as const);
+  const cutThroughMm = requireFiniteNonNeg(msg.cutThroughMm, 'cutThroughMm');
+  const holdingTabs = requireBool(msg.holdingTabs, 'holdingTabs');
+  const tabHeightMm = requireFinitePos(msg.tabHeightMm, 'tabHeightMm');
+  const tabWidthMm = requireFinitePos(msg.tabWidthMm, 'tabWidthMm');
+  const finishingFluteLengthMm = requireFiniteNonNeg(msg.finishingFluteLengthMm, 'finishingFluteLengthMm');
+  const finishingShankDiaMm = requireFiniteNonNeg(msg.finishingShankDiaMm, 'finishingShankDiaMm');
+  const toolBodyClearance = requireBool(msg.toolBodyClearance, 'toolBodyClearance');
   requireEnum(msg.units, 'units', ['mm', 'in'] as const);
 
   const asked: Partial<ReliefCarveOptions> = {
@@ -132,11 +139,18 @@ export function reliefOptionsFor(msg: Record<string, unknown>): { options: Relie
     ...(rawFitMode === 'fit' ? { fitMode: 'fit' as const } : {}),
     ...(rawFitMode === 'actual' || rawFitMode === 'manual' ? { fitMode: 'manual' as const } : {}),
     ...(backgroundMode !== undefined ? { backgroundMode } : {}),
+    ...(cutThroughMm !== undefined ? { cutThroughMm } : {}),
+    ...(holdingTabs !== undefined ? { holdingTabs } : {}),
+    ...(tabHeightMm !== undefined ? { tabHeightMm } : {}),
+    ...(tabWidthMm !== undefined ? { tabWidthMm } : {}),
+    ...(finishingFluteLengthMm !== undefined ? { finishingFluteLengthMm } : {}),
+    ...(finishingShankDiaMm !== undefined ? { finishingShankDiaMm } : {}),
+    ...(toolBodyClearance !== undefined ? { toolBodyClearance } : {}),
   };
   const merged: ReliefCarveOptions = { ...base, ...asked, scalePercent: 100 };
   // The dialog's feeds stand, overrides and all, unless what they were
   // worked out for has been changed here.
-  const rederive = !dialog || ['roughingToolDiaMm', 'finishingToolDiaMm', 'carveDepthMm', 'material']
+  const rederive = !dialog || ['roughingToolDiaMm', 'finishingToolDiaMm', 'carveDepthMm', 'cutThroughMm', 'material']
     .some((k) => k in asked);
   const options: ReliefCarveOptions = {
     ...merged,
@@ -207,6 +221,9 @@ export function machiningOptionsFor(msg: Record<string, unknown>, scene: SceneGr
   }
   const clearanceMm = requireFinitePos(msg.clearanceMm, 'clearanceMm');
   const toolStickoutMm = requireFinitePos(msg.toolStickoutMm, 'toolStickoutMm');
+  const finishingFluteLengthMm = requireFiniteNonNeg(msg.finishingFluteLengthMm, 'finishingFluteLengthMm');
+  const finishingShankDiaMm = requireFiniteNonNeg(msg.finishingShankDiaMm, 'finishingShankDiaMm');
+  const toolBodyClearance = requireBool(msg.toolBodyClearance, 'toolBodyClearance');
   const roughingEnabled = requireBool(msg.roughingEnabled, 'roughingEnabled');
   const finishingEnabled = requireBool(msg.finishingEnabled, 'finishingEnabled');
   const finishingStrategy = requireEnum(msg.finishingStrategy, 'finishingStrategy', FINISHING_STRATEGIES);
@@ -241,6 +258,9 @@ export function machiningOptionsFor(msg: Record<string, unknown>, scene: SceneGr
     ...(maxSetups !== undefined ? { maxSetups } : {}),
     ...(clearanceMm !== undefined ? { clearanceMm } : {}),
     ...(toolStickoutMm !== undefined ? { toolStickoutMm } : {}),
+    ...(finishingFluteLengthMm !== undefined ? { finishingFluteLengthMm } : {}),
+    ...(finishingShankDiaMm !== undefined ? { finishingShankDiaMm } : {}),
+    ...(toolBodyClearance !== undefined ? { toolBodyClearance } : {}),
     ...(roughingEnabled !== undefined ? { roughingEnabled } : {}),
     ...(finishingEnabled !== undefined ? { finishingEnabled } : {}),
     ...(finishingStrategy !== undefined

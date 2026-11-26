@@ -24,6 +24,7 @@ import { DEFAULT_RELIEF_OPTIONS, type ReliefCarveOptions, type ReliefCarveResult
 import { buildHeightmap, findUndercut, lowestInteriorZ, measureDetailMm, type Heightmap } from './reliefHeightmap';
 import { f } from './reliefPaths';
 import { OVERRUN_PAST_EDGE_MM, openEdges, type OpenEdges } from './surfaceJob';
+import { distanceTransform } from './distanceTransform';
 import { addHoldingTabs, countLoosePieces } from './holdingTabs';
 import { bridgeOuterEdgeBevel, endFaces, extendOpenEdges, fillGrazedEdges } from './reliefEdges';
 import { machineSurface } from './machineSurface';
@@ -410,9 +411,21 @@ export function generateReliefCarveGcode(
 
   const backgroundMode =
     opts.backgroundMode === 'auto' ? (asModelled ? 'skip' : 'carve') : opts.backgroundMode;
+  // When cutting through a part that spans the stock thickness on a larger board
+  // with background skipped, cut a hugging perimeter moat around the silhouette
+  // (matching 1-sided solid machining) so the cutter frees the outline and
+  // holding tabs bridge it without clearing the whole bounding box or sheet.
+  const cutOutPerimeter =
+    !opts.invertRelief &&
+    cutThrough > 0 &&
+    backgroundMode === 'skip' &&
+    modelH * zScale >= opts.stockThicknessMm - 1;
+  const cutOutMoatMm = cutOutPerimeter
+    ? Math.max(3, (opts.roughingEnabled ? opts.roughingToolDiaMm : opts.finishingToolDiaMm) * 1.5)
+    : 0;
   // An intaglio has no background to carve: round the impression is the
   // stock face, the model's lowest level, whatever Background says.
-  if (!opts.invertRelief && asModelled && backgroundMode === 'skip' && (modelW < stockW - 1 || modelD < stockD - 1)) {
+  if (!opts.invertRelief && !cutOutPerimeter && asModelled && backgroundMode === 'skip' && (modelW < stockW - 1 || modelD < stockD - 1)) {
     warnings.push(
       `The model (${modelW.toFixed(1)} x ${modelD.toFixed(1)} mm) is smaller than the stock, and the board ` +
         `round it is left uncut. Set Background to Carve to cut it down to the floor.`
@@ -421,6 +434,8 @@ export function generateReliefCarveGcode(
   const backgroundZ = backgroundMode === 'skip' ? 0 : floorZ;
   // Which sides of the model end in a face; see `endFaces`.
   let edgeFaces: OpenEdges = { minX: false, maxX: false, minY: false, maxY: false };
+  let cutOutHit: Uint8Array | null = null;
+  let cutOutDist: Float32Array | null = null;
   if (opts.invertRelief) {
     for (let i = 0; i < surface.z.length; i++) {
       if (surface.z[i] === -Infinity) {
@@ -431,24 +446,54 @@ export function generateReliefCarveGcode(
       }
     }
   } else {
-    // In a through-cut, a cell with no surface inside the model's footprint is
-    // one of its holes and goes to the floor; outside the footprint it is
-    // background like any other.
-    const inFootprint = (i: number): boolean => {
-      if (cutThrough <= 0) return false;
-      const x = surface.minX + (i % surface.cols) * surface.stepX;
-      const y = surface.minY + Math.floor(i / surface.cols) * surface.stepY;
-      return x >= carveBounds.minX && x <= carveBounds.maxX && y >= carveBounds.minY && y <= carveBounds.maxY;
-    };
     const faces = endFaces(surface, carveBounds);
     edgeFaces = faces;
     fillGrazedEdges(surface, carveBounds, faces);
     if (backgroundMode === 'skip' && cutThrough <= 0) {
       bridgeOuterEdgeBevel(surface, carveBounds, reliefDepth);
     }
-    for (let i = 0; i < surface.z.length; i++) {
-      if (surface.z[i] === -Infinity) surface.z[i] = inFootprint(i) ? floorZ : backgroundZ;
-      else if (surface.z[i] < floorZ) surface.z[i] = floorZ;
+    if (cutOutPerimeter) {
+      // Hugging moat around the silhouette + any enclosed holes inside the part.
+      const hit = new Uint8Array(cols * rows);
+      for (let i = 0; i < surface.z.length; i++) if (surface.z[i] !== -Infinity) hit[i] = 1;
+      const dist = distanceTransform(hit, cols, rows);
+      const moatCells = cutOutMoatMm / res;
+      // Flood-fill empty cells from the stock border to tell enclosed holes from outside.
+      const outside = new Uint8Array(cols * rows);
+      const queue: number[] = [];
+      const push = (k: number) => { if (!hit[k] && !outside[k]) { outside[k] = 1; queue.push(k); } };
+      for (let c = 0; c < cols; c++) { push(c); push((rows - 1) * cols + c); }
+      for (let r = 0; r < rows; r++) { push(r * cols); push(r * cols + cols - 1); }
+      for (let head = 0; head < queue.length; head++) {
+        const k = queue[head], c = k % cols;
+        if (c > 0) push(k - 1);
+        if (c < cols - 1) push(k + 1);
+        if (k >= cols) push(k - cols);
+        if (k + cols < cols * rows) push(k + cols);
+      }
+      for (let i = 0; i < surface.z.length; i++) {
+        if (surface.z[i] === -Infinity) {
+          surface.z[i] = (!outside[i] || dist[i] <= moatCells) ? floorZ : backgroundZ;
+        } else if (surface.z[i] < floorZ) {
+          surface.z[i] = floorZ;
+        }
+      }
+      cutOutHit = hit;
+      cutOutDist = dist;
+    } else {
+      // In a through-cut, a cell with no surface inside the model's footprint is
+      // one of its holes and goes to the floor; outside the footprint it is
+      // background like any other.
+      const inFootprint = (i: number): boolean => {
+        if (cutThrough <= 0) return false;
+        const x = surface.minX + (i % surface.cols) * surface.stepX;
+        const y = surface.minY + Math.floor(i / surface.cols) * surface.stepY;
+        return x >= carveBounds.minX && x <= carveBounds.maxX && y >= carveBounds.minY && y <= carveBounds.maxY;
+      };
+      for (let i = 0; i < surface.z.length; i++) {
+        if (surface.z[i] === -Infinity) surface.z[i] = inFootprint(i) ? floorZ : backgroundZ;
+        else if (surface.z[i] < floorZ) surface.z[i] = floorZ;
+      }
     }
     // An uncut margin would close every groove that runs off the model, so
     // what leaves the model below the top face carries on to the board's edge.
@@ -549,9 +594,20 @@ export function generateReliefCarveGcode(
       : `; Extents     : X0..${f(stockW)}  Y0..${f(stockD)} (all cuts are +X +Y of zero)`,
   ];
 
+  const scrapBeyond = (finishRad + res) / res;
+  const scrap = cutOutHit && cutOutDist
+    ? (px: number, py: number) => {
+        const c = Math.min(cols - 1, Math.max(0, Math.round((px - surface.minX) / (surface.stepX || 1))));
+        const r = Math.min(rows - 1, Math.max(0, Math.round((py - surface.minY) / (surface.stepY || 1))));
+        const k = r * cols + c;
+        return cutOutHit[k] === 0 && cutOutDist[k] > scrapBeyond && (surface.z[k] >= -1e-6 || surface.z[k] <= floorZ + 0.05);
+      }
+    : undefined;
+
   const cut = machineSurface(
     {
       surface, bounds, depthMm: reliefDepth, resolution: res, header, runOff,
+      ...(scrap ? { scrap } : {}),
       ...(throughDepth !== undefined ? { mustReachMm: throughDepth } : {}),
     },
     opts,

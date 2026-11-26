@@ -22,8 +22,10 @@ export function autoShankDia(diaMm: number): number {
 }
 
 /**
- * Cutting length a bit that size is likely to carry. Catalogue bits run about
- * this.
+ * Cutting/reach length a bit that size is likely to carry. Small CNC end mills
+ * on 1/8" shanks commonly carry ~7×D of cutting/necked reach (e.g. ~11 mm on a
+ * 1/16" bit, up to ~18 mm on 3 mm), rather than a stub 3×D guess that lifts
+ * through-cuts off the spoilboard.
  *
  * A V-bit is not a catalogue guess at all — its cutting length is a fact about
  * the cone. The flank stops widening the instant it reaches the nominal
@@ -32,7 +34,8 @@ export function autoShankDia(diaMm: number): number {
  */
 export function autoFluteLength(diaMm: number, tip?: CutterTip): number {
   if (tip?.shape === 'v_bit') return vBitConeHeight(diaMm, tip.vBitAngleDeg ?? 60);
-  return diaMm * 3;
+  if (diaMm < 3.175) return Math.min(18, diaMm * 7);
+  return diaMm * MAX_AVAILABLE_REACH_DIAMETERS;
 }
 
 /** How a cutter shape reads in a header comment and in a pause prompt. */
@@ -78,6 +81,13 @@ export function describeCutter(
 export function chiploadMm(feedMmMin: number, rpm: number, flutes: number): number {
   const n = Math.max(1, Math.round(flutes));
   return feedMmMin / Math.max(1, rpm) / n;
+}
+
+/** Axial stepdown as a fraction of cutter diameter for full-width clearing in `material`. */
+export function stepdownFractionFor(material: MaterialId): number {
+  if (material === 'aluminium') return 0.1;
+  if (material === 'foam' || material === 'softwood') return 0.6;
+  return 0.5;
 }
 
 /** Two decimals, so a derived setting lands in the UI as a number and not a float artefact. */
@@ -219,7 +229,7 @@ export function recommendReliefTooling(input: ReliefToolingInput): Partial<Relie
     roughingEnabled: roughDia > finishDia + 1e-6,
     roughingToolDiaMm: roughDia,
     roughingStepdownMm: round2(
-      Math.min(depth / 2, Math.max(0.2, roughDia * (material === 'aluminium' ? 0.1 : 0.3)))
+      Math.min(depth / 2, Math.max(0.2, roughDia * stepdownFractionFor(material)))
     ),
     roughingAllowanceMm: round2(Math.min(0.5, Math.max(0.1, finishDia / 8))),
     roughingFeedrate: feedAt(roughSpeeds),
@@ -327,26 +337,22 @@ export function deriveReliefFeeds(
     maxFeedMmMin && maxFeedMmMin > 0 ? maxFeedMmMin : Infinity,
     Math.max(50, Math.round((rough.feedMmMin * (rpm / rough.rpm)) / 10) * 10)
   );
-  const soft = opts.material === 'foam' || opts.material === 'softwood';
-  const metal = opts.material === 'aluminium';
-
   return {
     spindleRpm: rpm,
     finishingFeedrate: finish.feedMmMin,
     finishingPlungeRate: finish.plungeMmMin,
-    // A ball nose leaves a scallop of about 3% of its radius at this spacing,
+    // A ball nose leaves a scallop of about 3% of its radius at 25% spacing,
     // which sands out; a V-bit's ridge is set by its angle instead. A flat mill
-    // leaves none on a flat, so it strides further - as far as the solid
-    // dialog has always set, and no further: on the slopes a hybrid still
-    // rasters, its steps grow with the stride.
-    finishingStepoverPercent: opts.finishingToolType === 'flat' ? 30 : 25,
-    // 0 means "one bite as deep as the cutter is wide", which is what a
-    // finishing pass over already-roughed stock can take.
+    // leaves no scallop on a flat face, so 50% stepover clears pockets and
+    // flat tops cleanly in nearly half the time.
+    finishingStepoverPercent: opts.finishingToolType === 'flat' ? 50 : 25,
+    // 0 means "use the material-appropriate clearing stepdown when layered",
+    // matching roughing when finishing clears solid stock on its own.
     finishingStepdownMm: 0,
     roughingFeedrate: roughFeed,
     roughingPlungeRate: Math.max(30, Math.round(roughFeed / 3 / 10) * 10),
     roughingStepdownMm:
-      Math.round(Math.min(depth / 2, Math.max(0.2, roughDia * (metal ? 0.1 : soft ? 0.4 : 0.3))) * 100) / 100,
+      Math.round(Math.min(depth / 2, Math.max(0.2, roughDia * stepdownFractionFor(opts.material))) * 100) / 100,
     roughingAllowanceMm: Math.round(Math.min(0.5, Math.max(0.1, finishDia / 8)) * 100) / 100,
   };
 }

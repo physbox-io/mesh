@@ -477,7 +477,7 @@ export function FinishingPassFields({
 
         <Field
           label="Flute Length (mm)"
-          hint="How far up the finishing bit the cutting edges run. Below this it cuts, above it only rubs. 0 assumes three diameters, which is about what catalogue bits carry."
+          hint="How far up the finishing bit the cutting edges run. Below this it cuts, above it only rubs. 0 assumes ~7 diameters (e.g. ~11 mm for a 1/16&quot; bit)."
         >
           <NumberInput
             step={1} min={0} max={100}

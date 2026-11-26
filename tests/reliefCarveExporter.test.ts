@@ -532,6 +532,7 @@ describe('Relief carve exporter', () => {
       carveDepthMm: 20,
       roughingEnabled: false,
       finishingToolDiaMm: 1.6,
+      finishingFluteLengthMm: 4.8,
     };
     const guarded = generateReliefCarveGcode(dome, opts);
     const bare = generateReliefCarveGcode(dome, { ...opts, toolBodyClearance: false });

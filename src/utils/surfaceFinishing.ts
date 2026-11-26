@@ -19,7 +19,7 @@ import {
   squareUpWalls,
   type PathPoint,
 } from './reliefPaths';
-import { MAX_REACH_DIAMETERS, describeCutter } from './reliefTooling';
+import { MAX_REACH_DIAMETERS, describeCutter, stepdownFractionFor } from './reliefTooling';
 import { bodyHold } from './bodyHold';
 import { exactWalls } from './exactWalls';
 import { FLAT_PROFILE, ballProfile, vProfile } from './stockModel';
@@ -117,8 +117,11 @@ export function finishSurface(
       if (lost > worst) worst = lost;
     }
     if (carved > 0 && blocked / carved > 0.02) {
+      const flutes = opts.finishingFluteLengthMm > 0
+        ? opts.finishingFluteLengthMm
+        : finishBody[0]?.aboveTipMm ?? 0;
       warnings.push(
-        `Shank/holder clearance lifted the ${opts.finishingToolDiaMm} mm toolpath over ${((100 * blocked) / carved).toFixed(0)}% of the ${noun} (up to ${worst.toFixed(1)} mm above the surface). Use a longer-reach bit, reduce depth, or disable shank clearance in Advanced.`
+        `Shank/holder clearance lifted the ${opts.finishingToolDiaMm} mm toolpath over ${((100 * blocked) / carved).toFixed(0)}% of the ${noun} (up to ${worst.toFixed(1)} mm above the surface; assumed ${flutes.toFixed(1)} mm reach). Set Flute Length in Advanced to your bit's actual cutting length, use a longer-reach bit, or disable shank clearance.`
       );
     }
   }
@@ -139,7 +142,7 @@ export function finishSurface(
     ? Infinity
     : opts.finishingStepdownMm > 0
       ? opts.finishingStepdownMm
-      : Math.max(0.2, opts.finishingToolDiaMm);
+      : Math.max(0.2, opts.finishingToolDiaMm * stepdownFractionFor(opts.material));
 
   let finishDeepest = 0;
   for (let i = 0; i < finishMap.z.length; i++) {
@@ -325,9 +328,22 @@ export function finishSurface(
     ? plan.map((pt) => ({ x: pt.x, y: pt.y, z: 0 }))
     : mended(plan, plan.map((pt) => {
       const level = waterlineLevel(pt);
-      return level === undefined
-        ? { x: pt.x, y: pt.y, z: passZ(pt) }
-        : exact && inWallCell(pt.x, pt.y) ? exact.onWall(pt, level, uphill(pt)) ?? exact.settle(holdOffWall(pt, level)) : holdOffWall(pt, level);
+      if (level === undefined) {
+        const z = passZ(pt);
+        // Scrap floor already cleared by roughing does not need fine raster finishing;
+        // the part's own perimeter (within finishRad + res) is not scrap and still cuts free.
+        if (
+          opts.roughingEnabled &&
+          job.scrap?.(pt.x, pt.y) &&
+          materialLevelAt(pt.x, pt.y) <= z + Math.max(0.5, opts.roughingAllowanceMm) + 0.5
+        ) {
+          return { x: pt.x, y: pt.y, z: 0 };
+        }
+        return { x: pt.x, y: pt.y, z };
+      }
+      return exact && inWallCell(pt.x, pt.y)
+        ? exact.onWall(pt, level, uphill(pt)) ?? exact.settle(holdOffWall(pt, level))
+        : holdOffWall(pt, level);
     }))));
   // The level each pass was traced at, where it is a waterline.
   const placedLevels = planGroups.map((group) => group.map((plan) =>

@@ -276,7 +276,7 @@ export interface ReliefCarveOptions {
   toolBodyClearance: boolean;
   /** Shank diameter of the finishing tool in mm. 0 derives it from the bit. */
   finishingShankDiaMm: number;
-  /** Cutting length of the finishing tool in mm. 0 assumes three diameters. */
+  /** Cutting length of the finishing tool in mm. 0 assumes eight diameters. */
   finishingFluteLengthMm: number;
   /** Distance from the tip of the tool to the face of the holder in mm. 0 skips the holder. */
   toolStickoutMm: number;

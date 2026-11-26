@@ -871,18 +871,28 @@ export function stockFor(partW: number, partD: number, partH: number, opts: Soli
 
   const thick = board.thicknessMm > want.stockT + BOARD_SLACK_THICK_MM;
   const stockT = thick ? up(want.stockT, 1) : board.thicknessMm;
-  const cutPlan =
+  // On a one-sided job with no flush faces, the surrounding frame is never faced
+  // (it stays at Z=0), so a larger sheet does not need to be trimmed first: the
+  // program simply cuts inside its local footprint window so multiple parts can
+  // be cut from one board. Two-sided flips and flush-referenced setups still
+  // need the block trimmed to size.
+  const needsPlanTrim =
     (flush.size > 0 && (board.widthMm > want.stockW + 0.5 || board.depthMm > want.stockD + 0.5)) ||
-    board.widthMm > want.stockW + BOARD_SLACK_PLAN_MM ||
-    board.depthMm > want.stockD + BOARD_SLACK_PLAN_MM;
+    (opts.sides === 2 && (board.widthMm > want.stockW + BOARD_SLACK_PLAN_MM || board.depthMm > want.stockD + BOARD_SLACK_PLAN_MM));
+  const windowInBoard =
+    !needsPlanTrim &&
+    opts.sides === 1 &&
+    flush.size === 0 &&
+    (board.widthMm > want.stockW + BOARD_SLACK_PLAN_MM || board.depthMm > want.stockD + BOARD_SLACK_PLAN_MM);
+  const cutPlan = needsPlanTrim || windowInBoard;
   const step = flush.size > 0 ? 0.1 : 1;
   const cutW = +up(want.stockW, step).toFixed(1);
   const cutD = +up(want.stockD, step).toFixed(1);
   const sizes = [
-    cutPlan ? `${cutW} x ${cutD} mm` : null,
+    needsPlanTrim ? `${cutW} x ${cutD} mm` : null,
     thick ? `${stockT} mm thick` : null,
   ].filter(Boolean).join(', ');
-  const why = flush.size > 0 && cutPlan
+  const why = flush.size > 0 && needsPlanTrim
     ? 'side setups reference flush faces'
     : 'to avoid excess facing';
   const prep = sizes ? `Trim stock to ${sizes} before machining (${why}).` : null;
