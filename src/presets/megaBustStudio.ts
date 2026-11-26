@@ -195,7 +195,11 @@ export const megaBustStudioPreset: SceneGraph = {
           friction: [0.6, 0.005, 0.0001]
         }
       ],
-      children: []
+      children: [],
+      // Hulled rather than decomposed: this is a static 38,880-triangle hollow
+      // decorative sculpt whose interior cavity nothing ever enters. Leaving it
+      // on 'auto' triggers a 60 s V-HACD timeout on every preset load.
+      collision: 'hull',
     },
 
     // 2. Wrecking Ball Trigger Pendulum
@@ -203,17 +207,18 @@ export const megaBustStudioPreset: SceneGraph = {
       id: 'wrecking_pendulum_base',
       name: 'Wrecking Ball Trigger Stand',
       type: 'body',
-      pos: [-0.35, 0.15, 0.28],
+      pos: [-0.35, 0.15, 0],
       joints: [],
       geoms: [
-        { name: 'stand_post', type: 'cylinder', size: [0.008, 0.14], pos: [0, 0, 0], rgba: [0.35, 0.38, 0.45, 1], contype: 0, conaffinity: 0 }
+        { name: 'stand_base', type: 'cylinder', size: [0.045, 0.008], pos: [0, 0, 0.008], rgba: [0.30, 0.33, 0.40, 1] },
+        { name: 'stand_post', type: 'cylinder', size: [0.008, 0.21], pos: [0, 0, 0.21], rgba: [0.35, 0.38, 0.45, 1], contype: 0, conaffinity: 0 }
       ],
       children: [
         {
           id: 'pendulum_arm',
           name: 'Pendulum Release Arm',
           type: 'body',
-          pos: [0, 0, 0.14],
+          pos: [0, 0, 0.42],
           joints: [
             { name: 'pendulum_hinge', type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.0005 }
           ],
@@ -226,9 +231,9 @@ export const megaBustStudioPreset: SceneGraph = {
       ]
     },
 
-    // 3. Multi-tier Physics Collapse Tower (24 interacting rigid blocks)
+    // 3. Multi-tier Physics Collapse Tower (16 interacting rigid blocks, stacked flush from z = 0)
     ...Array.from({ length: 8 }).flatMap((_, tier) => {
-      const z = 0.015 + tier * 0.032;
+      const z = 0.014 + tier * 0.028;
       const isEven = tier % 2 === 0;
       return [
         {
@@ -276,8 +281,11 @@ export const megaBustStudioPreset: SceneGraph = {
       const radius = 0.18;
       const x = radius * Math.cos(angle);
       const y = radius * Math.sin(angle);
-      const z = 0.025;
       const rotZ = (angle * 180) / Math.PI + 90;
+      // Upright dominoes have half-z = 0.024 m; domino_0 leans 15 deg about X
+      // (intrinsic XYZ: Rx(15)*Rz(rotZ)), dropping its lowest corner to
+      // z - 0.02643 m, so raise it to rest cleanly on z = 0.
+      const z = idx === 0 ? 0.0265 : 0.024;
 
       return {
         id: `domino_${idx}`,

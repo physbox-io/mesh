@@ -1942,6 +1942,26 @@ function extractSingleSkinIfThinShell(
       }
     }
 
+    // Disconnect T-rib attachment seams: when a merged gusset or stiffener rib
+    // meets a plate at a T-junction, both antiparallel sides of the rib share an
+    // edge with the same plate face, creating an impossible odd cycle in the
+    // 2-coloring. Remove those T-junction edges so the plate skin and rib skin
+    // each 2-color cleanly into their own single-skin island.
+    for (const [u, nbrs] of sameAdj) {
+      for (const v of [...nbrs]) {
+        const oppV = oppAdj.get(v);
+        if (!oppV) continue;
+        for (const w of oppV) {
+          if (nbrs.has(w)) {
+            nbrs.delete(v);
+            nbrs.delete(w);
+            sameAdj.get(v)!.delete(u);
+            sameAdj.get(w)!.delete(u);
+          }
+        }
+      }
+    }
+
     const color = new Int8Array(comp.length).fill(-1);
     let hasConflict = false;
     const selectedSkin = new Set<number>();

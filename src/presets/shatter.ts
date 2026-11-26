@@ -391,7 +391,12 @@ export const shatterPreset: SceneGraph = {
       geoms: [
         { name: 'gantry_foot', type: 'box', size: [0.08, 0.12, 0.02], pos: [0.72, 0, 0.02], rgba: FRAME },
         { name: 'gantry_post', type: 'cylinder', size: [0.022, 0.49], pos: [0.72, 0, 0.49], rgba: FRAME },
-        { name: 'gantry_beam', type: 'capsule', fromto: [0.72, 0, 0.98, 0, 0, 0.98], size: [0.018], rgba: FRAME },
+        // Stop the colliding beam capsule clear of wrecking_chain (radius 9 mm at x = 0)
+        // and bridge the last 30 mm with a non-colliding clevis and pivot pin so there is
+        // zero initial interpenetration while keeping the hinge visually and mechanically joined.
+        { name: 'gantry_beam', type: 'capsule', fromto: [0.72, 0, 0.98, 0.030, 0, 0.98], size: [0.018], rgba: FRAME },
+        { name: 'gantry_clevis', type: 'capsule', fromto: [0.030, 0, 0.98, 0, 0, 0.98], size: [0.016], rgba: FRAME, contype: 0, conaffinity: 0 },
+        { name: 'gantry_pivot_pin', type: 'cylinder', fromto: [0, -0.024, 0.98, 0, 0.024, 0.98], size: [0.008], rgba: STEEL, contype: 0, conaffinity: 0 },
         { name: 'gantry_brace', type: 'capsule', fromto: [0.72, 0, 0.70, 0.38, 0, 0.96], size: [0.012], rgba: FRAME },
       ],
       children: [
@@ -494,10 +499,22 @@ export const shatterPreset: SceneGraph = {
       type: 'body',
       pos: [-0.30, VASE_HANDLE_Y, PEDESTAL_TOP + 0.114],
       joints: [{ name: 'vase_handle_l_free', type: 'free' }],
-      geoms: [{
-        name: 'vase_handle_l_geom', type: 'capsule',
-        fromto: [0, 0, -0.035, 0, 0, 0.035], size: [0.010], mass: 0.08, rgba: COBALT,
-      }],
+      geoms: [
+        {
+          name: 'vase_handle_l_geom', type: 'capsule',
+          fromto: [0, 0, -0.035, 0, 0, 0.035], size: [0.010], mass: 0.08, rgba: COBALT,
+        },
+        // Top and bottom ceramic lugs joining the grip cleanly into the vase wall
+        // without generating resting contact repulsion against the welded hull.
+        {
+          name: 'vase_handle_l_lug_top', type: 'capsule',
+          fromto: [0, 0, 0.035, 0, -0.026, 0.035], size: [0.0085], mass: 0.005, rgba: COBALT, contype: 0, conaffinity: 0,
+        },
+        {
+          name: 'vase_handle_l_lug_bot', type: 'capsule',
+          fromto: [0, 0, -0.035, 0, -0.026, -0.035], size: [0.0085], mass: 0.005, rgba: COBALT, contype: 0, conaffinity: 0,
+        },
+      ],
       children: [],
       weldTargetId: 'vase',
       weldBreakForceN: 12,
@@ -509,10 +526,20 @@ export const shatterPreset: SceneGraph = {
       type: 'body',
       pos: [-0.30, -VASE_HANDLE_Y, PEDESTAL_TOP + 0.114],
       joints: [{ name: 'vase_handle_r_free', type: 'free' }],
-      geoms: [{
-        name: 'vase_handle_r_geom', type: 'capsule',
-        fromto: [0, 0, -0.035, 0, 0, 0.035], size: [0.010], mass: 0.08, rgba: COBALT,
-      }],
+      geoms: [
+        {
+          name: 'vase_handle_r_geom', type: 'capsule',
+          fromto: [0, 0, -0.035, 0, 0, 0.035], size: [0.010], mass: 0.08, rgba: COBALT,
+        },
+        {
+          name: 'vase_handle_r_lug_top', type: 'capsule',
+          fromto: [0, 0, 0.035, 0, 0.026, 0.035], size: [0.0085], mass: 0.005, rgba: COBALT, contype: 0, conaffinity: 0,
+        },
+        {
+          name: 'vase_handle_r_lug_bot', type: 'capsule',
+          fromto: [0, 0, -0.035, 0, 0.026, -0.035], size: [0.0085], mass: 0.005, rgba: COBALT, contype: 0, conaffinity: 0,
+        },
+      ],
       children: [],
       weldTargetId: 'vase',
       weldBreakForceN: 12,
@@ -555,7 +582,7 @@ export const shatterPreset: SceneGraph = {
       id: 'foil',
       name: 'foil',
       type: 'body',
-      pos: [-0.34, 0.36, 0.29],
+      pos: [-0.34, 0.36, 0.284],
       joints: [{ name: 'foil_free', type: 'free' }],
       geoms: [(() => {
         const { vertices, faces } = slabMesh(0.15, 0.13, 0.004, 30, 26);
@@ -621,15 +648,15 @@ export const shatterPreset: SceneGraph = {
       joints: [],
       geoms: [
         { name: 'bracket_foot', type: 'box', size: [0.06, 0.06, 0.012], pos: [0, 0, 0.012], rgba: FRAME },
-        { name: 'bracket_mast', type: 'cylinder', size: [0.016, 0.21], pos: [0, 0, 0.21], rgba: FRAME },
+        { name: 'bracket_mast', type: 'cylinder', size: [0.016, 0.225], pos: [0, 0, 0.225], rgba: FRAME },
+        { name: 'bracket_knuckle', type: 'cylinder', fromto: [0, -0.022, 0.45, 0, 0.022, 0.45], size: [0.016], rgba: STEEL, contype: 0, conaffinity: 0 },
       ],
       children: [
         {
           id: 'bracket_arm',
           name: 'bracket_arm',
           type: 'body',
-          // Sits above the mast top (0.42) rather than on it, for the same
-          // reason the capsule starts clear of it in x.
+          // Centered on the mast top and hinge knuckle (z = 0.45).
           pos: [0, 0, 0.45],
           joints: [{
             name: 'bracket_hinge',
@@ -672,6 +699,7 @@ export const shatterPreset: SceneGraph = {
              * move, and the constraint force holding it was a contact rather
              * than the lock. Three-and-a-half centimetres of daylight is enough.
              */
+            { name: 'bracket_arm_root', type: 'capsule', fromto: [0, 0, 0, -0.035, 0, 0], size: [0.012], mass: 0.05, rgba: FRAME, contype: 0, conaffinity: 0 },
             { name: 'bracket_arm_g', type: 'capsule', fromto: [-0.035, 0, 0, -0.24, 0, 0], size: [0.012], mass: 1.2, rgba: FRAME },
             { name: 'bracket_shelf', type: 'box', size: [0.05, 0.05, 0.006], pos: [-0.20, 0, 0.018], mass: 0.4, rgba: STEEL },
           ],

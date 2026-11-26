@@ -2650,24 +2650,29 @@ module gable(side) {
       polygon([[-half, 0], [half, 0], [half, shoulder], [0, apex], [-half, shoulder]]);
 }
 
-// Side wall: tucks between the gable ends and stops at the eaves.
+// Side wall: tucks between the gable ends, embedding half a sheet thickness into
+// the gables and 1.5 mm into the roof slab so every union seam is cleanly solid.
 module side_wall(side) {
-  translate([side * (half - t / 2), 0, eave / 2])
-    cube([t, 2 * (half - t), eave], center = true);
+  wall_h = eave + 1.5;
+  translate([side * (half - t / 2), 0, wall_h / 2])
+    cube([t, 2 * (half - t / 2), wall_h], center = true);
 }
 
-// Roof panel: lies on its mid-plane, pivoted about the apex.
+// Roof panel: lies on its mid-plane, pivoted about the apex, spanning the full
+// depth of the gables and overlapping cleanly at the ridge.
 module roof(side) {
+  ridge_lap = (t / 2) * tan(pitch);
+  panel_len = slope_len + ridge_lap;
   translate([0, 0, apex]) rotate([0, side * pitch, 0])
-    translate([side * slope_len / 2, 0, 0])
-      cube([slope_len, 2 * (half - t), t], center = true);
+    translate([side * (slope_len - ridge_lap) / 2, 0, 0])
+      cube([panel_len, 2 * half, t], center = true);
 }
 
 scale(0.001) {                  // model in mm, emit in metres
   difference() {
     union() {
       translate([0, 0, floor_z + t / 2])
-        cube([2 * half, 2 * half, t], center = true);
+        cube([2 * (half - t / 2), 2 * (half - t / 2), t], center = true);
       gable(1);
       gable(-1);
       side_wall(1);
@@ -3389,7 +3394,8 @@ export const PRESETS = {
   birdhouse_scad: {
     name: 'Birdhouse (OpenSCAD)',
     emoji: '📐',
-    scene: birdhouseScadPreset
+    scene: birdhouseScadPreset,
+    camera: { position: [0.22, 0.28, 0.19], target: [0, 0, 0.073] } satisfies PresetCamera,
   },
   california_relief: {
     name: 'California Relief Map',

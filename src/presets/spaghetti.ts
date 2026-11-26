@@ -187,7 +187,7 @@ function buildBridge(): SceneGraph {
       table('table_right', SPAN / 2 + 0.05),
       ...frame('br', nodes, members),
       // A weight on the two middle cross-ties, as a cup of coins would sit.
-      weight('br_load', [0, 0, z0 + STRAND_R + 0.0051], [0.06, 0.02, 0.005], 0.1),
+      weight('br_load', [0, 0, z0 + STRAND_R + 0.0051], [0.06, 0.016, 0.005], 0.1),
     ],
   };
 }

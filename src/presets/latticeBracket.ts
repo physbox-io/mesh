@@ -27,55 +27,60 @@ const mm = (v: number) => Math.round(v / (DEFAULT_UNIT * 1000));
 /** A closed profile in the XZ plane, as [x, z] pairs in millimetres. */
 type Profile = [number, number][];
 
-/**
- * Pushes a closed 2D profile out along Y into a solid.
- *
- * The two caps and one quad per profile edge — the same six-quad box that a new
- * lattice body starts as, generalised to any outline. Winding is left to
- * `orientFaces` at the end rather than being reasoned about per face: the
- * profile can be given either way round, and getting it wrong is a shape that
- * looks right until it is exported with its inside out.
- */
-function extrudeProfile(lattice: Lattice, profile: Profile, y0: number, y1: number, caps: Profile[] = [profile]) {
-  const at = (x: number, y: number, z: number) => vertexAt(lattice, mm(x), mm(y), mm(z));
-  for (const cap of caps) {
-    addFace(lattice, cap.map(([x, z]) => at(x, y0, z)));
-    addFace(lattice, [...cap].reverse().map(([x, z]) => at(x, y1, z)));
-  }
-  for (let i = 0; i < profile.length; i++) {
-    const [x0, z0] = profile[i];
-    const [x1, z1] = profile[(i + 1) % profile.length];
-    addFace(lattice, [at(x0, y0, z0), at(x1, y0, z1), at(x1, y1, z1), at(x0, y1, z0)]);
-  }
-}
-
-/** The bracket's cage: the L, and the gusset standing in the corner of it. */
+/** The bracket's cage: the L and its stiffening gusset as one watertight solid. */
 export function bracketCage(): Lattice {
   const lattice = createLattice(DEFAULT_UNIT);
+  const at = (x: number, y: number, z: number) => vertexAt(lattice, mm(x), mm(y), mm(z));
 
   // Side view. The wall plate rises in Z; the shelf arm runs out in X.
   //
-  // The outline carries two corners it does not strictly need — (5, 0) and
-  // (0, 5) — because the L is CONCAVE, and a concave face is the one thing a
-  // cage should not be asked to hold. Split into three quads that tile it, the
-  // caps subdivide cleanly, export cleanly, and every edge is still shared by
-  // exactly two faces. The extra corners are where those quads meet the wall.
+  // The outline carries subdivision points at x = 30 and z = 30 (where the
+  // triangular gusset meets the shelf and wall plate) as well as (5, 0) and
+  // (0, 5) so the concave L caps tile cleanly into five convex quads with no
+  // T-junctions. Along Y, the bracket is split into three spans: [-20, -2],
+  // the 4 mm gusset rib [-2, 2], and [2, 20]. In the middle span the two
+  // inner-corner edges [30,5]->[5,5]->[5,30] are replaced by the gusset
+  // hypotenuse [30,5]->[5,30], capped on y = -2 and y = 2 by two triangles.
+  // Every edge in the resulting cage is shared by exactly two faces (one
+  // connected, watertight manifold shell).
   const outline: Profile = [
-    [0, 0], [5, 0], [50, 0], [50, 5], [5, 5], [5, 60], [0, 60], [0, 5],
+    [0, 0], [5, 0], [30, 0], [50, 0], [50, 5], [30, 5],
+    [5, 5], [5, 30], [5, 60], [0, 60], [0, 30], [0, 5],
+  ];
+  const midOutline: Profile = [
+    [0, 0], [5, 0], [30, 0], [50, 0], [50, 5], [30, 5],
+    [5, 30], [5, 60], [0, 60], [0, 30], [0, 5],
   ];
   const caps: Profile[] = [
-    [[0, 0], [5, 0], [5, 5], [0, 5]],      // the corner where the two arms meet
-    [[0, 5], [5, 5], [5, 60], [0, 60]],    // the wall plate above it
-    [[5, 0], [50, 0], [50, 5], [5, 5]],    // the shelf arm out in front
+    [[0, 0], [5, 0], [5, 5], [0, 5]],       // corner where the two arms meet
+    [[5, 0], [30, 0], [30, 5], [5, 5]],     // inner shelf arm under gusset
+    [[30, 0], [50, 0], [50, 5], [30, 5]],   // outer shelf arm
+    [[0, 5], [5, 5], [5, 30], [0, 30]],     // lower wall plate behind gusset
+    [[0, 30], [5, 30], [5, 60], [0, 60]],   // upper wall plate
   ];
-  extrudeProfile(lattice, outline, -20, 20, caps);
 
-  // The gusset: a right triangle in the same plane, standing on the shelf and
-  // against the wall plate. Thinner than the arms, so it reads as a rib, and
-  // buried a millimetre into both of them — two shells that merely touch share
-  // coincident faces, which is the classic thing a slicer refuses.
-  const gusset: Profile = [[4, 4], [30, 4], [4, 30]];
-  extrudeProfile(lattice, gusset, -2, 2);
+  // Outer Y end caps at y = -20 and y = 20.
+  for (const cap of caps) {
+    addFace(lattice, cap.map(([x, z]) => at(x, -20, z)));
+    addFace(lattice, [...cap].reverse().map(([x, z]) => at(x, 20, z)));
+  }
+
+  // Extrude the L-outline across the two outer spans and the merged L+gusset
+  // outline across the central 4 mm rib span.
+  const bridgeRing = (ring: Profile, y0: number, y1: number) => {
+    for (let i = 0; i < ring.length; i++) {
+      const [x0, z0] = ring[i];
+      const [x1, z1] = ring[(i + 1) % ring.length];
+      addFace(lattice, [at(x0, y0, z0), at(x1, y0, z1), at(x1, y1, z1), at(x0, y1, z0)]);
+    }
+  };
+  bridgeRing(outline, -20, -2);
+  bridgeRing(midOutline, -2, 2);
+  bridgeRing(outline, 2, 20);
+
+  // Triangular gusset side cheeks closing the step at y = -2 and y = 2.
+  addFace(lattice, [at(5, -2, 5), at(30, -2, 5), at(5, -2, 30)]);
+  addFace(lattice, [at(5, 2, 5), at(5, 2, 30), at(30, 2, 5)]);
 
   orientFaces(lattice);
 
@@ -89,10 +94,9 @@ export function bracketCage(): Lattice {
     setCrease(lattice, va, vb, true);
   };
   for (const y of [-20, 20] as const) {
-    const ring: Profile = outline;
-    for (let i = 0; i < ring.length; i++) {
-      const [x0, z0] = ring[i];
-      const [x1, z1] = ring[(i + 1) % ring.length];
+    for (let i = 0; i < outline.length; i++) {
+      const [x0, z0] = outline[i];
+      const [x1, z1] = outline[(i + 1) % outline.length];
       crease([mm(x0), mm(y), mm(z0)], [mm(x1), mm(y), mm(z1)]);
     }
   }
