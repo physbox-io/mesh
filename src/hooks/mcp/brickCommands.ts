@@ -62,6 +62,10 @@ export const brickCommands: McpCommands = {
     if (msg.hollowStuds !== undefined && (typeof msg.hollowStuds !== 'number' || !Number.isFinite(msg.hollowStuds) || msg.hollowStuds < 0)) {
       return { ok: false, error: 'hollowStuds is the wall thickness in studs for a hollow toy-brick build; 0 for solid.' };
     }
+    const rawIncludeMortar = msg.includeMortar ?? msg.include_mortar ?? msg.mortar;
+    if (rawIncludeMortar !== undefined && typeof rawIncludeMortar !== 'boolean') {
+      return { ok: false, error: 'includeMortar (include_mortar) must be a boolean.' };
+    }
     const placement = (msg.placement as (typeof PLACEMENTS)[number] | undefined) ?? 'beside';
     const saved = store.sceneGraph.brickwork;
     const standardId = (msg.standardId as BrickStandardId | undefined) ?? saved?.standardId ?? DEFAULT_BRICKWORK_OPTIONS.standardId;
@@ -74,6 +78,7 @@ export const brickCommands: McpCommands = {
       ...(toySizes ? { toySizes } : !toyInventory && saved?.toySizes ? { toySizes: saved.toySizes } : {}),
       ...(toyInventory ? { toyInventory } : !toySizes && saved?.toyInventory ? { toyInventory: saved.toyInventory } : {}),
       ...(typeof msg.hollowStuds === 'number' ? { hollowStuds: Math.round(msg.hollowStuds) } : saved?.hollowStuds !== undefined ? { hollowStuds: saved.hollowStuds } : {}),
+      ...(typeof rawIncludeMortar === 'boolean' ? { includeMortar: rawIncludeMortar } : saved?.includeMortar !== undefined ? { includeMortar: saved.includeMortar } : {}),
     };
     let outcome;
     try {

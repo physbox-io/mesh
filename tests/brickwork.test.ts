@@ -195,7 +195,9 @@ describe('laying a shape in brick', () => {
     const replaced = brickworkInScene(gateway, 'b', { placement: 'replace' });
     expect(replaced.nodes.some((n) => n.id === 'b')).toBe(false);
     expect(replaced.nodes.length).toBe(replaced.result.courses);
-    expect(replaced.nodes.reduce((t, n) => t + n.geoms.length, 0)).toBe(replaced.result.bricks.length);
+    expect(replaced.nodes.reduce((t, n) => t + n.geoms.length, 0)).toBe(
+      replaced.result.bricks.length + (replaced.result.placedLintels?.length ?? 0),
+    );
     const beside = brickworkInScene(gateway, null, { placement: 'beside' });
     expect(beside.nodes[0].id).toBe('b');
     // Past the wall along +X.
@@ -439,7 +441,7 @@ describe('regressions from the brickwork audit (#22)', () => {
     const byName = await brickCommands.BUILD_BRICKWORK({ bodyId: 'Smoker walls', bond: 'stretcher', placement: 'none' }, ctx) as Record<string, unknown>;
     expect(byName.ok).toBe(true);
     expect(byName.laid).toBe(false);
-    expect(byName.bricksLaid).toBe(261);
+    expect(byName.bricksLaid).toBe(259);
     expect(byName.closers).toBe(0);
     // English bond reply includes queen closers, and whole + cutPieces + closers === bricksLaid.
     const ctxGateway = { store: { ...useStore.getState(), sceneGraph: gateway } } as Parameters<typeof brickCommands.BUILD_BRICKWORK>[1];

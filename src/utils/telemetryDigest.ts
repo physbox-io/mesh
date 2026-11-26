@@ -53,6 +53,7 @@ export interface TelemetryDigest {
 
 const SETTLED_MMS = 1;
 const SETTLED_DEGS = 0.5;
+const SETTLE_WINDOW_S = 0.5;
 const MAX_MOVED = 20;
 const MOVED_MM = 1;
 const MOVED_PEAK_MMS = 5;
@@ -60,7 +61,7 @@ const MOVED_PEAK_DEGS = 5;
 
 export function digestTelemetry(
   frames: HistoryFrame[],
-  opts: { jointTypes?: Record<string, string>; nameOf?: (id: string) => string } = {},
+  opts: { jointTypes?: Record<string, string>; nameOf?: (id: string) => string; settled?: boolean } = {},
 ): TelemetryDigest | null {
   if (!frames.length) return null;
   const name = opts.nameOf ?? ((id: string) => id);
@@ -164,10 +165,20 @@ export function digestTelemetry(
   }
 
   const noBodies = !frames.some((f) => f.bodies && Object.keys(f.bodies).length);
+  // Reconcile settledAtS with the same 0.5 s settle window used by
+  // TrajectorySummary (`final.settled`), and defer to `opts.settled` when the
+  // caller already has the authoritative per-tick verdict.
+  if (noBodies || opts.settled === false) {
+    settledAtS = null;
+  } else if (opts.settled === true) {
+    if (settledAtS === null) settledAtS = Math.max(first.time, last.time - SETTLE_WINDOW_S);
+  } else if (settledAtS !== null && (durationS < SETTLE_WINDOW_S - 1e-9 || last.time - settledAtS < SETTLE_WINDOW_S - 1e-9)) {
+    settledAtS = null;
+  }
   return {
     durationS: round(durationS, 3),
     frames: frames.length,
-    settledAtS: settledAtS === null || noBodies ? null : round(settledAtS, 3),
+    settledAtS: settledAtS === null ? null : round(settledAtS, 3),
     moved: movedListed,
     ...(movedNotListed ? { movedNotListed } : {}),
     still,

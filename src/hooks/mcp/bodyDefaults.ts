@@ -95,11 +95,18 @@ export const fillGeomDefaults = (rawG: RawGeom, bodyName: string, idx: number, b
   // A null field is an unset one (utils/withoutNulls.ts).
   const g: RawGeom = withoutNulls({ ...rawG });
   const geomName = g.name ?? `${bodyName}_geom_${idx}`;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const gAny = g as Record<string, any>;
+  if (g.rgba === undefined && gAny.color !== undefined) {
+    if (!normalizeRgba(gAny.color)) {
+      throw new Error(`Geom "${geomName}" on body "${bodyName}": color must be [r, g, b] or [r, g, b, a], each a finite number in 0..1.`);
+    }
+    g.rgba = gAny.color;
+  }
+  delete gAny.color;
   if (g.rgba !== undefined && !normalizeRgba(g.rgba)) {
     throw new Error(`Geom "${geomName}" on body "${bodyName}": rgba must be [r, g, b] or [r, g, b, a], each a finite number in 0..1.`);
   }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const gAny = g as Record<string, any>;
   for (const key of PARAMETRIC_POSITIVE_DIM_KEYS) {
     if (gAny[key] !== undefined && (!isFiniteNumber(gAny[key]) || gAny[key] <= 0)) {
       throw new Error(`Geom "${geomName}" on body "${bodyName}": ${key} must be a positive finite number.`);
@@ -178,7 +185,7 @@ export function resolveUpdatedGeoms(
   const indexableGeoms = authoredGeoms.length > 0 ? authoredGeoms : existingGeoms;
   const moves = (updates.joints ?? target.joints ?? []).length > 0;
   const bodyName = updates.name ?? target.name ?? target.id;
-  const bodyRgba = normalizeRgba(updates.rgba);
+  const bodyRgba = normalizeRgba(updates.rgba ?? (updates as Record<string, unknown>).color);
 
   const resolvedList: SceneGeom[] = [];
   const matchedMap = new Map<SceneGeom, SceneGeom>();
@@ -428,6 +435,15 @@ export const fillBodyDefaults = (
   const id   = b.id   ?? name;
   const breakError = resolveBreakFields(b as Record<string, unknown>, undefined);
   if (breakError) throw new Error(breakError);
+  // Accept body-level `color` as an alias for `rgba` so child geoms without
+  // their own `rgba` inherit it instead of falling back to default lavender.
+  const rawBodyColor = (b as Record<string, unknown>).color;
+  if (b.rgba === undefined && rawBodyColor !== undefined) {
+    if (!normalizeRgba(rawBodyColor)) {
+      throw new Error(`Body '${name}': color must be [r, g, b] or [r, g, b, a], each a finite number in 0..1.`);
+    }
+    b.rgba = rawBodyColor as [number, number, number, number];
+  }
   if (b.rgba !== undefined && !normalizeRgba(b.rgba)) {
     throw new Error(`Body '${name}': rgba must be [r, g, b] or [r, g, b, a], each a finite number in 0..1.`);
   }
@@ -733,6 +749,7 @@ export const fillBodyDefaults = (
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const rest = { ...b } as Record<string, any>;
   if (bodyRgba) rest.rgba = bodyRgba;
+  delete rest.color;
   delete rest.tuneTo;
   delete rest.drillNodalHole;
   delete rest.dynamic;

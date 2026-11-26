@@ -7,7 +7,7 @@ import { useStore } from '../../store/useStore';
 import { framingPatch } from '../../store/sceneFraming';
 import { loadManifold } from '../../utils/sculptCut';
 import {
-  collectIndividualPartSoups, decomposeSolidIntoPlanks, isNonWoodNode, resolveTimberTargetIds, type PlankJointType,
+  classifyTimberAutoMode, collectIndividualPartSoups, decomposeSolidIntoPlanks, isNonWoodNode, resolveTimberTargetIds, type PlankJointType,
 } from '../../utils/timberBreakdown';
 import {
   synthesizeTimberJoinery, type TenonCornerFit, type TimberEdgeProfile, type TimberJointMode,
@@ -286,9 +286,10 @@ const breakdownJoineryCommand: McpHandler = async (msg, { store, toId }) => {
     );
     if (!outcome.ok) return outcome;
 
-    // If auto-mode was called on a single unframed solid block (1 part, 0 joints)
-    // and msg.mode !== 'frame', fall back to hollow-shell / plank breakdown!
-    if (msg.mode !== 'frame' && outcome.parts.length <= 1 && outcome.joints.length === 0 && rawJointMode === undefined) {
+    // If auto-mode found no actual framing members (legs/rails) — e.g. a single
+    // slab/panel (even rotated/tilted) or an unframed solid block — fall back to
+    // plank breakdown instead of emitting a furniture frame guide.
+    if (msg.mode !== 'frame' && classifyTimberAutoMode(outcome) === 'planks' && rawJointMode === undefined) {
       const plankRes = decomposeSolidIntoPlanks(
         wasm,
         soups,
@@ -298,7 +299,7 @@ const breakdownJoineryCommand: McpHandler = async (msg, { store, toId }) => {
         },
         hintNames,
       );
-      if (plankRes.ok && plankRes.planks.length > 1) {
+      if (plankRes.ok && plankRes.planks.length >= 1) {
         const names = plankRes.planks.map((p) => p.id);
         const ids =
           msg.apply === true

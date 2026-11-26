@@ -79,6 +79,7 @@ export function bondReport(
     const out: (V2 & { dx: number; dy: number })[] = [];
     for (const k of ks) {
       const b = bricks[k];
+      if (b.lintel) continue;
       const u = { x: Math.cos(b.angle), y: Math.sin(b.angle) }, n = { x: -u.y, y: u.x };
       // The middle of each end and each side, just outside the brick.
       for (const [a, c] of sideSeams ? [[1, 0], [-1, 0], [0, 1], [0, -1]] : [[1, 0], [-1, 0]]) {
@@ -95,11 +96,11 @@ export function bondReport(
     return Math.abs(dx * u.x + dy * u.y) < b.lengthMm / 2 && Math.abs(-dx * u.y + dy * u.x) < b.depthMm / 2;
   };
   // A seam point is between two bricks: none on it, and one each side of it
-  // across the joint. The end of a wall at an opening is not a seam.
+  // across the joint. The end of a wall at an opening (or against a lintel) is not a seam.
   const isSeam = (p: V2 & { dx: number; dy: number }, ks: number[]) => {
     const near = ks.filter((k) => {
       const b = bricks[k];
-      return Math.hypot(p.x - b.x, p.y - b.y) <= Math.max(b.lengthMm, b.depthMm) / 2 + joint * 2;
+      return !b.lintel && Math.hypot(p.x - b.x, p.y - b.y) <= Math.max(b.lengthMm, b.depthMm) / 2 + joint * 2;
     });
     if (near.some((k) => inside(p, k))) return false;
     const reach = joint / 2 + 1;

@@ -85,6 +85,8 @@ export interface BrickworkOptions {
   toyInventory?: ToyInventory;
   /** Toy bricks: hollow, walls this many studs thick and capped top and bottom. 0 or absent: solid. */
   hollowStuds?: number;
+  /** Add a slightly recessed mortar-colored backing/bedding core inside the walls so joints are visually solid. */
+  includeMortar?: boolean;
 }
 
 export const DEFAULT_BRICKWORK_OPTIONS: BrickworkOptions = { standardId: 'uk', bond: 'stretcher', wastagePct: 5 };
@@ -109,6 +111,25 @@ export interface PlacedBrick {
   closer: boolean;
   /** Shorter than a whole brick along its face. */
   cut: boolean;
+  /** Precast lintel beam (used by bondReport for connectivity/support, excluded from perpend straight-joint checks). */
+  lintel?: boolean;
+}
+
+export interface PlacedLintel {
+  course: number;
+  /** Centre of its footprint, mm. */
+  x: number;
+  y: number;
+  /** Its bed, mm. */
+  z: number;
+  /** Direction of its length, radians about Z. */
+  angle: number;
+  /** Length along the wall (matching BOM stock length / slot span), mm. */
+  lengthMm: number;
+  /** Wall thickness across the opening, mm. */
+  depthMm: number;
+  /** Height of the lintel (one course height), mm. */
+  heightMm: number;
 }
 
 export interface BrickworkResult {
@@ -132,6 +153,8 @@ export interface BrickworkResult {
   mortarBags: number;
   /** Lintels over openings, by length (with bearing both ends). */
   lintels: { lengthMm: number; count: number }[];
+  /** Concrete/stone lintel beams placed over detected openings. */
+  placedLintels?: PlacedLintel[];
   /** Toy bricks: how many of each size. */
   parts?: { size: ToySize; count: number }[];
   /** Toy bricks: what the build needs more of than the builder has. */
@@ -276,7 +299,7 @@ function unitsFor(bond: BrickBond, course: number): ('S' | 'H')[] {
  */
 const isLaidCourse = (n: SceneNode) =>
   Boolean(n.brickwork) ||
-  (/_course_\d+(?:_\d+)?$/.test(n.id) && Boolean(n.geoms?.length) && n.geoms.every((g) => /^brick_/.test(g.name ?? '')));
+  (/_(?:course_\d+|mortar)(?:_\d+)?$/.test(n.id) && Boolean(n.geoms?.length) && n.geoms.every((g) => /^brick_/.test(g.name ?? '')));
 
 /**
  * Whether the whole scene's brickwork takes this body. Not a simulated cut,
@@ -683,6 +706,87 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
   }
   if (thinCourses) warnings.push(`In ${thinCourses} course${thinCourses === 1 ? '' : 's'} the wall is thinner than a brick (${W} mm): laid one brick wide.`);
 
+  // Lintels: an opening's span, with the bearing either end, in stock steps.
+  const bearing = 150 * (L / 215);
+  const stock = 150 * (L / 215);
+  const lintelMap = new Map<number, number>();
+  const openings = openingSpans(bricks, solidAt, j);
+  const placedLintels: PlacedLintel[] = [];
+  for (const op of openings) {
+    const l = op.slot ? Math.round(op.span) : Math.round(Math.ceil((op.span + 2 * bearing) / stock) * stock);
+    lintelMap.set(l, (lintelMap.get(l) ?? 0) + 1);
+    const lintelCourse = op.slot ? op.course - 1 : op.course;
+    placedLintels.push({
+      course: lintelCourse,
+      x: op.centre.x,
+      y: op.centre.y,
+      z: lo[2] + lintelCourse * gauge,
+      angle: op.angle,
+      lengthMm: l,
+      depthMm: op.depth,
+      heightMm: H,
+    });
+  }
+
+  // Replace/trim regular bricks in the lintel course that overlap a placed
+  // non-slot lintel so the scene shows the concrete lintel beam instead of
+  // floating/bridging bricks over the opening.
+  if (placedLintels.length > 0) {
+    const kept: PlacedBrick[] = [];
+    for (const b of bricks) {
+      let current: PlacedBrick | null = b;
+      for (const ln of placedLintels) {
+        if (!current || current.course !== ln.course) continue;
+        if (!bricksOverlap2D(current, ln, j * 0.5)) continue;
+        const u = { x: Math.cos(ln.angle), y: Math.sin(ln.angle) };
+        const align = Math.abs(Math.cos(current.angle) * u.x + Math.sin(current.angle) * u.y);
+        if (align < 0.85) {
+          // Perpendicular return brick intersecting the lintel's bearing: drop if mostly inside.
+          current = null;
+          break;
+        }
+        // Project brick interval onto lintel's axis `u` relative to lintel center.
+        const cur: PlacedBrick = current;
+        const proj: number = (cur.x - ln.x) * u.x + (cur.y - ln.y) * u.y;
+        const bLo: number = proj - cur.lengthMm / 2;
+        const bHi: number = proj + cur.lengthMm / 2;
+        const clearLo: number = -(ln.lengthMm / 2 + j);
+        const clearHi: number = ln.lengthMm / 2 + j;
+        const leftRem: number = clearLo - bLo;
+        const rightRem: number = bHi - clearHi;
+        const minPiece: number = L / 4;
+        if (leftRem >= minPiece && rightRem < minPiece) {
+          const newMid: number = (bLo + clearLo) / 2;
+          const shiftU: number = newMid - proj;
+          current = {
+            ...cur,
+            x: cur.x + u.x * shiftU,
+            y: cur.y + u.y * shiftU,
+            lengthMm: leftRem,
+            cut: true,
+          };
+        } else if (rightRem >= minPiece && leftRem < minPiece) {
+          const newMid: number = (clearHi + bHi) / 2;
+          const shiftU: number = newMid - proj;
+          current = {
+            ...cur,
+            x: cur.x + u.x * shiftU,
+            y: cur.y + u.y * shiftU,
+            lengthMm: rightRem,
+            cut: true,
+          };
+        } else {
+          // Fully covered by lintel or remaining stub too short to lay.
+          current = null;
+          break;
+        }
+      }
+      if (current) kept.push(current);
+    }
+    bricks.length = 0;
+    bricks.push(...kept);
+  }
+
   // Cut pieces: paired out of whole bricks where two fit in one, longest first.
   // Only stretchers: a cut header is trimmed across the brick's width, and what
   // comes off is no brick.
@@ -709,23 +813,12 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
 
   const mortarLitres = mortarLitresFor(bricks, std, j);
 
-  // Lintels: an opening's span, with the bearing either end, in stock steps.
-  const bearing = 150 * (L / 215);
-  const stock = 150 * (L / 215);
-  const lintelMap = new Map<number, number>();
-  const openings = openingSpans(bricks, solidAt, j);
-  for (const { span: spanMm, slot } of openings) {
-    const l = slot ? Math.round(spanMm) : Math.round(Math.ceil((spanMm + 2 * bearing) / stock) * stock);
-    lintelMap.set(l, (lintelMap.get(l) ?? 0) + 1);
-  }
-
-  // How it holds together, with each lintel in as what it is: a beam in the
-  // course under the bricks it carries, bearing on the brickwork either side,
-  // so those bricks are tied back in. A quarter brick is the least lap a bond
-  // should have.
-  const lintels: PlacedBrick[] = openings.map((op) => ({
-    course: op.course - 1, x: op.centre.x, y: op.centre.y, z: 0, angle: op.angle,
-    lengthMm: op.slot ? op.span + 2 * j : op.span + 2 * bearing, depthMm: op.depth, header: false, closer: false, cut: false,
+  // How it holds together, with each lintel in as what it is: a beam in its
+  // course bearing on the brickwork either side, so the jambs and courses above
+  // are tied together. A quarter brick is the least lap a bond should have.
+  const lintels: PlacedBrick[] = placedLintels.map((ln) => ({
+    course: ln.course, x: ln.x, y: ln.y, z: ln.z, angle: ln.angle,
+    lengthMm: ln.lengthMm, depthMm: ln.depthMm, header: false, closer: false, cut: false, lintel: true,
   }));
   // A quarter brick (with its joint) is the least lap a bond should have,
   // give or take half a joint as the perpends are opened or closed.
@@ -739,6 +832,7 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
     cuts: [...byLen.entries()].sort((a, b) => b[0] - a[0]).map(([lengthMm, count]) => ({ lengthMm, count })),
     mortarLitres, mortarBags: Math.ceil(mortarLitres / MORTAR_BAG_LITRES),
     lintels: [...lintelMap.entries()].sort((a, b) => a[0] - b[0]).map(([lengthMm, count]) => ({ lengthMm, count })),
+    ...(placedLintels.length ? { placedLintels } : {}),
     bond, warnings,
   };
 }
@@ -862,10 +956,18 @@ function openingSpans(bricks: PlacedBrick[], solidAt: Map<number, (p: V2) => boo
         const twoBelow = solidAt.get(courses[k] - 2);
         const solidTwoBelow = (t: number) => !!twoBelow && [-across, 0, across].some((w) => twoBelow({ x: c0.x + u.x * t + n.x * w, y: c0.y + u.y * t + n.y * w }));
         const slot = solidTwoBelow(middle[0] + 2 * step) && solidTwoBelow(middle[1] - 2 * step) && !solidTwoBelow(at);
+        let minN = Infinity, maxN = -Infinity;
+        for (const b of group) {
+          const projN = (b.x - c0.x) * n.x + (b.y - c0.y) * n.y;
+          minN = Math.min(minN, projN - b.depthMm / 2);
+          maxN = Math.max(maxN, projN + b.depthMm / 2);
+        }
+        const depth = Math.max(Math.max(...group.map((x) => x.depthMm)), maxN - minN);
+        const midN = Number.isFinite(minN) && Number.isFinite(maxN) ? (minN + maxN) / 2 : 0;
         spans.push({
           span: middle[1] - middle[0], course: courses[k], slot,
-          centre: { x: c0.x + u.x * at, y: c0.y + u.y * at },
-          angle: Math.atan2(u.y, u.x), depth: Math.max(...group.map((x) => x.depthMm)),
+          centre: { x: c0.x + u.x * at + n.x * midN, y: c0.y + u.y * at + n.y * midN },
+          angle: Math.atan2(u.y, u.x), depth,
         });
       }
     }
@@ -925,13 +1027,178 @@ export function brickworkSourceGeoms(source: BrickworkSource, prefix = 'brick'):
   return { geoms: brickworkNodes(result, prefix, [0, 0, 0], colour).flatMap((n) => n.geoms), result };
 }
 
+/** Concrete/stone lintel colour (light precast concrete grey). */
+const LINTEL_RGBA: [number, number, number, number] = [0.72, 0.71, 0.68, 1];
+/** Recessed mortar backing/bedding core colour (warm cement mortar grey). */
+const MORTAR_RGBA: [number, number, number, number] = [0.76, 0.74, 0.70, 1];
+
+/**
+ * Builds slightly recessed mortar-colored visual backing/bedding strips inside
+ * each course's brickwork so masonry walls look solid without see-through air
+ * gaps, while stopping recessed inside faces, ends, and opening jambs.
+ */
+function buildMortarCoreGeoms(
+  result: Pick<BrickworkResult, 'bricks' | 'standard' | 'jointMm'>,
+  idPrefix: string,
+  shift: [number, number, number],
+): SceneGeom[] {
+  if (result.standard.toy || result.jointMm <= 0 || !result.bricks.length) return [];
+  const j = result.jointMm;
+  const H = result.standard.heightMm;
+  const recess = Math.min(j * 0.4, 4);
+
+  const byCourse = new Map<number, PlacedBrick[]>();
+  let minCourse = Infinity;
+  let maxCourse = -Infinity;
+  for (const b of result.bricks) {
+    if (b.course < minCourse) minCourse = b.course;
+    if (b.course > maxCourse) maxCourse = b.course;
+    const list = byCourse.get(b.course);
+    if (list) list.push(b);
+    else byCourse.set(b.course, [b]);
+  }
+
+  const geoms: SceneGeom[] = [];
+  let idx = 0;
+
+  for (const [course, list] of [...byCourse.entries()].sort((a, b) => a[0] - b[0])) {
+    const z = list[0].z;
+    const zLo = course === minCourse ? z + recess : z;
+    const zHi = course < maxCourse ? z + H + j : z + H - recess;
+    const heightMm = zHi - zLo;
+    if (heightMm <= 0.5) continue;
+    const zMid = (zLo + zHi) / 2;
+
+    // Group collinear bricks (same angle mod pi, same transverse offset along n, same depth).
+    interface StripGroup {
+      angle: number;
+      u: V2;
+      n: V2;
+      nPos: number;
+      depthMm: number;
+      items: { s0: number; s1: number }[];
+    }
+    const groups: StripGroup[] = [];
+    for (const b of list) {
+      let a = ((b.angle % Math.PI) + Math.PI) % Math.PI;
+      if (Math.PI - a < 0.01) a = 0;
+      const u = { x: Math.cos(a), y: Math.sin(a) };
+      const n = { x: -u.y, y: u.x };
+      const sMid = b.x * u.x + b.y * u.y;
+      const nMid = b.x * n.x + b.y * n.y;
+      const s0 = sMid - b.lengthMm / 2;
+      const s1 = sMid + b.lengthMm / 2;
+      let grp = groups.find(
+        (g) =>
+          Math.abs(g.angle - a) < 0.02 &&
+          Math.abs(g.nPos - nMid) < 1.5 &&
+          Math.abs(g.depthMm - b.depthMm) < 1.5,
+      );
+      if (!grp) {
+        grp = { angle: a, u, n, nPos: nMid, depthMm: b.depthMm, items: [] };
+        groups.push(grp);
+      }
+      grp.items.push({ s0, s1 });
+    }
+
+    // Merge consecutive bricks along u separated by <= 2.5 * joint into contiguous strips.
+    interface Strip {
+      angle: number;
+      u: V2;
+      n: V2;
+      s0: number;
+      s1: number;
+      n0: number;
+      n1: number;
+    }
+    const strips: Strip[] = [];
+    for (const grp of groups) {
+      grp.items.sort((a, b) => a.s0 - b.s0);
+      let curS0 = grp.items[0].s0;
+      let curS1 = grp.items[0].s1;
+      for (let k = 1; k < grp.items.length; k++) {
+        if (grp.items[k].s0 - curS1 <= j * 2.5) {
+          curS1 = Math.max(curS1, grp.items[k].s1);
+        } else {
+          strips.push({
+            angle: grp.angle, u: grp.u, n: grp.n,
+            s0: curS0, s1: curS1,
+            n0: grp.nPos - grp.depthMm / 2, n1: grp.nPos + grp.depthMm / 2,
+          });
+          curS0 = grp.items[k].s0;
+          curS1 = grp.items[k].s1;
+        }
+      }
+      strips.push({
+        angle: grp.angle, u: grp.u, n: grp.n,
+        s0: curS0, s1: curS1,
+        n0: grp.nPos - grp.depthMm / 2, n1: grp.nPos + grp.depthMm / 2,
+      });
+    }
+
+    // Merge parallel leaves separated by a collar joint (<= 2.5 * joint) with matching s-span
+    // so two-leaf walls get a single solid recessed mortar core including the collar joint.
+    const merged: Strip[] = [];
+    const used = new Array<boolean>(strips.length).fill(false);
+    for (let i = 0; i < strips.length; i++) {
+      if (used[i]) continue;
+      used[i] = true;
+      const cur = { ...strips[i] };
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (let k = 0; k < strips.length; k++) {
+          if (used[k]) continue;
+          const other = strips[k];
+          if (Math.abs(other.angle - cur.angle) > 0.02) continue;
+          const nGap = Math.max(other.n0 - cur.n1, cur.n0 - other.n1);
+          const sOverlap = Math.min(cur.s1, other.s1) - Math.max(cur.s0, other.s0);
+          const minSpan = Math.min(cur.s1 - cur.s0, other.s1 - other.s0);
+          if (nGap <= j * 2.5 && sOverlap >= minSpan * 0.85 && Math.abs(cur.s0 - other.s0) <= j * 2 && Math.abs(cur.s1 - other.s1) <= j * 2) {
+            cur.n0 = Math.min(cur.n0, other.n0);
+            cur.n1 = Math.max(cur.n1, other.n1);
+            cur.s0 = Math.min(cur.s0, other.s0);
+            cur.s1 = Math.max(cur.s1, other.s1);
+            used[k] = true;
+            grew = true;
+          }
+        }
+      }
+      merged.push(cur);
+    }
+
+    for (const st of merged) {
+      const lengthMm = (st.s1 - st.s0) - 2 * recess;
+      const rawDepth = st.n1 - st.n0;
+      const depthMm = Math.max(rawDepth - 2 * recess, rawDepth * 0.4);
+      if (lengthMm <= 1 || depthMm <= 1) continue;
+      const sMid = (st.s0 + st.s1) / 2;
+      const nMid = (st.n0 + st.n1) / 2;
+      const cx = st.u.x * sMid + st.n.x * nMid;
+      const cy = st.u.y * sMid + st.n.y * nMid;
+      idx++;
+      geoms.push({
+        name: `${idPrefix}_mortar_${course + 1}_${idx}`,
+        type: 'box',
+        role: 'visual',
+        size: [lengthMm / 2000, depthMm / 2000, heightMm / 2000],
+        pos: [(cx + shift[0]) / 1000, (cy + shift[1]) / 1000, (zMid + shift[2]) / 1000],
+        quat: [Math.cos(st.angle / 2), 0, 0, Math.sin(st.angle / 2)],
+        rgba: MORTAR_RGBA,
+      });
+    }
+  }
+  return geoms;
+}
+
 /**
  * Bricks as scene bodies, one per course, every brick a box. `shift` moves
  * them, mm; `colour` paints each (default: clay, or toy red for toy bricks).
  */
 export function brickworkNodes(
-  result: Pick<BrickworkResult, 'bricks' | 'standard'>, idPrefix: string, shift: [number, number, number] = [0, 0, 0], colour?: BrickColour,
+  result: Pick<BrickworkResult, 'bricks' | 'standard' | 'placedLintels' | 'jointMm'>, idPrefix: string, shift: [number, number, number] = [0, 0, 0], colour?: BrickColour,
   laidFrom?: string,
+  includeMortar?: boolean,
 ): SceneNode[] {
   const paint = colour ?? (result.standard.toy ? toyColour : clayColour);
   const H = result.standard.heightMm;
@@ -941,16 +1208,17 @@ export function brickworkNodes(
     if (list) list.push(b);
     else byCourse.set(b.course, [b]);
   }
+  const lintelsByCourse = new Map<number, PlacedLintel[]>();
+  for (const ln of result.placedLintels ?? []) {
+    const list = lintelsByCourse.get(ln.course);
+    if (list) list.push(ln);
+    else lintelsByCourse.set(ln.course, [ln]);
+    if (!byCourse.has(ln.course)) byCourse.set(ln.course, []);
+  }
   let i = 0;
-  return [...byCourse.entries()].sort((a, b) => a[0] - b[0]).map(([course, list]) => ({
-    id: `${idPrefix}_course_${course + 1}`,
-    name: `Course ${course + 1}`,
-    type: 'body' as const,
-    pos: [0, 0, 0],
-    joints: [],
-    children: [],
-    ...(laidFrom ? { laidFrom } : {}),
-    geoms: list.map((b) => {
+  let lintelIdx = 0;
+  const nodes: SceneNode[] = [...byCourse.entries()].sort((a, b) => a[0] - b[0]).map(([course, list]) => {
+    const brickGeoms: SceneGeom[] = list.map((b) => {
       i++;
       return {
         name: `${idPrefix}_${course + 1}_${i}`,
@@ -962,8 +1230,47 @@ export function brickworkNodes(
         // Fired clay; ABS for toy bricks, which are hollow underneath.
         density: result.standard.toy ? 550 : 1900,
       };
-    }),
-  }));
+    });
+    const lintelGeoms: SceneGeom[] = (lintelsByCourse.get(course) ?? []).map((ln) => {
+      lintelIdx++;
+      return {
+        name: `${idPrefix}_lintel_${course + 1}_${lintelIdx}`,
+        type: 'box' as const,
+        size: [ln.lengthMm / 2000, ln.depthMm / 2000, ln.heightMm / 2000],
+        pos: [(ln.x + shift[0]) / 1000, (ln.y + shift[1]) / 1000, (ln.z + ln.heightMm / 2 + shift[2]) / 1000],
+        quat: [Math.cos(ln.angle / 2), 0, 0, Math.sin(ln.angle / 2)],
+        rgba: LINTEL_RGBA,
+        // Precast concrete lintel.
+        density: 2400,
+      };
+    });
+    return {
+      id: `${idPrefix}_course_${course + 1}`,
+      name: `Course ${course + 1}`,
+      type: 'body' as const,
+      pos: [0, 0, 0],
+      joints: [],
+      children: [],
+      ...(laidFrom ? { laidFrom } : {}),
+      geoms: [...brickGeoms, ...lintelGeoms],
+    };
+  });
+  if (includeMortar) {
+    const mortarGeoms = buildMortarCoreGeoms(result, idPrefix, shift);
+    if (mortarGeoms.length > 0) {
+      nodes.push({
+        id: `${idPrefix}_mortar`,
+        name: 'Mortar Core',
+        type: 'body' as const,
+        pos: [0, 0, 0],
+        joints: [],
+        children: [],
+        ...(laidFrom ? { laidFrom } : {}),
+        geoms: mortarGeoms,
+      });
+    }
+  }
+  return nodes;
 }
 
 export type BrickPlacement = 'replace' | 'beside';
@@ -1016,7 +1323,14 @@ export function brickworkInScene(
   // Toy bricks come in every colour: they take the model's, so a grey castle
   // builds grey. Real bricks are the colour bricks are.
   const from = bodyId ?? '*';
-  const laid = brickworkNodes(result, prefix, shift, result.standard.toy ? colourOf(subject) : undefined, opts.placement === 'beside' ? from : undefined);
+  const laid = brickworkNodes(
+    result,
+    prefix,
+    shift,
+    result.standard.toy ? colourOf(subject) : undefined,
+    opts.placement === 'beside' ? from : undefined,
+    opts.includeMortar,
+  );
   // Keep anything not laid in brick, including hinged/jointed subtrees hung off a replaced parent body.
   const withoutWholeScene = (list: SceneNode[]): SceneNode[] => list.flatMap((n) => {
     if (!laidWithScene(n)) return [n];
