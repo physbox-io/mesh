@@ -32,6 +32,7 @@ import { mcpMoldSubject, type MoldSubject } from '../../utils/moldSubject';
 import { isPourTooling, withoutTooling } from '../../utils/pourTooling';
 import { isNodeRotationBaked } from '../../utils/sceneTree';
 import { findNodeInScene, describeFiles } from './bridgeUtils';
+import { collectClothNodes, exportClothPatternUnfold } from '../../utils/cloth/clothSummary';
 import type { McpCommands } from './types';
 
 const KINDS = ['panels', 'contour', 'unfold'] as const;
@@ -233,7 +234,8 @@ export const cutCommands: McpCommands = {
       if (!scale.ok) return scale;
       const tabW = checkNonNeg(msg.tabWidthMm, 'tabWidthMm');
       if (!tabW.ok) return tabW;
-      const seam = checkNonNeg(msg.seamAllowanceMm, 'seamAllowanceMm');
+      const rawSeam = msg.seamAllowanceMm !== undefined ? msg.seamAllowanceMm : msg.seam_allowance_mm;
+      const seam = checkNonNeg(rawSeam, 'seamAllowanceMm');
       if (!seam.ok) return seam;
       const stitch = checkNonNeg(msg.stitchPitchMm, 'stitchPitchMm');
       if (!stitch.ok) return stitch;
@@ -262,9 +264,46 @@ export const cutCommands: McpCommands = {
         material: state.material,
         machine,
       };
+      const clothNodes = collectClothNodes(subject.scene.nodes);
+      const hasRigidGeoms = subject.scene.nodes.some((n) => !n.cloth && hasOwnPositiveGeoms(n));
+      const exportClothPattern = () => {
+        const clothSeamMm = seam.value ?? (rawMode === 'soft_goods' ? 10 : 0);
+        const clothRes = exportClothPatternUnfold(clothNodes, store.sceneGraph.nodes, state.model?.flexes, {
+          seamAllowanceMm: clothSeamMm,
+          title: name,
+        });
+        if (!clothRes.ok) {
+          return { ok: false, error: clothRes.error, warnings: clothRes.warnings };
+        }
+        const sheetW = Math.round(clothRes.layout.width);
+        const sheetH = Math.round(clothRes.layout.height);
+        return pack(
+          clothRes.svg,
+          thick,
+          {
+            mode: 'soft_goods',
+            pieces: clothRes.layout.pieces.length,
+            pieceNames: clothRes.pieceNames,
+            sheets: 1,
+            widthMm: sheetW,
+            heightMm: sheetH,
+            seamAllowanceMm: clothRes.seamAllowanceMm,
+            glueTabs: 0,
+            omittedTabs: 0,
+          },
+          clothRes.warnings,
+          [{ widthMm: sheetW, heightMm: sheetH, thicknessMm: thick }],
+        );
+      };
+      if (clothNodes.length > 0 && (rawMode === 'soft_goods' || !hasRigidGeoms)) {
+        return exportClothPattern();
+      }
       try {
         const res = exportSheetUnfold(subject.scene, options);
-        if (!res.success || !res.svg) return { ok: false, error: res.error || 'Nothing here unfolds.', warnings: res.warnings };
+        if (!res.success || !res.svg) {
+          if (clothNodes.length > 0) return exportClothPattern();
+          return { ok: false, error: res.error || 'Nothing here unfolds.', warnings: res.warnings };
+        }
         const sheets: EtchSheetSpec[] = res.sheets.map((s) => ({ widthMm: s.widthMm, heightMm: s.heightMm, thicknessMm: thick }));
         const cornerBlocked = res.cornerBlockedTabCount ?? 0;
         const suggestedTabWidthMm = Math.round(options.tabWidthMm * 0.5 * 10) / 10;

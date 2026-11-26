@@ -59,6 +59,32 @@ export interface GarmentShell {
   part?: string[];
   /** How far each point was let down from where it was cut to hang on the form, metres (garmentShell's hang). */
   hang?: number[];
+  /** Diagnostic warnings emitted during shell construction (e.g. curves that missed all panels or produced zero split edges). */
+  warnings?: string[];
+}
+
+/** Whether a point/triangle on `part` (and `isFront` side, horizontal `x`) matches a plane's `on` scope. */
+function matchesOnMask(on: string | string[] | undefined, part: Part, isFront: boolean, x: number): boolean {
+  if (on === undefined) return true;
+  const list = Array.isArray(on) ? on : [on];
+  if (list.length === 0) return true;
+  const isArm = part === 'armL' || part === 'armR';
+  const isBody = !isArm && part !== 'head';
+  for (const raw of list) {
+    const token = raw.trim();
+    if (token === part) return true;
+    if ((token === 'torso' || token === 'body') && (part === 'skin' || part === 'webL' || part === 'webR')) return true;
+    if (token === 'front' && isBody && isFront) return true;
+    if (token === 'back' && isBody && !isFront) return true;
+    if (token === 'frontL' && isBody && isFront && x >= -1e-4) return true;
+    if (token === 'frontR' && isBody && isFront && x <= 1e-4) return true;
+    if (token === 'backL' && isBody && !isFront && x >= -1e-4) return true;
+    if (token === 'backR' && isBody && !isFront && x <= 1e-4) return true;
+    if (token === 'sleeve' && isArm) return true;
+    if (token === 'sleeveL' && part === 'armL') return true;
+    if (token === 'sleeveR' && part === 'armR') return true;
+  }
+  return false;
 }
 
 /** The grid's spacing at most: about the size of a triangle of a garment round the body. */
@@ -381,7 +407,7 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
   // A draft's plane, and where on the garment it applies.
   const planeDist = (pl: GarmentPlane, p: number[]) => ((p[0] - pl.point[0]) * pl.normal[0] + (p[1] - pl.point[1]) * pl.normal[1] + (p[2] - pl.point[2]) * pl.normal[2]) / (Math.hypot(pl.normal[0], pl.normal[1], pl.normal[2]) || 1);
   // `p` as the plan draws it (straightened), `at` where it is (whose part it is on).
-  const inPlaneMask = (pl: GarmentPlane, p: number[], isFront: boolean, at = p) => (!pl.on || (pl.on as Part[]).includes(nearest(at)))
+  const inPlaneMask = (pl: GarmentPlane, p: number[], isFront: boolean, at = p, part?: Part) => matchesOnMask(pl.on, part ?? nearest(at), isFront, p[0])
     && (pl.front === undefined || isFront === pl.front)
     && (!pl.z || (p[2] >= pl.z[0] && p[2] <= pl.z[1]))
     && (!pl.x || (p[0] >= pl.x[0] && p[0] <= pl.x[1]));
@@ -506,6 +532,13 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
     }
   }
 
+  const shellWarnings: string[] = [];
+  for (const rawCurve of draft.curves ?? []) {
+    if ((rawCurve.points?.length ?? 0) < 2) {
+      shellWarnings.push(`curves '${rawCurve.name}': requires at least 2 control points; skipped.`);
+    }
+  }
+  const CURVE_MISS_M = 0.12;
   // ---- Lines drawn on it (GarmentCurve), laid where it is cut: on the surface lifted as it is here.
   const liftCurve = (line: GarmentCurve): GarmentCurve => ({ ...line, points: line.points.map((p) => [p[0], p[1], p[2] + sinkAt(p)] as [number, number, number]) });
   // Drawn cuts, with the openings: the smaller part each cuts off taken away,
@@ -514,10 +547,20 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
   for (const line of draftLines(draft.curves)) {
     if (line.kind !== 'cut') continue;
     const curve = surfaceCurve(liftCurve(line), points, tris);
-    if (!curve) continue;
+    if (!curve) {
+      shellWarnings.push(`curves '${line.name}' (cut): could not be projected onto the garment surface.`);
+      continue;
+    }
+    if ((curve.minControlDist ?? 0) > CURVE_MISS_M) {
+      shellWarnings.push(`curves '${line.name}' (cut): control points missed all garment panels (nearest surface ${Math.round((curve.minControlDist ?? 0) * 1000)} mm away).`);
+    }
     const slit = curveSlit(curve);
     const locked = new Set<number>(edges.flatMap((e) => e.path));
     const r = splitAlong(points, tris, slit.f, (c, corners) => slit.where(c, corners), locked);
+    if (r.edges.length === 0) {
+      shellWarnings.push(`curves '${line.name}' (cut): produced zero split edges on the garment.`);
+      continue;
+    }
     tris = r.tris;
     edges = carryThrough(edges, r.split);
     const parts = splitPanels(points.length, tris, r.edges);
@@ -685,13 +728,20 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
         runSeam(sm.name, (p) => alongLimb(sm.limb, p) - sm.s, (_, __, t) => triPart[t] === sm.limb);
         break;
       case 'plane':
-        runSeam(sm.name, (p) => planeDist(sm, straightened(p)), (c, _, t) => inPlaneMask(sm, straightened(c), triFront[t], c), sm.open);
+        runSeam(sm.name, (p) => planeDist(sm, straightened(p)), (c, _, t) => inPlaneMask(sm, straightened(c), triFront[t], c, triPart[t]), sm.open);
         break;
       case 'curve': {
         const lines = [...seams, ...edges];
         const curve = surfaceCurve(liftCurve(sm.line), points, tris, lines.flatMap((x) => x.path.map((i) => points[i])));
-        if (!curve) break;
+        if (!curve) {
+          shellWarnings.push(`curves '${sm.line.name}' (${sm.line.kind}): could not be projected onto the garment surface.`);
+          break;
+        }
+        if ((curve.minControlDist ?? 0) > CURVE_MISS_M) {
+          shellWarnings.push(`curves '${sm.line.name}' (${sm.line.kind}): control points missed all garment panels (nearest surface ${Math.round((curve.minControlDist ?? 0) * 1000)} mm away).`);
+        }
         const slit = curveSlit(curve);
+        const beforeCount = seams.filter((x) => x.name === sm.line.name).length;
         runSeam(sm.line.name, slit.f, (c, corners) => slit.where(c, corners), sm.line.kind === 'open');
         // What ran on past a seam it was drawn to, off again.
         const anchored = new Set<number>();
@@ -699,6 +749,10 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
         for (const x of edges) for (const i of x.path) anchored.add(i);
         const drop = trimOvershoot(seams.filter((x) => x.name === sm.line.name).map((x) => x.path as [number, number]), anchored, points);
         if (drop.size) seams = seams.filter((x) => x.name !== sm.line.name || !drop.has(x.path[0] < x.path[1] ? `${x.path[0]},${x.path[1]}` : `${x.path[1]},${x.path[0]}`));
+        const afterCount = seams.filter((x) => x.name === sm.line.name).length;
+        if (afterCount <= beforeCount) {
+          shellWarnings.push(`curves '${sm.line.name}' (${sm.line.kind}): produced zero split edges on the garment.`);
+        }
         break;
       }
       case 'dart': {
@@ -939,6 +993,7 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
     p[0] += (dx / l) * (FLOOR - p[2]); p[1] += (dy / l) * (FLOOR - p[2]); p[2] = FLOOR;
   }
   const shell: GarmentShell = compact({ points, cut, tris, seams, panels, edges, ...(marks.length ? { marks } : {}) });
+  if (shellWarnings.length) shell.warnings = shellWarnings;
   // Round the form under each point, where it is cut from: what an ease of
   // circumference is measured against.
   const perimeter = (radii: number[]) => radii.reduce((acc, r, i) => {
