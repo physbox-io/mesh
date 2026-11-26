@@ -368,6 +368,7 @@ export function polygonPrismMap(
   mesh: SculptMesh,
   polygon: number[][],
   direction?: number[],
+  depth?: number,
 ): { loop: [number, number][]; map: PrismMap } | null {
   if (polygon.length < 3) return null;
   if (polygon.some((p) => !Array.isArray(p) || p.length < 3 || !Number.isFinite(p[0] + p[1] + p[2]))) return null;
@@ -410,10 +411,13 @@ export function polygonPrismMap(
   });
 
   // Through everything: from the far side of the bounding sphere to the near.
+  // When `depth` is given (> 0), stop at `depth` along `direction` from the
+  // polygon plane so the cut forms a flat-bottomed blind pocket instead of
+  // piercing all the way through.
   const { centre, radius } = sweepSphere(mesh);
   const along = (centre[0] - c[0]) * w[0] + (centre[1] - c[1]) * w[1] + (centre[2] - c[2]) * w[2];
-  const near = along - radius;
-  const far = along + radius;
+  const far = depth !== undefined && depth > 0 ? depth : along + radius;
+  const near = depth !== undefined && depth > 0 ? Math.min(along - radius, -radius * 0.25) : along - radius;
 
   const map: PrismMap = (x, y, t) => {
     const s = near + (far - near) * t;
@@ -486,7 +490,12 @@ export function viewPrismMap(mesh: SculptMesh, projectionInverse: Mat4, viewToLo
  */
 export type PrismSpec =
   | { kind: 'view'; loop: [number, number][]; projectionInverse: number[]; viewToLocal: number[] }
-  | { kind: 'polygon'; polygon: number[][]; direction?: number[] }
+  | { kind: 'polygon'; polygon: number[][]; direction?: number[]; depth?: number }
+  /** Fast vertical flat-bottomed cavity for hollowing sculpt vessels/planters. */
+  | {
+    kind: 'hollow'; radius?: number; wall?: number; floor?: number; depth?: number;
+    center?: [number, number]; segments?: number; polygon?: number[][];
+  }
   /** Not a prism: a cutter swept along the surface (utils/sculptCarve.ts). Always removes, always closed. */
   | GrooveSpec
   /**
@@ -526,11 +535,48 @@ export function cutSculptWith(
   }
   let loop: [number, number][];
   let map: PrismMap;
+  if (spec.kind === 'hollow') {
+    const { min, max } = meshBounds(mesh);
+    const height = max[2] - min[2];
+    if (!(height > 1e-4)) return { ok: false, error: 'The sculpt has no height to hollow.' };
+    const cx = spec.center ? spec.center[0] : (min[0] + max[0]) / 2;
+    const cy = spec.center ? spec.center[1] : (min[1] + max[1]) / 2;
+    const wall = spec.wall ?? 0.004;
+    const floor = spec.floor ?? wall;
+    const zBottom = spec.depth !== undefined ? max[2] - spec.depth : min[2] + floor;
+    if (zBottom >= max[2] - 1e-4) {
+      return { ok: false, error: 'Hollow cavity floor is at or above the top of the sculpt.' };
+    }
+    const zTop = max[2] + Math.max(0.01, height * 0.2);
+    if (spec.polygon && spec.polygon.length >= 3) {
+      loop = spec.polygon.map((p): [number, number] => [p[0], p[1]]);
+    } else {
+      const r = spec.radius !== undefined
+        ? spec.radius
+        : Math.min((max[0] - min[0]) / 2, (max[1] - min[1]) / 2) - wall;
+      if (!(r > 1e-4)) {
+        return { ok: false, error: 'Wall thickness is too large for this sculpt; pass a smaller wallMm or an explicit radiusMm.' };
+      }
+      const segs = Math.max(12, Math.min(128, Math.round(spec.segments ?? 48)));
+      loop = Array.from({ length: segs }, (_, i): [number, number] => {
+        const a = (i / segs) * Math.PI * 2;
+        return [cx + Math.cos(a) * r, cy + Math.sin(a) * r];
+      });
+    }
+    map = (x, y, t) => [x, y, zBottom + (zTop - zBottom) * t];
+    const prism = buildPrism(wasm, loop, map);
+    if (!prism) return { ok: false, error: 'The hollow cross-section does not enclose anything.' };
+    try {
+      return cutSculpt(wasm, mesh, prism, { mode: 'remove', cap: true });
+    } finally {
+      prism.delete();
+    }
+  }
   if (spec.kind === 'view') {
     loop = spec.loop;
     map = viewPrismMap(mesh, spec.projectionInverse, spec.viewToLocal);
   } else {
-    const built = polygonPrismMap(mesh, spec.polygon, spec.direction);
+    const built = polygonPrismMap(mesh, spec.polygon, spec.direction, spec.depth);
     if (!built) return { ok: false, error: 'The polygon needs at least three points that are not all in a line.' };
     ({ loop, map } = built);
   }

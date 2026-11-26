@@ -34,6 +34,8 @@ import { buildVertexFaces, createInwardGuard, keepFromFolding, type InwardGuard,
 
 export type BrushType =
   | 'draw'
+  | 'clay'
+  | 'crease'
   | 'inflate'
   | 'smooth'
   | 'flatten'
@@ -1001,6 +1003,10 @@ export interface SculptSession {
   holdsVertexNormal: boolean;
   /** For an inward stroke's fold check: each vertex's faces, rebuilt when the topology changes. */
   vertexFaces?: VertexFaces;
+  /** Maximum Euclidean displacement (metres) of any vertex moved during this stroke, even across dynamic-topology refinement. */
+  maxDisplacement: number;
+  /** Original [x, y, z] per touched vertex index before the first dab moved it (interpolated on edge splits, cleared on decimation). */
+  dispOrigin: Map<number, [number, number, number]>;
 }
 
 /** A third of the area of every triangle each vertex is a corner of. */
@@ -1066,6 +1072,8 @@ export function beginStroke(mesh: SculptMesh, settings: BrushSettings): SculptSe
       : null,
     inwardLimit: isInward(settings) ? new Map() : null,
     holdsVertexNormal: isInward(settings) && settings.type === 'inflate',
+    maxDisplacement: 0,
+    dispOrigin: new Map(),
   };
 }
 
@@ -1074,7 +1082,10 @@ const INWARD_MIN_GAP_RADII = 0.1;
 
 /** A stroke that pushes the surface in, and so could push it through the other side. */
 function isInward(settings: BrushSettings): boolean {
-  return settings.invert && (settings.type === 'draw' || settings.type === 'inflate');
+  return (
+    (settings.invert && (settings.type === 'draw' || settings.type === 'inflate' || settings.type === 'clay')) ||
+    (!settings.invert && settings.type === 'crease')
+  );
 }
 
 /** How far vertex `i` may go in this stroke, measured the first time it is asked. */
@@ -1109,7 +1120,7 @@ function holdInwardLimit(session: SculptSession, indices: number[], stamp: Brush
 }
 
 function isLayered(settings: BrushSettings): boolean {
-  return settings.type === 'draw' && (settings.depth ?? 0) > 0;
+  return (settings.type === 'draw' || settings.type === 'clay') && (settings.depth ?? 0) > 0;
 }
 
 /**
@@ -1193,13 +1204,21 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
   const target = Math.max(1e-5, radius * Math.max(0.05, settings.detail) * edgeScale);
   const budget = settings.maxVertices ?? DEFAULT_BRUSH.maxVertices;
   // A midpoint made mid-stroke starts where its parents started, so a depth
-  // limit cannot be measured from a surface that is already partly carved.
-  const onMidpoint = session.layerStart
-    ? (mid: number, a: number, b: number) => {
+  // limit and displacement tracking stay continuous across edge splits.
+  const onMidpoint = (mid: number, a: number, b: number) => {
+    const oa = session.dispOrigin.get(a);
+    const ob = session.dispOrigin.get(b);
+    if (oa || ob) {
+      const p = mesh.positions;
+      const ax = oa ? oa[0] : p[a * 3], ay = oa ? oa[1] : p[a * 3 + 1], az = oa ? oa[2] : p[a * 3 + 2];
+      const bx = ob ? ob[0] : p[b * 3], by = ob ? ob[1] : p[b * 3 + 1], bz = ob ? ob[2] : p[b * 3 + 2];
+      session.dispOrigin.set(mid, [(ax + bx) / 2, (ay + by) / 2, (az + bz) / 2]);
+    }
+    if (session.layerStart) {
       const pa = layerStartOf(session, a, stamp), pb = layerStartOf(session, b, stamp);
       const nx = pa[3] + pb[3], ny = pa[4] + pb[4], nz = pa[5] + pb[5];
       const nl = Math.hypot(nx, ny, nz) || 1;
-      session.layerStart!.set(mid, [
+      session.layerStart.set(mid, [
         (pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2, (pa[2] + pb[2]) / 2, nx / nl, ny / nl, nz / nl,
       ]);
       // Between two vertices that may each go so far in, the surface may too.
@@ -1208,7 +1227,7 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
         session.inwardLimit.set(mid, Math.min(la, lb));
       }
     }
-    : undefined;
+  };
 
   // Smooth takes detail away and has none to add: refining under it to the
   // usual target turned a rim pass on a carved pumpkin from 23 k vertices
@@ -1252,6 +1271,10 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
         ? decimateInRadius(mesh, stamp.x, stamp.y, stamp.z, radius, target * 0.4, session.adjacency)
         : 0;
 
+    if (merged > 0) {
+      // Decimation renumbers vertices; clear per-index origins while retaining maxDisplacement already measured.
+      session.dispOrigin.clear();
+    }
     if (split > 0 || merged > 0) {
       session.topologyChanged = true;
       // Both invalidate the caches, and the hash is what the query below reads.
@@ -1294,6 +1317,12 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
 
   if (indices.length === 0) return;
   recordUndo(session, indices);
+  for (let k = 0; k < indices.length; k++) {
+    const i = indices[k];
+    if (!session.dispOrigin.has(i)) {
+      session.dispOrigin.set(i, [mesh.positions[i * 3], mesh.positions[i * 3 + 1], mesh.positions[i * 3 + 2]]);
+    }
+  }
   // Where this dab found them, for an inward stroke to take back a fold.
   let dabStart: Float32Array | null = null;
   if (session.inwardGuard) {
@@ -1344,6 +1373,76 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
         positions[i * 3] += stamp.nx * w;
         positions[i * 3 + 1] += stamp.ny * w;
         positions[i * 3 + 2] += stamp.nz * w;
+      }
+      if (session.inwardGuard) holdInwardLimit(session, indices, stamp);
+      break;
+    }
+
+    case 'clay': {
+      // Flat-topped additive clay buildup (or flat-bottomed carve when inverted):
+      // computes the weighted average surface plane under the brush, offsets it
+      // along the brush normal, and fills/levels vertices toward that target plane.
+      let px = 0, py = 0, pz = 0, total = 0;
+      for (let k = 0; k < indices.length; k++) {
+        const i = indices[k];
+        const w = weights[k];
+        px += positions[i * 3] * w;
+        py += positions[i * 3 + 1] * w;
+        pz += positions[i * 3 + 2] * w;
+        total += w;
+      }
+      if (total < 1e-9) break;
+      px /= total; py /= total; pz /= total;
+      const tx = px + stamp.nx * amplitude;
+      const ty = py + stamp.ny * amplitude;
+      const tz = pz + stamp.nz * amplitude;
+
+      for (let k = 0; k < indices.length; k++) {
+        const i = indices[k];
+        const d =
+          (tx - positions[i * 3]) * stamp.nx +
+          (ty - positions[i * 3 + 1]) * stamp.ny +
+          (tz - positions[i * 3 + 2]) * stamp.nz;
+        if (d * sign <= 0) continue;
+        let step = d * weights[k] * strength;
+        if (depth > 0) {
+          const p0 = layerStartOf(session, i, stamp);
+          const gone =
+            ((positions[i * 3] - p0[0]) * p0[3] +
+              (positions[i * 3 + 1] - p0[1]) * p0[4] +
+              (positions[i * 3 + 2] - p0[2]) * p0[5]) * sign;
+          step = Math.min(Math.abs(step), Math.max(0, depth - gone)) * sign;
+          positions[i * 3] += p0[3] * step;
+          positions[i * 3 + 1] += p0[4] * step;
+          positions[i * 3 + 2] += p0[5] * step;
+          continue;
+        }
+        positions[i * 3] += stamp.nx * step;
+        positions[i * 3 + 1] += stamp.ny * step;
+        positions[i * 3 + 2] += stamp.nz * step;
+      }
+      if (session.inwardGuard) holdInwardLimit(session, indices, stamp);
+      break;
+    }
+
+    case 'crease': {
+      // Sharp V-indent (or sharp ridge when inverted): combines a concentrated
+      // normal push with tangential pinch toward the stroke centre.
+      for (let k = 0; k < indices.length; k++) {
+        const i = indices[k];
+        const w = weights[k];
+        const indent = -w * w * amplitude;
+        let vx = stamp.x - positions[i * 3];
+        let vy = stamp.y - positions[i * 3 + 1];
+        let vz = stamp.z - positions[i * 3 + 2];
+        const along = vx * stamp.nx + vy * stamp.ny + vz * stamp.nz;
+        vx -= stamp.nx * along;
+        vy -= stamp.ny * along;
+        vz -= stamp.nz * along;
+        const pinchW = w * strength * 0.45;
+        positions[i * 3] += stamp.nx * indent + vx * pinchW;
+        positions[i * 3 + 1] += stamp.ny * indent + vy * pinchW;
+        positions[i * 3 + 2] += stamp.nz * indent + vz * pinchW;
       }
       if (session.inwardGuard) holdInwardLimit(session, indices, stamp);
       break;
@@ -1505,6 +1604,18 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
       session.vertexFaces = buildVertexFaces(mesh.faces, mesh.faceCount, mesh.vertexCount, mesh.topologyRevision);
     }
     keepFromFolding(mesh.positions, mesh.faces, session.vertexFaces, indices, dabStart, [stamp.nx, stamp.ny, stamp.nz]);
+  }
+
+  for (let k = 0; k < indices.length; k++) {
+    const i = indices[k];
+    const o = session.dispOrigin.get(i);
+    if (!o) continue;
+    const d = Math.hypot(
+      mesh.positions[i * 3] - o[0],
+      mesh.positions[i * 3 + 1] - o[1],
+      mesh.positions[i * 3 + 2] - o[2],
+    );
+    if (d > session.maxDisplacement) session.maxDisplacement = d;
   }
 
   // A depth-limited dab stretches the edges that cross its wall, from the rim

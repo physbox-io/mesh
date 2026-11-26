@@ -1,4 +1,5 @@
 import { analyzeMesh, type MeshIntegrity } from './meshIntegrity';
+import { subdivideMeshForPaint, transferPaintLayer } from './vertexPaint';
 import type { SceneGeom, SceneNode } from '../types/scene';
 
 export interface MeshRepairOptions {
@@ -1052,11 +1053,24 @@ export function repairSceneGeom(
   });
   const yupVertices = zupToYup(report.positions);
 
+  let remappedPaint = geom.paint;
+  if (geom.paint && geom.paint.idx.length > 0) {
+    const paintRes = geom.paint.res;
+    const oldPaintPos = paintRes.length
+      ? subdivideMeshForPaint(zupPositions, geom.faces, paintRes).positions
+      : zupPositions;
+    const newPaintPos = paintRes.length
+      ? subdivideMeshForPaint(report.positions, report.faces, paintRes).positions
+      : report.positions;
+    remappedPaint = transferPaintLayer(oldPaintPos, geom.paint, newPaintPos, paintRes);
+  }
+
   const updatedGeom: SceneGeom = {
     ...geom,
     renderVertices: report.positions,
     vertices: yupVertices,
     faces: report.faces,
+    ...(remappedPaint !== geom.paint ? { paint: remappedPaint } : {}),
   };
 
   return { geom: updatedGeom, report, input: zupPositions };

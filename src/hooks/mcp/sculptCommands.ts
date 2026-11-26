@@ -141,9 +141,9 @@ export const sculptCommands: McpCommands = {
     // supplies its own default for each one it does not get.
     // Also accepts `strokes: [...]` to run a whole batch of brushes/strokes
     // in a single mesh update & recompile.
-    const { targetId, brush, at, radius, strength, invert, symmetryX, symmetry, detail, dynamicTopology, delta, depthMm, hardness, strokes } =
+    const { targetId, brush, at, atMm, radius, radiusMm, strength, invert, symmetryX, symmetry, detail, dynamicTopology, delta, depthMm, hardness, strokes } =
       msg as Msg<{
-        targetId: string; brush?: BrushType; radius?: number; strength?: number;
+        targetId: string; brush?: BrushType; atMm?: unknown; radius?: number; radiusMm?: number; strength?: number;
         depthMm?: number; hardness?: number;
         invert?: boolean; symmetryX?: boolean; symmetry?: 'x' | 'y' | 'z';
         detail?: number; dynamicTopology?: boolean; delta?: number[];
@@ -159,7 +159,7 @@ export const sculptCommands: McpCommands = {
     }
     const strokeList = strokes !== undefined
       ? strokes
-      : [{ brush, at, radius, strength, invert, symmetryX, symmetry, detail, dynamicTopology, delta, depthMm, hardness }];
+      : [{ brush, at, atMm, radius, radiusMm, strength, invert, symmetryX, symmetry, detail, dynamicTopology, delta, depthMm, hardness }];
 
     const isFiniteVec3 = (p: unknown): p is number[] =>
       Array.isArray(p) && p.length >= 3 &&
@@ -167,7 +167,7 @@ export const sculptCommands: McpCommands = {
       Number.isFinite(p[0] + p[1] + p[2]);
 
     // Validate ALL strokes upfront before mutating mesh or sculptHistory.
-    const validatedStrokes: { spec: Record<string, unknown>; points: number[][] }[] = [];
+    const validatedStrokes: { spec: Record<string, unknown>; points: number[][]; resolvedRadius?: number }[] = [];
     for (const s of strokeList) {
       if (!s || typeof s !== 'object' || Array.isArray(s)) {
         throw new Error('Each stroke must be an object');
@@ -175,9 +175,13 @@ export const sculptCommands: McpCommands = {
       if (s.brush !== undefined && (typeof s.brush !== 'string' || !BRUSH_TYPES.includes(s.brush as BrushType))) {
         throw new Error(`Unknown brush '${s.brush}'. Available: ${BRUSH_TYPES.join(', ')}`);
       }
-      const points: number[][] = pointList(s.at);
+      const points: number[][] = s.at !== undefined
+        ? pointList(s.at)
+        : s.atMm !== undefined
+          ? pointList(s.atMm).map((p) => (isFiniteVec3(p) ? [p[0] / 1000, p[1] / 1000, p[2] / 1000] : p))
+          : [];
       if (!points.length || points.some((p: unknown) => !isFiniteVec3(p))) {
-        throw new Error("at must be [x, y, z] or a list of them, in the body's own frame (metres)");
+        throw new Error("at must be [x, y, z] or a list of them, in the body's own frame in metres (or pass atMm in millimetres)");
       }
       if (s.delta !== undefined && !isFiniteVec3(s.delta)) {
         throw new Error('delta must be [dx, dy, dz] finite numbers in metres');
@@ -185,6 +189,14 @@ export const sculptCommands: McpCommands = {
       if (s.radius !== undefined && !(typeof s.radius === 'number' && Number.isFinite(s.radius) && s.radius > 0)) {
         throw new Error('radius must be a positive number in metres');
       }
+      if (s.radiusMm !== undefined && !(typeof s.radiusMm === 'number' && Number.isFinite(s.radiusMm) && s.radiusMm > 0)) {
+        throw new Error('radiusMm must be a positive number in millimetres');
+      }
+      const resolvedRadius = typeof s.radius === 'number'
+        ? s.radius
+        : typeof s.radiusMm === 'number'
+          ? s.radiusMm / 1000
+          : undefined;
       if (s.strength !== undefined && !(typeof s.strength === 'number' && Number.isFinite(s.strength) && s.strength >= 0 && s.strength <= 1)) {
         throw new Error('strength must be a finite number between 0 and 1');
       }
@@ -200,20 +212,20 @@ export const sculptCommands: McpCommands = {
       if (s.symmetry !== undefined && s.symmetry !== 'x' && s.symmetry !== 'y' && s.symmetry !== 'z') {
         throw new Error("symmetry must be 'x', 'y' or 'z'");
       }
-      validatedStrokes.push({ spec: s, points });
+      validatedStrokes.push({ spec: s, points, resolvedRadius });
     }
 
     const mesh = sculptMeshOf(node, geomIndex);
     let lastResult: ReturnType<typeof applySculptStroke> | null = null;
-    const perStroke: { brush?: string; applied: number; missed: number; moved: number; topologyChanged?: boolean }[] = [];
+    const perStroke: { brush?: string; applied: number; missed: number; moved: number; maxDisplacement: number; topologyChanged?: boolean }[] = [];
     const pendingUndos: SculptUndoEntry[] = [];
 
-    for (const { spec: s, points } of validatedStrokes) {
+    for (const { spec: s, points, resolvedRadius } of validatedStrokes) {
       const sink: { undo?: SculptUndoEntry | null } = {};
       lastResult = applySculptStroke(mesh, {
         brush: s.brush as BrushType | undefined,
         at: points,
-        radius: s.radius as number | undefined,
+        radius: resolvedRadius,
         strength: s.strength as number | undefined,
         invert: s.invert as boolean | undefined,
         symmetryX: s.symmetryX as boolean | undefined,
@@ -229,6 +241,7 @@ export const sculptCommands: McpCommands = {
         applied: Number(lastResult.applied ?? 0),
         missed: Array.isArray(lastResult.missed) ? lastResult.missed.length : 0,
         moved: lastResult.moved ?? 0,
+        maxDisplacement: lastResult.maxDisplacement,
         ...(lastResult.topologyChanged ? { topologyChanged: true } : {}),
       });
 
@@ -302,32 +315,75 @@ export const sculptCommands: McpCommands = {
     pops.
   */
   SCULPT_CUT: async (msg, { store }) => {
-    const { targetId, polygon, direction, mode, cap } = msg as Msg<{
-      targetId: string; polygon: number[][]; direction?: number[]; mode?: 'remove' | 'keep'; cap?: boolean;
+    const {
+      targetId, polygon, direction, mode, cap,
+      depthMm, wallMm, floorMm, radiusMm, center, segments,
+    } = msg as Msg<{
+      targetId: string; polygon?: number[][]; direction?: number[]; mode?: 'remove' | 'keep' | 'hollow'; cap?: boolean;
+      depthMm?: number; wallMm?: number; floorMm?: number; radiusMm?: number; center?: number[]; segments?: number;
     }>;
     const { node, geomIndex } = sculptTarget(store, targetId);
     const isFiniteVec3 = (p: unknown): p is number[] =>
       Array.isArray(p) && p.length >= 3 &&
       typeof p[0] === 'number' && typeof p[1] === 'number' && typeof p[2] === 'number' &&
       Number.isFinite(p[0] + p[1] + p[2]);
+    const isFiniteNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+    if (mode !== undefined && mode !== 'remove' && mode !== 'keep' && mode !== 'hollow') {
+      throw new Error("mode must be 'remove' (take the prism out), 'keep' (keep only the prism), or 'hollow' (fast vertical flat-bottomed cavity)");
+    }
+    if (depthMm !== undefined && (!isFiniteNum(depthMm) || depthMm <= 0)) {
+      throw new Error('depthMm must be a positive finite number of millimetres');
+    }
+
+    const geomBefore = node.geoms?.[geomIndex];
+    const mesh = sculptMeshOf(node, geomIndex);
+
+    if (mode === 'hollow') {
+      if (wallMm !== undefined && (!isFiniteNum(wallMm) || wallMm <= 0)) {
+        throw new Error('wallMm must be a positive finite number of millimetres');
+      }
+      if (floorMm !== undefined && (!isFiniteNum(floorMm) || floorMm < 0)) {
+        throw new Error('floorMm must be a non-negative finite number of millimetres');
+      }
+      if (radiusMm !== undefined && (!isFiniteNum(radiusMm) || radiusMm <= 0)) {
+        throw new Error('radiusMm must be a positive finite number of millimetres');
+      }
+      if (center !== undefined && (!Array.isArray(center) || center.length < 2 || !isFiniteNum(center[0]) || !isFiniteNum(center[1]))) {
+        throw new Error("center must be [x, y] finite numbers in the body's own frame (metres)");
+      }
+      if (polygon !== undefined && (!Array.isArray(polygon) || polygon.length < 3 || polygon.some((p: unknown) => !Array.isArray(p) || p.length < 2 || !isFiniteNum(p[0]) || !isFiniteNum(p[1])))) {
+        throw new Error("polygon must be three or more [x, y] or [x, y, z] points in the body's own frame (metres)");
+      }
+      const result = await cutSculptOffThread(mesh, {
+        kind: 'hollow',
+        ...(wallMm !== undefined ? { wall: wallMm / 1000 } : {}),
+        ...(floorMm !== undefined ? { floor: floorMm / 1000 } : {}),
+        ...(radiusMm !== undefined ? { radius: radiusMm / 1000 } : {}),
+        ...(depthMm !== undefined ? { depth: depthMm / 1000 } : {}),
+        ...(center !== undefined ? { center: [center[0], center[1]] as [number, number] } : {}),
+        ...(segments !== undefined && isFiniteNum(segments) ? { segments } : {}),
+        ...(polygon !== undefined ? { polygon } : {}),
+      }, { mode: 'remove', cap: true });
+      return applySculptCutResult(targetId, geomIndex, geomBefore, mesh, result);
+    }
+
     if (!Array.isArray(polygon) || polygon.length < 3 || polygon.some((p: unknown) => !isFiniteVec3(p))) {
       throw new Error("polygon must be three or more [x, y, z] points, in the body's own frame (metres)");
     }
     if (direction !== undefined && (!isFiniteVec3(direction) || Math.hypot(direction[0], direction[1], direction[2]) <= 1e-12)) {
       throw new Error('direction must be a non-zero [x, y, z] vector');
     }
-    if (mode !== undefined && mode !== 'remove' && mode !== 'keep') {
-      throw new Error("mode must be 'remove' (take the prism out) or 'keep' (keep only the prism)");
-    }
 
-    const geomBefore = node.geoms?.[geomIndex];
-    const mesh = sculptMeshOf(node, geomIndex);
-    const result = await cutSculptOffThread(mesh, { kind: 'polygon', polygon, direction }, { mode, cap });
+    const result = await cutSculptOffThread(
+      mesh,
+      { kind: 'polygon', polygon, direction, ...(depthMm !== undefined ? { depth: depthMm / 1000 } : {}) },
+      { mode, cap },
+    );
     return applySculptCutResult(targetId, geomIndex, geomBefore, mesh, result);
   },
   SCULPT_CARVE: async (msg, { store }) => {
-    const { targetId, path, widthMm, depthMm, profile = 'round', symmetry, fill, taper, angleDeg, mode = 'cut', thicknessMm, flatAxis = 'z' } = msg as Msg<{
-      targetId: string; path: number[][]; widthMm: number; depthMm?: number;
+    const { targetId, path, pathMm, widthMm, depthMm, profile = 'round', symmetry, fill, taper, angleDeg, mode = 'cut', thicknessMm, flatAxis = 'z' } = msg as Msg<{
+      targetId: string; path?: number[][]; pathMm?: number[][]; widthMm: number; depthMm?: number;
       profile?: CarveProfile; symmetry?: 'x' | 'y' | 'z'; fill?: boolean;
       taper?: number; angleDeg?: number; mode?: 'cut' | 'add';
       thicknessMm?: number; flatAxis?: 'x' | 'y' | 'z';
@@ -337,9 +393,13 @@ export const sculptCommands: McpCommands = {
       Array.isArray(p) && p.length >= 3 &&
       typeof p[0] === 'number' && typeof p[1] === 'number' && typeof p[2] === 'number' &&
       Number.isFinite(p[0] + p[1] + p[2]);
-    const points = pointList(path);
+    const points = path !== undefined
+      ? pointList(path)
+      : pathMm !== undefined
+        ? pointList(pathMm).map((p) => (isFiniteVec3(p) ? [p[0] / 1000, p[1] / 1000, p[2] / 1000] : p))
+        : [];
     if (!points.length || points.some((p: unknown) => !isFiniteVec3(p))) {
-      throw new Error("path must be [x, y, z] or a list of them, in the body's own frame (metres)");
+      throw new Error("path must be [x, y, z] or a list of them, in the body's own frame in metres (or pass pathMm in millimetres)");
     }
     if (mode !== 'cut' && mode !== 'add') throw new Error("mode must be 'cut' or 'add'");
     const add = mode === 'add';
@@ -382,15 +442,19 @@ export const sculptCommands: McpCommands = {
     return applySculptCutResult(targetId, geomIndex, geomBefore, mesh, result, { add });
   },
   PROBE_SCULPT: async (msg, { store }) => {
-    const { targetId, at } = msg as Msg<{ targetId: string }>;
+    const { targetId, at, atMm } = msg as Msg<{ targetId: string; atMm?: unknown }>;
     const { node, geomIndex } = sculptTarget(store, targetId);
-    const points: number[][] = pointList(at);
     const isFiniteVec3 = (p: unknown): p is number[] =>
       Array.isArray(p) && p.length >= 3 &&
       typeof p[0] === 'number' && typeof p[1] === 'number' && typeof p[2] === 'number' &&
       Number.isFinite(p[0] + p[1] + p[2]);
+    const points: number[][] = at !== undefined
+      ? pointList(at)
+      : atMm !== undefined
+        ? pointList(atMm).map((p) => (isFiniteVec3(p) ? [p[0] / 1000, p[1] / 1000, p[2] / 1000] : p))
+        : [];
     if (!points.length || points.some((p: unknown) => !isFiniteVec3(p))) {
-      throw new Error("at must be [x, y, z] or a list of them, in the body's own frame (metres)");
+      throw new Error("at must be [x, y, z] or a list of them, in the body's own frame in metres (or pass atMm in millimetres)");
     }
     return { ok: true, id: targetId, points: probeSurface(sculptMeshOf(node, geomIndex), points) };
   },

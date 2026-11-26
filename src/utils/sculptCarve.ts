@@ -66,11 +66,13 @@ export interface GrooveSpec {
 }
 
 /** Points round the cutter: enough that its facets are under a hair at any size anyone carves. */
-const SEGMENTS = 64;
+const SEGMENTS = 32;
+/** Coarser ring for interior fill scanlines (completely inside the smooth outline rim). */
+const FILL_SEGMENTS = 12;
 /** How big a tapered cutter is at the very ends of its path, as a share of its full size. */
 const TAPER_TIP = 0.15;
 /** Rings down the ball of a round cutter. */
-const BALL_RINGS = 12;
+const BALL_RINGS = 8;
 
 /**
  * The cutter as rings in its own frame: [radius, height] pairs, height along
@@ -118,6 +120,7 @@ function cutterPoints(
   scale = 1,
   tilt = 0,
   tangent?: number[],
+  segments = SEGMENTS,
 ): number[][] {
   const nl = Math.hypot(n[0], n[1], n[2]) || 1;
   let w = [n[0] / nl, n[1] / nl, n[2] / nl];
@@ -142,8 +145,8 @@ function cutterPoints(
       out.push([p[0] + w[0] * h, p[1] + w[1] * h, p[2] + w[2] * h]);
       continue;
     }
-    for (let s = 0; s < SEGMENTS; s++) {
-      const a = (s / SEGMENTS) * Math.PI * 2;
+    for (let s = 0; s < segments; s++) {
+      const a = (s / segments) * Math.PI * 2;
       const c = Math.cos(a) * radius, d = Math.sin(a) * radius;
       out.push([
         p[0] + u[0] * c + v[0] * d + w[0] * h,
@@ -223,9 +226,10 @@ export function buildGroove(wasm: ManifoldToplevel, spec: GrooveSpec): ManifoldT
       const flat = spec.add && spec.flatten && spec.flatten.ratio > 0 && spec.flatten.ratio < 1 ? spec.flatten : null;
       const nl = flat ? Math.hypot(flat.normal[0], flat.normal[1], flat.normal[2]) || 1 : 1;
       const fn = flat ? flat.normal.map((c) => c / nl) : [0, 0, 1];
+      const segs = run.tapered ? SEGMENTS : FILL_SEGMENTS;
       const tools = run.path.map((p, i) => {
         const points = cutterPoints(
-          cutterRings(run.profile), p, run.normals[i], size[i], run.tapered ? spec.tilt ?? 0 : 0, tangentAt(run.path, i),
+          cutterRings(run.profile), p, run.normals[i], size[i], run.tapered ? spec.tilt ?? 0 : 0, tangentAt(run.path, i), segs,
         );
         if (flat) {
           for (const q of points) {
@@ -250,6 +254,51 @@ export function buildGroove(wasm: ManifoldToplevel, spec: GrooveSpec): ManifoldT
   }
 }
 
+/** Spatial acceleration structure for repeated `closestOnSurface` queries on dense sculpts. */
+export interface SurfaceIndex {
+  minX: number; minY: number; minZ: number;
+  cell: number;
+  invCell: number;
+  maxRing: number;
+  /** Grid cell key -> vertex indices in that cell. */
+  vertGrid: Map<string, number[]>;
+  /** Grid cell key -> face indices whose vertex `a` sits in that cell. */
+  faceGrid: Map<string, number[]>;
+}
+
+/** Build a uniform spatial grid once per `grooveAlongSurface` call. */
+export function buildSurfaceIndex(mesh: SculptMesh, longestEdge: number): SurfaceIndex {
+  const { positions: P, faces: F, vertexCount, faceCount } = mesh;
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < vertexCount; i++) {
+    const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+    if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+  }
+  const diag = Math.hypot(maxX - minX, maxY - minY, maxZ - minZ);
+  const divs = Math.max(12, Math.min(48, Math.ceil(Math.cbrt(Math.max(1, vertexCount)) * 1.2)));
+  const cell = Math.max(longestEdge, diag / divs, 1e-4);
+  const invCell = 1 / cell;
+  const vertGrid = new Map<string, number[]>();
+  const faceGrid = new Map<string, number[]>();
+  for (let i = 0; i < vertexCount; i++) {
+    const k = `${Math.floor((P[i * 3] - minX) * invCell)},${Math.floor((P[i * 3 + 1] - minY) * invCell)},${Math.floor((P[i * 3 + 2] - minZ) * invCell)}`;
+    let b = vertGrid.get(k);
+    if (!b) { b = []; vertGrid.set(k, b); }
+    b.push(i);
+  }
+  for (let f = 0; f < faceCount; f++) {
+    const a = F[f * 3];
+    const k = `${Math.floor((P[a * 3] - minX) * invCell)},${Math.floor((P[a * 3 + 1] - minY) * invCell)},${Math.floor((P[a * 3 + 2] - minZ) * invCell)}`;
+    let b = faceGrid.get(k);
+    if (!b) { b = []; faceGrid.set(k, b); }
+    b.push(f);
+  }
+  return { minX, minY, minZ, cell, invCell, maxRing: Math.max(divs, 24), vertGrid, faceGrid };
+}
+
 /**
  * The closest point on the surface itself, not the nearest vertex, and the
  * normal there blended from its triangle's corners. A nearest vertex is up to
@@ -260,31 +309,83 @@ export function closestOnSurface(
   mesh: SculptMesh,
   point: number[],
   longestEdge: number,
+  index?: SurfaceIndex,
 ): { point: number[]; normal: number[]; distance: number } | null {
   const { positions: P, normals: N, faces: F } = mesh;
   const [px, py, pz] = point;
   let near = Infinity;
-  for (let i = 0; i < mesh.vertexCount; i++) {
-    const d = (P[i * 3] - px) ** 2 + (P[i * 3 + 1] - py) ** 2 + (P[i * 3 + 2] - pz) ** 2;
-    if (d < near) near = d;
+  if (index) {
+    const { minX, minY, minZ, cell, invCell, maxRing, vertGrid } = index;
+    const gx = Math.floor((px - minX) * invCell);
+    const gy = Math.floor((py - minY) * invCell);
+    const gz = Math.floor((pz - minZ) * invCell);
+    for (let r = 0; r <= maxRing; r++) {
+      for (let dx = -r; dx <= r; dx++) {
+        for (let dy = -r; dy <= r; dy++) {
+          for (let dz = -r; dz <= r; dz++) {
+            if (Math.max(Math.abs(dx), Math.abs(dy), Math.abs(dz)) !== r) continue;
+            const bucket = vertGrid.get(`${gx + dx},${gy + dy},${gz + dz}`);
+            if (!bucket) continue;
+            for (let k = 0; k < bucket.length; k++) {
+              const i = bucket[k];
+              const d = (P[i * 3] - px) ** 2 + (P[i * 3 + 1] - py) ** 2 + (P[i * 3 + 2] - pz) ** 2;
+              if (d < near) near = d;
+            }
+          }
+        }
+      }
+      if (near < Infinity && near <= (r * cell) * (r * cell)) break;
+    }
   }
+  if (near === Infinity) {
+    for (let i = 0; i < mesh.vertexCount; i++) {
+      const d = (P[i * 3] - px) ** 2 + (P[i * 3 + 1] - py) ** 2 + (P[i * 3 + 2] - pz) ** 2;
+      if (d < near) near = d;
+    }
+  }
+  if (near === Infinity) return null;
   const reach = Math.sqrt(near) + longestEdge;
   const reach2 = reach * reach;
   let best: { point: number[]; normal: number[]; distance: number } | null = null;
-  for (let f = 0; f < mesh.faceCount; f++) {
+
+  const testFace = (f: number) => {
     const a = F[f * 3], b = F[f * 3 + 1], c = F[f * 3 + 2];
     const da = (P[a * 3] - px) ** 2 + (P[a * 3 + 1] - py) ** 2 + (P[a * 3 + 2] - pz) ** 2;
-    if (da > reach2) continue;
+    if (da > reach2) return;
     const [u, v, w] = closestBarycentric(P, a, b, c, px, py, pz);
     const q = [0, 1, 2].map((k) => P[a * 3 + k] * u + P[b * 3 + k] * v + P[c * 3 + k] * w);
     const d = Math.hypot(q[0] - px, q[1] - py, q[2] - pz);
     // Never NaN: a NaN fails every comparison after it, so each later face
     // replaced it and the snap returned whichever face came last.
-    if (!Number.isFinite(d) || (best && d >= best.distance)) continue;
+    if (!Number.isFinite(d) || (best && d >= best.distance)) return;
     const n = [0, 1, 2].map((k) => N[a * 3 + k] * u + N[b * 3 + k] * v + N[c * 3 + k] * w);
     const nl = Math.hypot(n[0], n[1], n[2]) || 1;
     best = { point: q, normal: [n[0] / nl, n[1] / nl, n[2] / nl], distance: d };
+  };
+
+  if (index) {
+    const { minX, minY, minZ, invCell, faceGrid } = index;
+    const x0 = Math.floor((px - reach - minX) * invCell);
+    const x1 = Math.floor((px + reach - minX) * invCell);
+    const y0 = Math.floor((py - reach - minY) * invCell);
+    const y1 = Math.floor((py + reach - minY) * invCell);
+    const z0 = Math.floor((pz - reach - minZ) * invCell);
+    const z1 = Math.floor((pz + reach - minZ) * invCell);
+    if ((x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) <= 512) {
+      for (let gx = x0; gx <= x1; gx++) {
+        for (let gy = y0; gy <= y1; gy++) {
+          for (let gz = z0; gz <= z1; gz++) {
+            const bucket = faceGrid.get(`${gx},${gy},${gz}`);
+            if (!bucket) continue;
+            for (let k = 0; k < bucket.length; k++) testFace(bucket[k]);
+          }
+        }
+      }
+      return best;
+    }
   }
+
+  for (let f = 0; f < mesh.faceCount; f++) testFace(f);
   return best;
 }
 
@@ -383,12 +484,13 @@ export function grooveAlongSurface(
   }
   recomputeNormals(mesh);
   const longest = longestEdgeOf(mesh);
+  const surfaceIndex = mesh.faceCount >= 512 ? buildSurfaceIndex(mesh, longest) : undefined;
   const reach = options.reach ?? Math.max(options.width * 2, 0.002);
   const step = options.width / 2;
   const missed: number[][] = [];
   const snapped: { point: number[]; normal: number[] }[] = [];
   const snap = (p: number[]) => {
-    const hit = closestOnSurface(mesh, p, longest);
+    const hit = closestOnSurface(mesh, p, longest, surfaceIndex);
     if (!hit || hit.distance > reach) return null;
     return hit;
   };
@@ -418,7 +520,7 @@ export function grooveAlongSurface(
     return [sum[0] / l, sum[1] / l, sum[2] / l];
   });
   const extra = options.fill && snapped.length >= 3
-    ? fillScanlines(mesh, snapped.map((s) => s.point), normals, options.width, longest)
+    ? fillScanlines(mesh, snapped.map((s) => s.point), normals, options.width, longest, surfaceIndex)
     : [];
   return {
     spec: {
@@ -444,12 +546,83 @@ export function grooveAlongSurface(
  * average, along the outline's longer side so the lines are few and long,
  * clipped to the outline even-odd, then laid back onto the clay.
  */
+/**
+ * Simplify a snapped polyline+normals run by dropping intermediate points that
+ * lie within `posTol` of the straight chord between kept endpoints and whose
+ * normals agree within `normalDotMin`. On flat or gently curved regions this
+ * collapses dozens of redundant hulls into one or a few hulls with no loss of
+ * geometric accuracy.
+ */
+function simplifyRun(
+  path: number[][],
+  normals: number[][],
+  posTol: number,
+  normalDotMin = 0.996,
+): { path: number[][]; normals: number[][] } {
+  if (path.length <= 2) return { path, normals };
+  const keep = new Uint8Array(path.length);
+  keep[0] = 1;
+  keep[path.length - 1] = 1;
+  const posTol2 = posTol * posTol;
+
+  const split = (lo: number, hi: number) => {
+    if (hi <= lo + 1) return;
+    const a = path[lo], b = path[hi];
+    const na = normals[lo], nb = normals[hi];
+    const abx = b[0] - a[0], aby = b[1] - a[1], abz = b[2] - a[2];
+    const ab2 = abx * abx + aby * aby + abz * abz;
+    let worstIdx = -1;
+    let worstScore = 0;
+    for (let i = lo + 1; i < hi; i++) {
+      const p = path[i];
+      const t = ab2 > 1e-18
+        ? Math.max(0, Math.min(1, ((p[0] - a[0]) * abx + (p[1] - a[1]) * aby + (p[2] - a[2]) * abz) / ab2))
+        : 0;
+      const dx = p[0] - (a[0] + abx * t);
+      const dy = p[1] - (a[1] + aby * t);
+      const dz = p[2] - (a[2] + abz * t);
+      const d2 = dx * dx + dy * dy + dz * dz;
+      // Interpolated normal along the chord.
+      let nx = na[0] + (nb[0] - na[0]) * t;
+      let ny = na[1] + (nb[1] - na[1]) * t;
+      let nz = na[2] + (nb[2] - na[2]) * t;
+      const nl = Math.hypot(nx, ny, nz) || 1;
+      nx /= nl; ny /= nl; nz /= nl;
+      const dot = normals[i][0] * nx + normals[i][1] * ny + normals[i][2] * nz;
+      if (d2 > posTol2 || dot < normalDotMin) {
+        const score = d2 / Math.max(posTol2, 1e-18) + Math.max(0, normalDotMin - dot) * 100;
+        if (score > worstScore) {
+          worstScore = score;
+          worstIdx = i;
+        }
+      }
+    }
+    if (worstIdx >= 0) {
+      keep[worstIdx] = 1;
+      split(lo, worstIdx);
+      split(worstIdx, hi);
+    }
+  };
+
+  split(0, path.length - 1);
+  const outPath: number[][] = [];
+  const outNormals: number[][] = [];
+  for (let i = 0; i < path.length; i++) {
+    if (keep[i]) {
+      outPath.push(path[i]);
+      outNormals.push(normals[i]);
+    }
+  }
+  return { path: outPath, normals: outNormals };
+}
+
 function fillScanlines(
   mesh: SculptMesh,
   outline: number[][],
   normals: number[][],
   width: number,
   longest: number,
+  surfaceIndex?: SurfaceIndex,
 ): { path: number[][]; normals: number[][]; profile: CarveProfile }[] {
   const c = [0, 0, 0], n = [0, 0, 0];
   for (let i = 0; i < outline.length; i++) {
@@ -473,10 +646,13 @@ function fillScanlines(
     [u, v] = [v, u];
     loop = outline.map(flat);
   }
-  const step = width / 2;
+  // Flat-bottomed interior scanlines overlap cleanly at 0.72 * width spacing
+  // (leaving 28% overlap and zero ridges while cutting hull count sharply).
+  const stepY = width * 0.72;
+  const sampleStep = width * 0.6;
   const lo = Math.min(...loop.map((p) => p[1])), hi = Math.max(...loop.map((p) => p[1]));
   const runs: { path: number[][]; normals: number[][]; profile: CarveProfile }[] = [];
-  for (let y = lo + step / 2; y < hi; y += step) {
+  for (let y = lo + stepY / 2; y < hi; y += stepY) {
     const xs: number[] = [];
     for (let i = 0; i + 1 < loop.length; i++) {
       const [ax, ay] = loop[i], [bx, by] = loop[i + 1];
@@ -490,16 +666,20 @@ function fillScanlines(
       // already gives the pocket its rounded edge.
       const x0 = xs[k] + width / 2, x1 = xs[k + 1] - width / 2;
       if (x1 < x0) continue;
-      const run: { path: number[][]; normals: number[][]; profile: CarveProfile } = { path: [], normals: [], profile: 'flat' };
-      const count = Math.max(1, Math.ceil((x1 - x0) / step));
+      const rawPath: number[][] = [];
+      const rawNormals: number[][] = [];
+      const count = Math.max(1, Math.ceil((x1 - x0) / sampleStep));
       for (let j = 0; j <= count; j++) {
         const x = x0 + ((x1 - x0) * j) / count;
-        const hit = closestOnSurface(mesh, [0, 1, 2].map((i) => c[i] + u[i] * x + v[i] * y), longest);
+        const hit = closestOnSurface(mesh, [0, 1, 2].map((i) => c[i] + u[i] * x + v[i] * y), longest, surfaceIndex);
         if (!hit) continue;
-        run.path.push(hit.point);
-        run.normals.push(hit.normal);
+        rawPath.push(hit.point);
+        rawNormals.push(hit.normal);
       }
-      if (run.path.length) runs.push(run);
+      if (rawPath.length) {
+        const simplified = simplifyRun(rawPath, rawNormals, Math.max(width * 0.04, 1e-4));
+        runs.push({ path: simplified.path, normals: simplified.normals, profile: 'flat' });
+      }
     }
   }
   return runs;
