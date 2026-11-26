@@ -43,7 +43,7 @@ export interface DfmWorkerLike {
 
 export const DEFAULT_DFM_JOB_TIMEOUT_MS = 30_000;
 
-type Ask = { type: 'DFM'; process: DfmProcess; bench: DfmBenchArgs } | { type: 'WEAK_SPOTS' };
+type Ask = { type: 'DFM'; process: DfmProcess; bench: DfmBenchArgs; wholeScene?: SceneGraph } | { type: 'WEAK_SPOTS' };
 type JobKind = 'ui' | 'imperative';
 type Job = {
   id: number;
@@ -222,7 +222,7 @@ function pump() {
 
 function inline(scene: SceneGraph, ask: Ask): unknown {
   try {
-    return ask.type === 'DFM' ? analyseDfm(scene, ask.process, ask.bench) : structuralWeakSpots(scene);
+    return ask.type === 'DFM' ? analyseDfm(scene, ask.process, ask.bench, ask.wholeScene) : structuralWeakSpots(scene);
   } catch {
     return null;
   }
@@ -286,7 +286,16 @@ function requestInternal(scene: SceneGraph, key: string, ask: Ask, kind: JobKind
   return promise;
 }
 
-const dfmKey = (process: DfmProcess, bench: DfmBenchArgs) => JSON.stringify(['dfm', process, bench]);
+const sceneTagIds = new WeakMap<SceneGraph, number>();
+let nextSceneTagId = 1;
+const sceneTagOf = (s: SceneGraph | undefined): number => {
+  if (!s) return 0;
+  let id = sceneTagIds.get(s);
+  if (!id) sceneTagIds.set(s, (id = nextSceneTagId++));
+  return id;
+};
+const dfmKey = (process: DfmProcess, bench: DfmBenchArgs, wholeScene?: SceneGraph) =>
+  wholeScene ? JSON.stringify(['dfm', process, bench, sceneTagOf(wholeScene)]) : JSON.stringify(['dfm', process, bench]);
 const dfmScopeKey = (process: DfmProcess, bench: DfmBenchArgs) =>
   JSON.stringify([process, bench.nodeId ?? null, Boolean(bench.checkAllAsPlate)]);
 const WEAK_SPOTS_KEY = 'weakSpots';
@@ -368,8 +377,19 @@ export function useStructuralWeakSpots(scene: SceneGraph | null, enabled: boolea
  * mold / slip-casting checks). Queued independently from UI polling so open
  * DFM HUD edits can never evict an imperative check.
  */
-export async function dfmReportFor(scene: SceneGraph, process: DfmProcess, bench: DfmBenchArgs): Promise<DfmReport | null> {
-  const report = await requestInternal(scene, dfmKey(process, bench), { type: 'DFM', process, bench }, 'imperative');
+export async function dfmReportFor(
+  scene: SceneGraph,
+  process: DfmProcess,
+  bench: DfmBenchArgs,
+  wholeScene?: SceneGraph,
+): Promise<DfmReport | null> {
+  const ctx = wholeScene && wholeScene !== scene ? wholeScene : undefined;
+  const report = await requestInternal(
+    scene,
+    dfmKey(process, bench, ctx),
+    { type: 'DFM', process, bench, ...(ctx ? { wholeScene: ctx } : {}) },
+    'imperative',
+  );
   return (report as DfmReport | null) ?? null;
 }
 

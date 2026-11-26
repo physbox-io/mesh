@@ -37,6 +37,8 @@ export interface SceneSnap extends SnapCandidate {
   nodeId?: string;
   /** How far the given point had to move to land on it, in metres. */
   movedBy: number;
+  /** True when snapping matched a real scene feature (even if `movedBy === 0`). */
+  snapped: boolean;
 }
 
 /** True when `object` or any ancestor is an overlay or background scenery rather than model geometry. */
@@ -343,13 +345,14 @@ export function snapInScene(root: THREE.Object3D, point: Vec3, radius: number): 
   const candidates = sceneCandidates(root, world, radius);
   const best = chooseSnapNear(candidates, world, radius);
   if (!best) {
-    return { point, kind: 'surface', label: 'the point as given — nothing was near it', movedBy: 0 };
+    return { point, kind: 'surface', label: 'the point as given — nothing was near it', movedBy: 0, snapped: false };
   }
   const at = toMujoco(best.point);
   return {
     ...best,
     point: at,
     movedBy: measureDistance(point, at).distance,
+    snapped: true,
   };
 }
 
@@ -358,6 +361,7 @@ export interface MeasureReply {
   distance: number;
   deltaMm: number[];
   angleDegrees?: number;
+  snapped: boolean;
   from: { at: number[]; snappedTo: string; movedByMm: number; diameterMm?: number };
   to: { at: number[]; snappedTo: string; movedByMm: number; diameterMm?: number };
   corner?: { at: number[]; snappedTo: string; movedByMm: number };
@@ -385,7 +389,7 @@ export function measureInScene(
   const wanted = options.snap !== false && root !== null && radius > 0;
   const resolve = (point: Vec3): SceneSnap => (wanted
     ? snapInScene(root!, point, radius)
-    : { point, kind: 'surface', label: 'the point as given', movedBy: 0 });
+    : { point, kind: 'surface', label: 'the point as given', movedBy: 0, snapped: false });
 
   const a = resolve(from);
   const b = resolve(to);
@@ -408,6 +412,7 @@ export function measureInScene(
     distance: reading.distance,
     deltaMm: reading.delta.map(mm),
     ...(angle !== null ? { angleDegrees: Math.round(angle * 1000) / 1000 } : {}),
+    snapped: Boolean(a.snapped || b.snapped || corner?.snapped),
     from: end(a),
     to: end(b),
     ...(corner ? { corner: end(corner) } : {}),

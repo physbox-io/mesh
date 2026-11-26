@@ -26,7 +26,7 @@ self.onmessage = (evt: MessageEvent<DfmRequest>) => {
   if (msg.scene) scene = msg.scene;
   try {
     if (msg.type === 'DFM') {
-      const report = analyseDfm(scene, msg.process, msg.bench);
+      const report = analyseDfm(scene, msg.process, msg.bench, msg.wholeScene);
       post({ type: 'DFM_DONE', id: msg.id, report }, collectTransferables(report));
     } else {
       post({ type: 'WEAK_SPOTS_DONE', id: msg.id, weakSpots: structuralWeakSpots(scene) });

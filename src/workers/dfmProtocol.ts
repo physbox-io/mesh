@@ -12,7 +12,7 @@ export type DfmBenchArgs = Partial<DfmBench & DfmLimits>;
 
 /** `scene` rides along only when it differs from the last one sent; the worker keeps it. */
 export type DfmRequest =
-  | { type: 'DFM'; id: number; scene?: SceneGraph; process: DfmProcess; bench: DfmBenchArgs }
+  | { type: 'DFM'; id: number; scene?: SceneGraph; wholeScene?: SceneGraph; process: DfmProcess; bench: DfmBenchArgs }
   | { type: 'WEAK_SPOTS'; id: number; scene?: SceneGraph };
 
 export type DfmResponse =

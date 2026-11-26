@@ -677,8 +677,9 @@ export const viewCommands: McpCommands = {
     return {
       ok: true,
       ...measured,
-      // Whether any end really moved onto something, not whether snapping was asked for.
-      snapped: [measured.from, measured.to, measured.corner].some((end) => !!end && end.movedByMm > 0),
+      // True whenever any end matched a scene feature, even if the caller's
+      // input coordinate was already exact (movedByMm === 0).
+      snapped: measured.snapped,
     };
   },
     /*

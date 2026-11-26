@@ -162,15 +162,20 @@ export const dfmCommands: McpCommands = {
       : subject.scene;
 
     const effectiveBed = bedOverride ?? state.printBed;
-    const report = await dfmReportFor(subjectScene, process, {
-      material: state.material,
-      filament: state.filament,
-      stock: state.stock,
-      printBed: effectiveBed,
-      printer: state.printer,
-      checkAllAsPlate: true,
-      ...(resolvedCast ? { castMaterial: resolvedCast.id } : {}),
-    });
+    const report = await dfmReportFor(
+      subjectScene,
+      process,
+      {
+        material: state.material,
+        filament: state.filament,
+        stock: state.stock,
+        printBed: effectiveBed,
+        printer: state.printer,
+        checkAllAsPlate: true,
+        ...(resolvedCast ? { castMaterial: resolvedCast.id } : {}),
+      },
+      named.length > 0 ? sceneGraph : undefined,
+    );
     if (!report) return { ok: false, error: 'The check could not be run: try again in a moment.' };
     return {
       ok: true,

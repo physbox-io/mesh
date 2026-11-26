@@ -1240,10 +1240,20 @@ export function narrowestAirGap(
       return false;
     };
 
+    const hasNearbyBridge = (pc: number, pr: number, zMid: number, radius = 1): boolean => {
+      for (let dr = -radius; dr <= radius; dr++) {
+        for (let dc = -radius; dc <= radius; dc++) {
+          if (dc === 0 && dr === 0) continue;
+          if (cellBridgesZ(pc + dc, pr + dr, zMid)) return true;
+        }
+      }
+      return false;
+    };
+
     // Detect sharp acute interior V-creases (e.g., steep gable ridge apex or
-    // sculpted organic V-grooves) where two non-parallel walls converge to 0
-    // and merge into a solid right next to this cell. Parallel opposing walls
-    // have dot ~ -1 and gMag ~ 0.
+    // sculpted organic V-grooves / boot-to-pedestal concave seams) where two
+    // non-parallel walls converge to 0 and merge into a solid right next to
+    // this cell. Parallel opposing walls have dot ~ -1 and gMag ~ 0.
     const isConvergingCrease = (
       c: number,
       r: number,
@@ -1256,18 +1266,27 @@ export function narrowestAirGap(
       const exNx = spanExNx[sA], exNy = spanExNy[sA], exNz = spanExNz[sA];
       const enNx = spanEnNx[sB], enNy = spanEnNy[sB], enNz = spanEnNz[sB];
       const dot = exNx * enNx + exNy * enNy + exNz * enNz;
-      if (dot <= -0.999) return false;
+      const zMid = (g0 + g1) * 0.5;
+      const gapMm = (g1 - g0) * 1000;
+      // A sub-0.08 mm crevice directly next to a solid weld on the same body
+      // (e.g. a monolithic sculpt boot curving onto its flat pedestal base) is
+      // a concave mesh fold, not an intentional print-in-place air gap.
+      // Separate bodies have no bridging cells so even 0.03 mm gaps still flag.
+      if (gapMm < 0.08 && hasNearbyBridge(c, r, zMid, 3)) return true;
+      // Non-parallel opposing faces right beside a solid bridge are a local
+      // concave fillet/seam on a monolithic body, not an open air gap.
+      if (dot > -0.995 && hasNearbyBridge(c, r, zMid, 1)) return true;
+      if (dot <= -0.99999) return false;
       // Gradient of gap(x, y) = zB(x, y) - zA(x, y) in rotated XY.
       const gx = exNx / exNz - enNx / enNz;
       const gy = exNy / exNz - enNy / enNz;
       const gMag = Math.hypot(gx, gy);
-      if (gMag <= 0.05) return false;
+      if (gMag <= 0.005) return false;
       const dApex = (g1 - g0) / gMag;
       const maxSearch = stepMax * 4 + (maxGapMm / 1000) * 6;
       if (dApex > maxSearch) return false;
       const dirX = -gx / gMag;
       const dirY = -gy / gMag;
-      const zMid = (g0 + g1) * 0.5;
       const probeLimit = dApex + stepMax * 1.25;
       const probeStep = Math.max(Math.min(stepX, stepY) * 0.35, 1e-6);
       let lastC = c, lastR = r;
@@ -1278,11 +1297,13 @@ export function narrowestAirGap(
         lastC = pc;
         lastR = pr;
         if (cellBridgesZ(pc, pr, zMid)) return true;
+        if (Math.abs(d - dApex) <= stepMax && hasNearbyBridge(pc, pr, zMid, 1)) return true;
       }
       return false;
     };
 
-    const neighborHasNarrowGapNear = (ni: number, g0: number, g1: number): boolean => {
+    const neighborHasNarrowGapNear = (nc: number, nr: number, g0: number, g1: number): boolean => {
+      const ni = nr * cols + nc;
       const s0 = spanStart[ni], s1 = spanStart[ni + 1];
       for (let s = s0; s + 1 < s1; s++) {
         const ng0 = spanZ1[s], ng1 = spanZ0[s + 1];
@@ -1292,7 +1313,8 @@ export function narrowestAirGap(
           ngMm < maxGapMm &&
           ng1 >= g0 - margin &&
           ng0 <= g1 + margin &&
-          isOpposingGap(s, s + 1)
+          isOpposingGap(s, s + 1) &&
+          !isConvergingCrease(nc, nr, s, s + 1, ng0, ng1)
         ) {
           return true;
         }
@@ -1303,6 +1325,8 @@ export function narrowestAirGap(
     let minGapMm = Infinity;
     let at: [number, number, number] | null = null;
     let gapCells = 0;
+    let interiorGapCells = 0;
+    let borderWorstDot = -1;
 
     for (let r = 1; r < rows - 1; r++) {
       for (let c = 1; c < cols - 1; c++) {
@@ -1311,6 +1335,7 @@ export function narrowestAirGap(
         if (s1 - s0 < 2) continue;
         let cellMinMm = Infinity;
         let cellMidZ = 0;
+        let cellDot = -1;
         for (let s = s0; s + 1 < s1; s++) {
           const g0 = spanZ1[s], g1 = spanZ0[s + 1];
           const gapMm = (g1 - g0) * 1000;
@@ -1320,18 +1345,27 @@ export function narrowestAirGap(
           // Require at least one 4-connected neighbour to also see a narrow gap
           // at the same depth so 1-cell grazing edge slivers are ignored.
           const backed =
-            neighborHasNarrowGapNear(i - 1, g0, g1) ||
-            neighborHasNarrowGapNear(i + 1, g0, g1) ||
-            neighborHasNarrowGapNear(i - cols, g0, g1) ||
-            neighborHasNarrowGapNear(i + cols, g0, g1);
+            neighborHasNarrowGapNear(c - 1, r, g0, g1) ||
+            neighborHasNarrowGapNear(c + 1, r, g0, g1) ||
+            neighborHasNarrowGapNear(c, r - 1, g0, g1) ||
+            neighborHasNarrowGapNear(c, r + 1, g0, g1);
           if (!backed) continue;
           if (gapMm < cellMinMm) {
             cellMinMm = gapMm;
             cellMidZ = (g0 + g1) * 0.5;
+            cellDot =
+              spanExNx[s] * spanEnNx[s + 1] +
+              spanExNy[s] * spanEnNy[s + 1] +
+              spanExNz[s] * spanEnNz[s + 1];
           }
         }
         if (cellMinMm < maxGapMm) {
           gapCells++;
+          if (hasNearbyBridge(c, r, cellMidZ, 1)) {
+            if (cellDot > borderWorstDot) borderWorstDot = cellDot;
+          } else {
+            interiorGapCells++;
+          }
           if (cellMinMm < minGapMm) {
             minGapMm = cellMinMm;
             at = [rb.minX + c * stepX, rb.minY + r * stepY, cellMidZ];
@@ -1341,6 +1375,11 @@ export function narrowestAirGap(
     }
 
     if (!at || gapCells < 2) continue;
+    // When every narrow-gap cell sits directly beside a solid bridge (no open
+    // interior channel at all), skip sub-0.08 mm or non-parallel seams (such
+    // as a monolithic sculpt boot meeting a flat pedestal base) while still
+    // keeping genuine parallel-wall slots.
+    if (interiorGapCells === 0 && (borderWorstDot > -0.999 || minGapMm < 0.08)) continue;
     if (best && minGapMm >= best.mm) continue;
     best = { mm: minGapMm, at: unrotateFromZ(at, axis), axis, gapCells };
   }
@@ -1724,7 +1763,7 @@ function analyseCast(
       severity: 'critical',
       title: 'Undercut locks pattern in mould',
       detail: `${(undercutShare * 100).toFixed(0)}% of the surface leans back up to ${worstDeg.toFixed(0)}° along the draw.`,
-      fix: 'Use a Dissolvable Liner or Silicone Pour Box (for resin or plaster), or split the pattern / use Lost PLA (for metal).',
+      fix: 'Use a Dissolvable Liner or Silicone Pour Box (for resin, plaster, concrete, or Jesmonite), or split the pattern / use Lost PLA (for metal).',
       position: hotSpot(tris, heat, 0.9) ?? [0, 0, partingZ],
       metric: undercutShare,
       actions: [
@@ -2244,8 +2283,10 @@ export function analyseDfm(
   scene: SceneGraph,
   process: DfmProcess,
   bench: Partial<DfmBench & DfmLimits> & { asPlaced?: boolean } = {},
+  wholeScene?: SceneGraph,
 ): DfmReport {
-  if (bench.asPlaced) return analyseDfmAsPlaced(scene, process, bench);
+  if (bench.asPlaced) return analyseDfmAsPlaced(scene, process, bench, wholeScene);
+  const contextScene = wholeScene ?? scene;
   const resolvedCast = resolveDfmCastMaterial(bench.castMaterial);
   const lim: DfmLimits = {
     ...dfmLimitsFor({
@@ -2330,7 +2371,7 @@ export function analyseDfm(
   // Gate whole-scene multi-body avalanche when no part is selected (unless caller
   // explicitly asked for checkAllAsPlate: true). Cross-part assembly checks still run.
   if (!target && bodies.length > 1 && !bench.checkAllAsPlate) {
-    const findings = hardwareFindings(scene, process, scene, undefined, null);
+    const findings = hardwareFindings(scene, process, contextScene, undefined, null);
     const open = findings.filter((f) => !f.passed);
     const procName = process === 'print' ? '3D printing' : process === 'cnc' ? 'CNC' : 'casting';
     return {
@@ -2450,7 +2491,7 @@ export function analyseDfm(
   const parts = bodies.length;
   // Assembly checks (seals, screws, runners, insert bosses), scoped to the
   // selected body and its mating parts when `nodeId` is specified.
-  findings.push(...hardwareFindings(scene, process, scene, undefined, scopeNodeId));
+  findings.push(...hardwareFindings(scene, process, contextScene, undefined, scopeNodeId));
 
   const tris = Float64Array.from(allTris);
   if (parts === 0) {
@@ -2502,7 +2543,9 @@ function analyseDfmAsPlaced(
   scene: SceneGraph,
   process: DfmProcess,
   bench: Partial<DfmBench & DfmLimits> = {},
+  wholeScene?: SceneGraph,
 ): DfmReport {
+  const contextScene = wholeScene ?? scene;
   // The bench first — what is clamped down and what is loaded — then any
   // explicit override on top, so a caller can pin one number without having to
   // restate the material it came with.
@@ -2555,7 +2598,7 @@ function analyseDfmAsPlaced(
     }));
   }
   // Seals, screws, runners, and insert bosses are judged the same whatever makes the part.
-  const hardware = hardwareFindings(target ? { ...scene, nodes: [target] } : scene, process, scene, undefined, scopeNodeId);
+  const hardware = hardwareFindings(target ? { ...scene, nodes: [target] } : scene, process, contextScene, undefined, scopeNodeId);
   if (hardware.length) {
     body.findings = [...body.findings, ...hardware];
     body.score = scoreOf(body.findings);
