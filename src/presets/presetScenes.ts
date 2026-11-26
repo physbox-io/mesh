@@ -49,20 +49,23 @@ export const pendulumPreset: SceneGraph = {
       pos: [0, 0, 0],
       joints: [],
       geoms: [
-        { name: 'base_plate', type: 'box', size: [0.06, 0.06, 0.01], pos: [0, 0, 0.01], rgba: [0.3, 0.3, 0.35, 1], contype: 0, conaffinity: 0 },
-        { name: 'stand_post', type: 'cylinder', size: [0.01, 0.28], pos: [0, 0, 0.29], rgba: [0.4, 0.4, 0.45, 1], contype: 0, conaffinity: 0 },
-        { name: 'stand_axle', type: 'cylinder', size: [0.008, 0.04], pos: [0, 0, 0.58], euler: [90, 0, 0], rgba: [0.5, 0.5, 0.55, 1], contype: 0, conaffinity: 0 }
+        { name: 'base_plate', type: 'box', size: [0.07, 0.07, 0.01], pos: [0, 0, 0.01], rgba: [0.3, 0.3, 0.35, 1] },
+        { name: 'stand_post', type: 'cylinder', size: [0.01, 0.28], pos: [0, 0, 0.29], rgba: [0.4, 0.4, 0.45, 1] },
+        // Cantilevered axle extending forward (-Y) so pole and pole2 swing
+        // cleanly in front of stand_post with >=10 mm clearance for the bobs.
+        { name: 'stand_axle', type: 'cylinder', fromto: [0, 0.01, 0.58, 0, -0.056, 0.58], size: [0.008], rgba: [0.5, 0.5, 0.55, 1], contype: 0, conaffinity: 0 }
       ],
       children: [
         {
           id: 'pole',
           name: 'pole',
           type: 'body',
-          pos: [0, 0, 0.58],
+          pos: [0, -0.044, 0.58],
           joints: [
             { name: 'hinge', type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.001 }
           ],
           geoms: [
+            { name: 'pole_hub', type: 'cylinder', size: [0.013, 0.009], pos: [0, 0, 0], euler: [90, 0, 0], mass: 0.02, rgba: [0.55, 0.55, 0.6, 1], contype: 0, conaffinity: 0 },
             { name: 'pole_geom', type: 'capsule', fromto: [0, 0, 0, 0.22, 0, 0], size: [0.005], mass: 0.05, rgba: [0.7, 0.7, 0.7, 1] },
             { name: 'pole_bob_geom', type: 'sphere', size: [0.018], pos: [0.22, 0, 0], mass: 0.3, rgba: [0.3, 0.5, 0.85, 1] }
           ],
@@ -186,14 +189,81 @@ export const generateGearGeoms = (
 // so what turns here is what prints. Module 1.5 mm, 8 mm thick, PLA.
 const GEAR_MODULE_MM = 1.5;
 const GEAR_THICK_MM = 8;
-/** Gear centres sit this high: their bottom faces just clear the floor. */
-const GEAR_Z = (GEAR_THICK_MM / 2 + 2) / 1000;
+const GEAR_BASE_H_M = 0.006;
+const GEAR_CLEAR_M = 0.0005;
+/** Gear centres sit above a 6 mm grounded baseplate with 0.5 mm running clearance. */
+const GEAR_Z = +(GEAR_BASE_H_M + GEAR_CLEAR_M + GEAR_THICK_MM / 2 / 1000).toFixed(6);
+
+/** Static grounded baseplate with physical axle pins seated through each gear's 5 mm bore. */
+function makeGearBaseNode(
+  id: string,
+  gears: SceneNode[],
+  teeth: number[],
+  extraBounds?: { minX?: number; maxX?: number; minY?: number; maxY?: number },
+): SceneNode {
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  gears.forEach((g, i) => {
+    const rTip = (GEAR_MODULE_MM * (teeth[i] + 2)) / 2 / 1000;
+    minX = Math.min(minX, g.pos[0] - rTip - 0.008);
+    maxX = Math.max(maxX, g.pos[0] + rTip + 0.008);
+    minY = Math.min(minY, g.pos[1] - rTip - 0.008);
+    maxY = Math.max(maxY, g.pos[1] + rTip + 0.008);
+  });
+  if (extraBounds?.minX !== undefined) minX = Math.min(minX, extraBounds.minX);
+  if (extraBounds?.maxX !== undefined) maxX = Math.max(maxX, extraBounds.maxX);
+  if (extraBounds?.minY !== undefined) minY = Math.min(minY, extraBounds.minY);
+  if (extraBounds?.maxY !== undefined) maxY = Math.max(maxY, extraBounds.maxY);
+
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  const hx = (maxX - minX) / 2;
+  const hy = (maxY - minY) / 2;
+  const pinTopZ = GEAR_BASE_H_M + GEAR_CLEAR_M + GEAR_THICK_MM / 1000 + 0.002;
+
+  const geoms: SceneGeom[] = [
+    {
+      name: `${id}_plate`,
+      type: 'box',
+      size: [+hx.toFixed(6), +hy.toFixed(6), GEAR_BASE_H_M / 2],
+      pos: [+cx.toFixed(6), +cy.toFixed(6), GEAR_BASE_H_M / 2],
+      rgba: [0.30, 0.32, 0.36, 1],
+      condim: 3,
+      friction: [0.3, 0.005, 0.0005],
+    },
+  ];
+  gears.forEach((g, i) => {
+    // Non-colliding physical steel axle pin (4.6 mm dia inside 5 mm bore) + bearing boss:
+    // the hinge joint constrains rotation about this shaft.
+    geoms.push(
+      {
+        name: `${id}_boss_${i + 1}`,
+        type: 'cylinder',
+        fromto: [g.pos[0], g.pos[1], GEAR_BASE_H_M, g.pos[0], g.pos[1], GEAR_BASE_H_M + GEAR_CLEAR_M],
+        size: [0.0045],
+        rgba: [0.46, 0.48, 0.52, 1],
+        contype: 0,
+        conaffinity: 0,
+      },
+      {
+        name: `${id}_axle_${i + 1}`,
+        type: 'cylinder',
+        fromto: [g.pos[0], g.pos[1], GEAR_BASE_H_M, g.pos[0], g.pos[1], +pinTopZ.toFixed(6)],
+        size: [0.0023],
+        rgba: [0.62, 0.64, 0.68, 1],
+        contype: 0,
+        conaffinity: 0,
+      },
+    );
+  });
+
+  return { id, name: id, type: 'body', pos: [0, 0, 0], joints: [], geoms, children: [] };
+}
 
 /**
  * Spur gears meshing in a line along +X, centred on the origin, the first one
  * motor driven. Each is clocked so its teeth sit in the gaps of the one before
- * and coupled to it at -(z_prev / z). Teeth stay at 17 or more, so no gear is
- * profile shifted and the centre distance is m (z1 + z2) / 2.
+ * and driven by real involute tooth-on-tooth contact (exact convex tooth prisms,
+ * no smooth cylinder proxy, no synthetic coupling tendon).
  */
 const gearTrain = (ids: string[], teeth: number[], colors: [number, number, number, number][]): SceneNode[] => {
   const xs: number[] = [0];
@@ -206,21 +276,33 @@ const gearTrain = (ids: string[], teeth: number[], colors: [number, number, numb
   }
   const mid = (xs[0] + xs[xs.length - 1]) / 2;
   return teeth.map((z, i) => buildInvoluteGearNode(
-    { moduleMm: GEAR_MODULE_MM, teeth: z, thicknessMm: GEAR_THICK_MM, boreKind: 'round', boreDiameterMm: 5, rgba: colors[i] },
+    {
+      moduleMm: GEAR_MODULE_MM,
+      teeth: z,
+      thicknessMm: GEAR_THICK_MM,
+      boreKind: 'round',
+      boreDiameterMm: 5,
+      backlashMm: 0.15,
+      rgba: colors[i],
+    },
     {
       id: ids[i],
       name: ids[i],
       pos: [+(xs[i] - mid).toFixed(6), 0, GEAR_Z],
       angleRad: clocks[i],
       actuated: i === 0,
-      ...(i > 0 ? { coupleTargetId: ids[i - 1], coupleRatio: -(teeth[i - 1] / z) } : {}),
+      velocityRadPerSec: 3.0,
+      realToothCollision: true,
     },
   ));
 };
 
+const gearsTrainNodes = gearTrain(['gear1', 'gear2'], [18, 30], [GEAR_BLUE, GEAR_AMBER]);
+const gearsBase = makeGearBaseNode('gear_base', gearsTrainNodes, [18, 30]);
+
 export const gearsPreset: SceneGraph = {
-  // 18T driving 30T: the driven gear turns at 3/5 the speed, the other way.
-  nodes: gearTrain(['gear1', 'gear2'], [18, 30], [GEAR_BLUE, GEAR_AMBER]),
+  // 18T driving 30T via real tooth-on-tooth mesh contact on a grounded baseplate.
+  nodes: [gearsBase, ...gearsTrainNodes],
 };
 
 const [machineGear1, machineGear2, machineGear3] = gearTrain(
@@ -230,8 +312,7 @@ const [machineGear1, machineGear2, machineGear3] = gearTrain(
 );
 
 // The output gear carries a sweeper arm across its top face, reaching past its
-// teeth, which sweeps a block off a shelf beside it. The gears themselves do
-// not collide (they are coupled); the arm does.
+// teeth, which sweeps a block off a shelf beside it.
 const gear3TipM = (GEAR_MODULE_MM * (42 + 2)) / 2 / 1000;
 const sweeperReachM = gear3TipM + 0.027;
 machineGear3.geoms.push({
@@ -245,19 +326,26 @@ machineGear3.geoms.push({
 });
 
 // Beside the output gear on +Y, a quarter turn ahead of the arm, which turns
-// +Z. The shelf's top is below the arm and the block's side is in its path.
+// +Z. The shelf sits on the baseplate; the block sits in the sweeper's path.
 const shelfRadialM = (gear3TipM + 0.003 + sweeperReachM) / 2;
+const shelfHalfY = (sweeperReachM - gear3TipM - 0.003) / 2;
+const machineBase = makeGearBaseNode(
+  'machine_base',
+  [machineGear1, machineGear2, machineGear3],
+  [18, 30, 42],
+  { maxY: shelfRadialM + shelfHalfY + 0.006 },
+);
 const machineShelf: SceneNode = {
   id: 'shelf',
   name: 'shelf',
   type: 'body',
-  pos: [machineGear3.pos[0], shelfRadialM, 0.004],
+  pos: [machineGear3.pos[0], shelfRadialM, GEAR_BASE_H_M + 0.003],
   joints: [],
   geoms: [
     {
       name: 'shelf_geom',
       type: 'box',
-      size: [0.012, (sweeperReachM - gear3TipM - 0.003) / 2, 0.004],
+      size: [0.012, shelfHalfY, 0.003],
       rgba: [0.7, 0.7, 0.7, 1],
       mass: 1,
       condim: 3,
@@ -271,7 +359,7 @@ const machineBlock: SceneNode = {
   id: 'push_block',
   name: 'push_block',
   type: 'body',
-  pos: [machineGear3.pos[0], shelfRadialM, 0.008 + 0.0085],
+  pos: [machineGear3.pos[0], shelfRadialM, GEAR_BASE_H_M + 0.006 + 0.0082],
   joints: [{ name: 'push_block_free', type: 'free' }],
   geoms: [
     {
@@ -288,42 +376,91 @@ const machineBlock: SceneNode = {
 };
 
 export const machinePreset: SceneGraph = {
-  nodes: [machineGear1, machineGear2, machineGear3, machineShelf, machineBlock],
+  nodes: [machineBase, machineGear1, machineGear2, machineGear3, machineShelf, machineBlock],
 };
 
-// A 16T pinion on a 40-tooth rack, which pushes a block along the floor. The
-// rack's own collider is turned on for that (the builder leaves it off, since
-// it is coupled to the pinion, not driven by tooth contact).
+// A 16T pinion driving a 40-tooth rack via real involute tooth-on-tooth contact,
+// mounted on a grounded baseplate with a physical pinion axle and rack guide rail.
 const rackPinion = buildRackAndPinionPair(
-  { teeth: 16 },
-  { teeth: 40 },
-  { pinionId: 'pinion', rackId: 'rack', pinionVelocityRadPerSec: 4, origin: [0, 0.03, GEAR_Z] },
+  { teeth: 16, backlashMm: 0.15, boreKind: 'round', boreDiameterMm: 5 },
+  { teeth: 40, backlashMm: 0.15 },
+  { pinionId: 'pinion', rackId: 'rack', pinionVelocityRadPerSec: 4, origin: [0, 0.03, GEAR_Z], realToothCollision: true },
 );
-const rackNode: SceneNode = {
-  ...rackPinion.rackNode,
-  name: 'rack',
-  geoms: rackPinion.rackNode.geoms.map((g) => (g.role === 'collision' ? { ...g, contype: 1, conaffinity: 1, condim: 3 } : g)),
-};
+const pinionNode: SceneNode = { ...rackPinion.pinionNode, name: 'pinion' };
+const rackPos = rackPinion.rackNode.pos;
+const rackNode: SceneNode = { ...rackPinion.rackNode, name: 'rack' };
 const rackHalfLengthM = rackPinion.rackMetrics.totalLengthMm / 2 / 1000;
-const rackCollider = rackNode.geoms.find((g) => g.role === 'collision')!;
+const rackBackYM = rackPos[1] - (rackPinion.rackMetrics.dedendumMm + rackPinion.rackMetrics.baseHeightMm) / 1000;
+const pinionOuterRM = rackPinion.pinionMetrics.addendumRadiusMm / 1000;
+const rpPlateHalfX = +(rackHalfLengthM + 0.10).toFixed(6);
+const rpRailHalfY = 0.004;
+const rpRailCenterY = +(rackBackYM - 0.0005 - rpRailHalfY).toFixed(6);
+const rpPlateMinY = rpRailCenterY - rpRailHalfY - 0.006;
+const rpPlateMaxY = rackPinion.pinionNode.pos[1] + pinionOuterRM + 0.008;
+const rpPinTopZ = GEAR_BASE_H_M + GEAR_CLEAR_M + GEAR_THICK_MM / 1000 + 0.002;
+
+const rackPinionBase: SceneNode = {
+  id: 'rp_base',
+  name: 'rp_base',
+  type: 'body',
+  pos: [0, 0, 0],
+  joints: [],
+  geoms: [
+    // Grounded baseplate under the entire pinion, rack, guide rail, and push block
+    {
+      name: 'rp_plate',
+      type: 'box',
+      size: [rpPlateHalfX, +((rpPlateMaxY - rpPlateMinY) / 2).toFixed(6), GEAR_BASE_H_M / 2],
+      pos: [0, +((rpPlateMinY + rpPlateMaxY) / 2).toFixed(6), GEAR_BASE_H_M / 2],
+      rgba: [0.30, 0.32, 0.36, 1],
+      condim: 3,
+      friction: [0.1, 0.005, 0.0005],
+    },
+    // Physical guide rail supporting the flat back edge of the rack
+    {
+      name: 'rack_guide_rail',
+      type: 'box',
+      size: [rpPlateHalfX, rpRailHalfY, (GEAR_THICK_MM / 1000 + 0.001) / 2],
+      pos: [0, rpRailCenterY, +(GEAR_BASE_H_M + (GEAR_THICK_MM / 1000 + 0.001) / 2).toFixed(6)],
+      rgba: [0.42, 0.45, 0.50, 1],
+      condim: 3,
+      friction: [0.05, 0.005, 0.0005],
+    },
+    // Physical steel axle pin & bearing boss through the pinion's 5 mm bore
+    {
+      name: 'pinion_boss',
+      type: 'cylinder',
+      fromto: [pinionNode.pos[0], pinionNode.pos[1], GEAR_BASE_H_M, pinionNode.pos[0], pinionNode.pos[1], GEAR_BASE_H_M + GEAR_CLEAR_M],
+      size: [0.0045],
+      rgba: [0.46, 0.48, 0.52, 1],
+      contype: 0,
+      conaffinity: 0,
+    },
+    {
+      name: 'pinion_axle',
+      type: 'cylinder',
+      fromto: [pinionNode.pos[0], pinionNode.pos[1], GEAR_BASE_H_M, pinionNode.pos[0], pinionNode.pos[1], +rpPinTopZ.toFixed(6)],
+      size: [0.0023],
+      rgba: [0.62, 0.64, 0.68, 1],
+      contype: 0,
+      conaffinity: 0,
+    },
+  ],
+  children: [],
+};
 
 const rackBlock: SceneNode = {
   id: 'rack_block',
   name: 'rack_block',
   type: 'body',
-  // On the floor in the rack's path, just past its leading end, so the rack
-  // picks it up early in its travel and shoves it along.
-  // Square on to the collider, which sits below the rack's origin (that is
-  // on its pitch line); off centre, the block slides off its end sideways.
-  pos: [rackHalfLengthM + 0.011, +(rackNode.pos[1] + rackCollider.pos![1]).toFixed(7), 0.008],
+  // Resting on the baseplate squarely in the rack's path, clear of rack_guide_rail on -Y.
+  pos: [+(rackHalfLengthM + 0.009).toFixed(7), +(rackBackYM + 0.0062).toFixed(7), +(GEAR_BASE_H_M + 0.0061).toFixed(6)],
   joints: [{ name: 'rack_block_free', type: 'free' }],
   geoms: [
     {
-      // Light, as the rack is: its coupling to the pinion is a soft
-      // constraint, and a load much heavier than the rack drags it behind.
       name: 'rack_block_geom',
       type: 'box',
-      size: [0.008, 0.008, 0.008],
+      size: [0.006, 0.006, 0.006],
       rgba: [0.95, 0.8, 0.25, 1],
       mass: 0.005,
       condim: 3,
@@ -334,7 +471,7 @@ const rackBlock: SceneNode = {
 };
 
 export const rackPinionPreset: SceneGraph = {
-  nodes: [{ ...rackPinion.pinionNode, name: 'pinion' }, rackNode, rackBlock],
+  nodes: [rackPinionBase, pinionNode, rackNode, rackBlock],
 };
 
 const inclinedPlaneWedgeMesh = generateWedgeMeshData(0.35, 0.2, 0.16);
@@ -428,15 +565,23 @@ export const pulleySystemPreset: SceneGraph = {
       type: 'body',
       pos: [0, 0, 0],
       geoms: [
-        // Starts at z = 0.02, not 0: a capsule's cap is a hemisphere of its
-        // radius, so from 0 the base would sink through the floor. Offset in -Y
-        // behind the wheel so the column does not pass through the pulley rim.
+        // Grounded baseplate under the support column so the stand rests flat
+        // on the floor rather than balancing on a rounded capsule tip.
+        {
+          name: 'support_base',
+          type: 'box',
+          size: [0.12, 0.06, 0.01],
+          pos: [0, -0.045, 0.01],
+          rgba: [0.32, 0.33, 0.37, 1]
+        },
+        // Offset in -Y behind the wheel so the column does not pass through
+        // the pulley rim; flat-ended cylinder mounted cleanly onto support_base.
         {
           name: 'support_column',
-          type: 'capsule',
+          type: 'cylinder',
           fromto: [0, -0.045, 0.02, 0, -0.045, PULLEY_WHEEL_Z + 0.04],
           size: [0.02],
-          rgba: [0.4, 0.4, 0.4, 1]
+          rgba: [0.4, 0.4, 0.45, 1]
         },
         // Cantilevered axle extending forward from the column through the wheel
         // hub at y = 0. Non-colliding: it passes through the hub by design and
@@ -496,7 +641,7 @@ export const pulleySystemPreset: SceneGraph = {
         }
       ],
       joints: [
-        { name: 'left_weight_joint', type: 'slide', axis: [0, 0, 1], damping: 0.05, limited: true, range: [-0.25, 0.13] }
+        { name: 'left_weight_joint', type: 'slide', axis: [0, 0, 1], damping: 0.05, limited: true, range: [-0.25, 0.13], hardStop: true }
       ],
       children: []
     },
@@ -516,7 +661,7 @@ export const pulleySystemPreset: SceneGraph = {
         }
       ],
       joints: [
-        { name: 'right_weight_joint', type: 'slide', axis: [0, 0, 1], damping: 0.05, limited: true, range: [-0.25, 0.13] }
+        { name: 'right_weight_joint', type: 'slide', axis: [0, 0, 1], damping: 0.05, limited: true, range: [-0.25, 0.13], hardStop: true }
       ],
       children: []
     },
@@ -936,31 +1081,50 @@ export const paperPlanePreset: SceneGraph = {
   ]
 };
 
-// Monkey head: compound primitives approximating the classic Blender Suzanne.
+// Monkey head: sculpted compound bust facing the camera (-Y) on a grounded plinth.
 export const monkeyHeadPreset: SceneGraph = {
   nodes: [{
-    id: 'monkey', name: 'monkey', type: 'body', pos: [0, 0, 0.25],
+    id: 'monkey', name: 'monkey', type: 'body', pos: [0, 0, 0.17],
     joints: [{ name: 'monkey_free', type: 'free' }],
     geoms: [
-      { name: 'skull',        type: 'ellipsoid', size: [0.15, 0.16, 0.14], rgba: [0.88, 0.66, 0.30, 1] },
-      { name: 'cheek_l',      type: 'ellipsoid', size: [0.05, 0.04, 0.04], pos: [-0.11, 0.02, -0.02], rgba: [0.80, 0.58, 0.26, 1] },
-      { name: 'cheek_r',      type: 'ellipsoid', size: [0.05, 0.04, 0.04], pos: [ 0.11, 0.02, -0.02], rgba: [0.80, 0.58, 0.26, 1] },
-      { name: 'snout',        type: 'ellipsoid', size: [0.06, 0.05, 0.04], pos: [0, 0.17, -0.03],     rgba: [0.86, 0.68, 0.34, 1] },
-      { name: 'nostril_l',    type: 'sphere',    size: [0.015],            pos: [-0.025, 0.21, -0.03], rgba: [0.15, 0.08, 0.03, 1] },
-      { name: 'nostril_r',    type: 'sphere',    size: [0.015],            pos: [ 0.025, 0.21, -0.03], rgba: [0.15, 0.08, 0.03, 1] },
-      { name: 'brow',         type: 'box',       size: [0.09, 0.018, 0.014], pos: [0, 0.13, 0.08],      rgba: [0.40, 0.24, 0.08, 1] },
-      { name: 'eye_socket_l', type: 'sphere',    size: [0.035],            pos: [-0.06, 0.14, 0.02],  rgba: [0.15, 0.08, 0.03, 1] },
-      { name: 'eye_socket_r', type: 'sphere',    size: [0.035],            pos: [ 0.06, 0.14, 0.02],  rgba: [0.15, 0.08, 0.03, 1] },
-      { name: 'eye_l',        type: 'sphere',    size: [0.028],            pos: [-0.06, 0.17, 0.02],  rgba: [0.95, 0.95, 0.93, 1] },
-      { name: 'eye_r',        type: 'sphere',    size: [0.028],            pos: [ 0.06, 0.17, 0.02],  rgba: [0.95, 0.95, 0.93, 1] },
-      { name: 'pupil_l',      type: 'sphere',    size: [0.014],            pos: [-0.06, 0.19, 0.02],  rgba: [0.04, 0.04, 0.04, 1] },
-      { name: 'pupil_r',      type: 'sphere',    size: [0.014],            pos: [ 0.06, 0.19, 0.02],  rgba: [0.04, 0.04, 0.04, 1] },
-      { name: 'jaw',          type: 'ellipsoid', size: [0.08, 0.06, 0.03], pos: [0, 0.05, -0.12],     rgba: [0.80, 0.56, 0.24, 1] },
-      { name: 'ear_l',        type: 'ellipsoid', size: [0.03, 0.02, 0.05], pos: [-0.17, -0.03, 0.04], rgba: [0.84, 0.62, 0.28, 1] },
-      { name: 'ear_r',        type: 'ellipsoid', size: [0.03, 0.02, 0.05], pos: [ 0.17, -0.03, 0.04], rgba: [0.84, 0.62, 0.28, 1] },
-      { name: 'ear_inner_l',  type: 'ellipsoid', size: [0.016, 0.012, 0.03], pos: [-0.17, 0.00, 0.04], rgba: [0.48, 0.26, 0.10, 1] },
-      { name: 'ear_inner_r',  type: 'ellipsoid', size: [0.016, 0.012, 0.03], pos: [ 0.17, 0.00, 0.04], rgba: [0.48, 0.26, 0.10, 1] },
-      { name: 'chin',         type: 'sphere',    size: [0.025],            pos: [0, 0.15, -0.14],     rgba: [0.80, 0.56, 0.24, 1] },
+      // Grounded bust base & neck (bottom sits flush at z = 0)
+      { name: 'bust_base',    type: 'cylinder',  size: [0.088, 0.012],        pos: [0, 0.010, -0.158],   mass: 1.2, rgba: [0.26, 0.17, 0.11, 1] },
+      { name: 'neck',         type: 'cylinder',  size: [0.056, 0.036],        pos: [0, 0.015, -0.122],   mass: 0.4, rgba: [0.42, 0.25, 0.12, 1] },
+      // Cranium & hair tuft
+      { name: 'skull',        type: 'ellipsoid', size: [0.135, 0.140, 0.128], pos: [0, 0.015, 0.015],    mass: 0.6, rgba: [0.46, 0.28, 0.14, 1] },
+      { name: 'crown_tuft',   type: 'ellipsoid', size: [0.046, 0.058, 0.028], pos: [0, 0.010, 0.135],    mass: 0.05, rgba: [0.38, 0.22, 0.10, 1] },
+      // Warm tan face mask & cheeks
+      { name: 'face_upper_l', type: 'ellipsoid', size: [0.062, 0.050, 0.055], pos: [-0.048, -0.092, 0.025], mass: 0.08, rgba: [0.88, 0.68, 0.45, 1] },
+      { name: 'face_upper_r', type: 'ellipsoid', size: [0.062, 0.050, 0.055], pos: [ 0.048, -0.092, 0.025], mass: 0.08, rgba: [0.88, 0.68, 0.45, 1] },
+      { name: 'cheek_l',      type: 'ellipsoid', size: [0.058, 0.054, 0.046], pos: [-0.070, -0.085, -0.035], mass: 0.08, rgba: [0.85, 0.64, 0.41, 1] },
+      { name: 'cheek_r',      type: 'ellipsoid', size: [0.058, 0.054, 0.046], pos: [ 0.070, -0.085, -0.035], mass: 0.08, rgba: [0.85, 0.64, 0.41, 1] },
+      // Sculpted brow ridge
+      { name: 'brow_l',       type: 'ellipsoid', size: [0.058, 0.030, 0.022], pos: [-0.048, -0.116, 0.072], euler: [0, 12, -10], mass: 0.04, rgba: [0.38, 0.22, 0.10, 1] },
+      { name: 'brow_r',       type: 'ellipsoid', size: [0.058, 0.030, 0.022], pos: [ 0.048, -0.116, 0.072], euler: [0, -12, 10], mass: 0.04, rgba: [0.38, 0.22, 0.10, 1] },
+      { name: 'brow_bridge',  type: 'ellipsoid', size: [0.032, 0.026, 0.020], pos: [0, -0.122, 0.066],   mass: 0.02, rgba: [0.38, 0.22, 0.10, 1] },
+      // Muzzle, nose, jaw & integrated chin
+      { name: 'snout',        type: 'ellipsoid', size: [0.072, 0.062, 0.046], pos: [0, -0.132, -0.034],  mass: 0.1, rgba: [0.90, 0.70, 0.47, 1] },
+      { name: 'nose_bridge',  type: 'ellipsoid', size: [0.024, 0.026, 0.028], pos: [0, -0.142, 0.002],   mass: 0.02, rgba: [0.86, 0.66, 0.43, 1] },
+      { name: 'nostril_l',    type: 'ellipsoid', size: [0.011, 0.008, 0.014], pos: [-0.018, -0.188, -0.018], euler: [0, 18, 0], mass: 0.005, rgba: [0.18, 0.10, 0.05, 1] },
+      { name: 'nostril_r',    type: 'ellipsoid', size: [0.011, 0.008, 0.014], pos: [ 0.018, -0.188, -0.018], euler: [0, -18, 0], mass: 0.005, rgba: [0.18, 0.10, 0.05, 1] },
+      { name: 'jaw',          type: 'ellipsoid', size: [0.064, 0.058, 0.036], pos: [0, -0.114, -0.076],  mass: 0.1, rgba: [0.85, 0.64, 0.41, 1] },
+      { name: 'chin',         type: 'ellipsoid', size: [0.042, 0.038, 0.026], pos: [0, -0.134, -0.090],  mass: 0.05, rgba: [0.86, 0.65, 0.42, 1] },
+      { name: 'mouth_l',      type: 'capsule',   fromto: [0, -0.178, -0.064, -0.034, -0.170, -0.056], size: [0.005], mass: 0.005, rgba: [0.24, 0.12, 0.06, 1] },
+      { name: 'mouth_r',      type: 'capsule',   fromto: [0, -0.178, -0.064,  0.034, -0.170, -0.056], size: [0.005], mass: 0.005, rgba: [0.24, 0.12, 0.06, 1] },
+      // Expressive eyes
+      { name: 'eye_socket_l', type: 'sphere',    size: [0.030],               pos: [-0.046, -0.120, 0.028], mass: 0.01, rgba: [0.24, 0.14, 0.07, 1] },
+      { name: 'eye_socket_r', type: 'sphere',    size: [0.030],               pos: [ 0.046, -0.120, 0.028], mass: 0.01, rgba: [0.24, 0.14, 0.07, 1] },
+      { name: 'eye_l',        type: 'sphere',    size: [0.024],               pos: [-0.046, -0.134, 0.028], mass: 0.01, rgba: [0.96, 0.95, 0.92, 1] },
+      { name: 'eye_r',        type: 'sphere',    size: [0.024],               pos: [ 0.046, -0.134, 0.028], mass: 0.01, rgba: [0.96, 0.95, 0.92, 1] },
+      { name: 'iris_l',       type: 'sphere',    size: [0.015],               pos: [-0.046, -0.148, 0.028], mass: 0.005, rgba: [0.35, 0.18, 0.06, 1] },
+      { name: 'iris_r',       type: 'sphere',    size: [0.015],               pos: [ 0.046, -0.148, 0.028], mass: 0.005, rgba: [0.35, 0.18, 0.06, 1] },
+      { name: 'pupil_l',      type: 'sphere',    size: [0.009],               pos: [-0.046, -0.156, 0.028], mass: 0.002, rgba: [0.04, 0.04, 0.04, 1] },
+      { name: 'pupil_r',      type: 'sphere',    size: [0.009],               pos: [ 0.046, -0.156, 0.028], mass: 0.002, rgba: [0.04, 0.04, 0.04, 1] },
+      // Cupped ears anchored firmly into the cranium
+      { name: 'ear_l',        type: 'ellipsoid', size: [0.046, 0.022, 0.054], pos: [-0.144, 0.010, 0.022], euler: [0, 0, -14], mass: 0.04, rgba: [0.46, 0.28, 0.14, 1] },
+      { name: 'ear_r',        type: 'ellipsoid', size: [0.046, 0.022, 0.054], pos: [ 0.144, 0.010, 0.022], euler: [0, 0,  14], mass: 0.04, rgba: [0.46, 0.28, 0.14, 1] },
+      { name: 'ear_inner_l',  type: 'ellipsoid', size: [0.030, 0.015, 0.036], pos: [-0.144, -0.004, 0.020], euler: [0, 0, -14], mass: 0.01, rgba: [0.85, 0.64, 0.41, 1] },
+      { name: 'ear_inner_r',  type: 'ellipsoid', size: [0.030, 0.015, 0.036], pos: [ 0.144, -0.004, 0.020], euler: [0, 0,  14], mass: 0.01, rgba: [0.85, 0.64, 0.41, 1] },
     ],
     children: []
   }]
@@ -976,7 +1140,7 @@ export const goldenGateBridgePreset: SceneGraph = (() => {
   const makeTowerGeoms = (x: number, prefix: string): SceneGeom[] => [
     { name: `${prefix}_leg_f`, type: 'box',     size: [0.02, 0.02, 0.2], pos: [x, -0.08, 0.2], rgba: ORANGE },
     { name: `${prefix}_leg_b`, type: 'box',     size: [0.02, 0.02, 0.2], pos: [x,  0.08, 0.2], rgba: ORANGE },
-    { name: `${prefix}_xb_lo`, type: 'box',     size: [0.02, 0.10, 0.015], pos: [x, 0, 0.045], rgba: ORANGE },
+    { name: `${prefix}_xb_lo`, type: 'box',     size: [0.02, 0.10, 0.015], pos: [x, 0, 0.055], rgba: ORANGE },
     { name: `${prefix}_xb_hi`, type: 'box',     size: [0.02, 0.10, 0.015], pos: [x, 0, 0.35],  rgba: ORANGE },
   ];
 
@@ -998,7 +1162,9 @@ export const goldenGateBridgePreset: SceneGraph = (() => {
       const t = i / 12;
       const x = -0.35 + t * 0.7;
       const zTop = 0.4 - 0.8 * t * (1 - t);
-      geoms.push({ name: `${prefix}_${i}`, type: 'capsule', size: [0.004], fromto: [x, y, zTop, x, y, 0.08], rgba: HANGER });
+      // Capsule radius is 0.004, so ending at z = 0.094 seats the hanger cap
+      // flush on top of gg_deck (z = 0.090) with zero gap and zero overlap.
+      geoms.push({ name: `${prefix}_${i}`, type: 'capsule', size: [0.004], fromto: [x, y, zTop, x, y, 0.094], rgba: HANGER });
     }
     return geoms;
   };
@@ -1016,11 +1182,15 @@ export const goldenGateBridgePreset: SceneGraph = (() => {
       },
       {
         id: 'gg_deck', name: 'gg_deck', type: 'body' as const, pos: [0, 0, 0.08],
-        // Suspended from the overhead cable line (z = 0.32 in world space) and
-        // sized to clear the tower legs at x = ±0.35, y = ±0.08.
+        // Suspended from the overhead cable line (z = 0.32 in world space).
+        // Main span meets all 22 vertical hangers at y = ±0.080 and the inner
+        // faces of the tower legs at x = ±0.330, while the central roadway
+        // passes cleanly through the tower portals (y = ±0.059).
         joints: [{ name: 'gg_sway', type: 'ball', pos: [0, 0, 0.24], damping: 15, stiffness: 120 }],
         geoms: [
-          { name: 'gg_deck_box', type: 'box', size: [0.325, 0.058, 0.01], pos: [0, 0, 0], rgba: GREY, mass: 6 },
+          { name: 'gg_deck_box', type: 'box', size: [0.330, 0.084, 0.01], pos: [0, 0, 0], rgba: GREY, mass: 5 },
+          { name: 'gg_deck_portal_l', type: 'box', size: [0.02, 0.0595, 0.01], pos: [-0.35, 0, 0], rgba: GREY, mass: 0.5 },
+          { name: 'gg_deck_portal_r', type: 'box', size: [0.02, 0.0595, 0.01], pos: [ 0.35, 0, 0], rgba: GREY, mass: 0.5 },
         ],
         children: [],
       },
@@ -1043,11 +1213,57 @@ export const goldenGateMeshPreset: SceneGraph = (() => {
     const f = [0,2,1,0,3,2, 4,5,6,4,6,7, 0,5,4,0,1,5, 3,6,2,3,7,6, 0,7,3,0,4,7, 1,6,5,1,2,6];
     return { v, f };
   }
-  function merge(parts: {v:number[];f:number[]}[]) {
-    const verts: number[] = [], faces: number[] = [];
-    let off = 0;
-    for (const {v, f} of parts) { verts.push(...v); faces.push(...f.map(i => i+off)); off += v.length/3; }
-    return { vertices: verts, faces };
+
+  /** Seamless parabolic suspension cable built from convex watertight frustum segments (Y-up). */
+  function makeCableGeoms(cz: number, prefix: string, radius = 0.008, segs = 16, sides = 8): SceneGeom[] {
+    const rings: number[][][] = [];
+    const centers: number[][] = [];
+    for (let i = 0; i <= segs; i++) {
+      const t = i / segs;
+      const x = -0.35 + t * 0.7;
+      const y = 0.4 - 0.8 * t * (1 - t);
+      const dx = 0.7;
+      const dy = -0.8 * (1 - 2 * t);
+      const len = Math.hypot(dx, dy);
+      const tx = dx / len, ty = dy / len;
+      const nx = -ty, ny = tx;
+      centers.push([x, y, cz]);
+      const ring: number[][] = [];
+      for (let k = 0; k < sides; k++) {
+        const a = (k / sides) * Math.PI * 2;
+        const ca = Math.cos(a), sa = Math.sin(a);
+        ring.push([x + radius * ca * nx, y + radius * ca * ny, cz + radius * sa]);
+      }
+      rings.push(ring);
+    }
+    const geoms: SceneGeom[] = [];
+    for (let i = 0; i < segs; i++) {
+      const verts: number[] = [];
+      const faces: number[] = [];
+      for (let k = 0; k < sides; k++) verts.push(...rings[i][k]);
+      for (let k = 0; k < sides; k++) verts.push(...rings[i + 1][k]);
+      const c0 = 2 * sides;
+      const c1 = 2 * sides + 1;
+      verts.push(...centers[i], ...centers[i + 1]);
+      for (let k = 0; k < sides; k++) {
+        const k1 = (k + 1) % sides;
+        // Side quads (outward winding)
+        faces.push(k, k1, sides + k1);
+        faces.push(k, sides + k1, sides + k);
+        // Start cap (-T) and end cap (+T)
+        faces.push(c0, k1, k);
+        faces.push(c1, sides + k, sides + k1);
+      }
+      geoms.push({
+        name: `${prefix}_${i}`,
+        type: 'mesh' as const,
+        size: [1],
+        rgba: CABLE,
+        vertices: verts,
+        faces,
+      });
+    }
+    return geoms;
   }
 
   const ORANGE = [0.80, 0.25, 0.08, 1] as number[];
@@ -1057,57 +1273,44 @@ export const goldenGateMeshPreset: SceneGraph = (() => {
 
   const deck = box(0, 0.08, 0,  0.35, 0.01, 0.08);
 
-  function makeTower(cx: number) {
-    return merge([
-      box(cx, 0.2, -0.08,  0.02, 0.2, 0.02),
-      box(cx, 0.2,  0.08,  0.02, 0.2, 0.02),
-      box(cx, 0.1,  0,     0.02, 0.01, 0.09),
-      box(cx, 0.35, 0,     0.02, 0.01, 0.09),
-    ]);
+  function makeTowerGeoms(cx: number, prefix: string): SceneGeom[] {
+    // Emit each leg and crossbeam as its own convex mesh so V-HACD never
+    // voxelizes hollow gaps between legs or overlapping crossbeam corners.
+    const legF = box(cx, 0.2, -0.08, 0.02, 0.2, 0.02);
+    const legB = box(cx, 0.2,  0.08, 0.02, 0.2, 0.02);
+    const xbLo = box(cx, 0.06, 0,    0.02, 0.01, 0.06);
+    const xbHi = box(cx, 0.35, 0,    0.02, 0.01, 0.06);
+    return [
+      { name: `${prefix}_leg_f`, type: 'mesh' as const, size: [1], rgba: ORANGE, vertices: legF.v, faces: legF.f },
+      { name: `${prefix}_leg_b`, type: 'mesh' as const, size: [1], rgba: ORANGE, vertices: legB.v, faces: legB.f },
+      { name: `${prefix}_xb_lo`, type: 'mesh' as const, size: [1], rgba: ORANGE, vertices: xbLo.v, faces: xbLo.f },
+      { name: `${prefix}_xb_hi`, type: 'mesh' as const, size: [1], rgba: ORANGE, vertices: xbHi.v, faces: xbHi.f },
+    ];
   }
 
-  function makeCable(cz: number) {
-    const parts = [];
-    const N = 24;
-    for (let i = 0; i < N; i++) {
-      const t0 = i/N, t1 = (i+1)/N;
-      const x0 = -0.35 + t0*0.7, x1 = -0.35 + t1*0.7;
-      const y0 = 0.4 - 0.8*t0*(1-t0), y1 = 0.4 - 0.8*t1*(1-t1);
-      const len = Math.sqrt((x1-x0)**2 + (y1-y0)**2)/2 + 0.005;
-      parts.push(box((x0+x1)/2, (y0+y1)/2, cz,  len, 0.008, 0.008));
-    }
-    return merge(parts);
-  }
-
-  function makeHangers(cz: number) {
-    const parts = [];
+  function makeHangerGeoms(cz: number, prefix: string): SceneGeom[] {
+    const geoms: SceneGeom[] = [];
     for (let i = 1; i < 14; i++) {
-      const t = i/14;
-      const x = -0.35 + t*0.7;
-      const yTop = 0.4 - 0.8*t*(1-t);
-      parts.push(box(x, (yTop+0.08)/2, cz,  0.004, (yTop-0.08)/2, 0.004));
+      const t = i / 14;
+      const x = -0.35 + t * 0.7;
+      const yTop = 0.4 - 0.8 * t * (1 - t);
+      const b = box(x, (yTop + 0.09) / 2, cz, 0.004, (yTop - 0.09) / 2, 0.004);
+      geoms.push({ name: `${prefix}_${i}`, type: 'mesh' as const, size: [1], rgba: HANGER, vertices: b.v, faces: b.f });
     }
-    return merge(parts);
+    return geoms;
   }
-
-  const towerL  = makeTower(-0.35);
-  const towerR  = makeTower( 0.35);
-  const cable1  = makeCable(-0.08);
-  const cable2  = makeCable( 0.08);
-  const hang1   = makeHangers(-0.08);
-  const hang2   = makeHangers( 0.08);
 
   return {
     nodes: [{
       id: 'gg_mesh', name: 'gg_mesh', type: 'body' as const, pos: [0, 0, 0], joints: [],
       geoms: [
-        { name: 'gg_deck',    type: 'mesh' as const, size: [1], rgba: GREY,   vertices: deck.v,          faces: deck.f          },
-        { name: 'gg_tower_l', type: 'mesh' as const, size: [1], rgba: ORANGE, vertices: towerL.vertices,  faces: towerL.faces    },
-        { name: 'gg_tower_r', type: 'mesh' as const, size: [1], rgba: ORANGE, vertices: towerR.vertices,  faces: towerR.faces    },
-        { name: 'gg_cable_1', type: 'mesh' as const, size: [1], rgba: CABLE,  vertices: cable1.vertices,  faces: cable1.faces    },
-        { name: 'gg_cable_2', type: 'mesh' as const, size: [1], rgba: CABLE,  vertices: cable2.vertices,  faces: cable2.faces    },
-        { name: 'gg_hang_1',  type: 'mesh' as const, size: [1], rgba: HANGER, vertices: hang1.vertices,   faces: hang1.faces     },
-        { name: 'gg_hang_2',  type: 'mesh' as const, size: [1], rgba: HANGER, vertices: hang2.vertices,   faces: hang2.faces     },
+        { name: 'gg_deck', type: 'mesh' as const, size: [1], rgba: GREY, vertices: deck.v, faces: deck.f },
+        ...makeTowerGeoms(-0.35, 'gg_tower_l'),
+        ...makeTowerGeoms( 0.35, 'gg_tower_r'),
+        ...makeCableGeoms(-0.08, 'gg_cable_1'),
+        ...makeCableGeoms( 0.08, 'gg_cable_2'),
+        ...makeHangerGeoms(-0.08, 'gg_hang_1'),
+        ...makeHangerGeoms( 0.08, 'gg_hang_2'),
       ],
       children: [],
     }]

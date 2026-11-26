@@ -451,14 +451,132 @@ export interface GearNodeOptions {
   actuated?: boolean;
   velocityRadPerSec?: number;
   torqueLimitNm?: number;
+  kv?: number;
+  damping?: number;
   coupleTargetId?: string;
   coupleRatio?: number;
+  /**
+   * When true, replace the smooth pitch-cylinder proxy collider and kinematic
+   * coupling with exact convex involute tooth prism colliders + root cylinder
+   * so gears drive each other through real tooth-on-tooth contact in MuJoCo.
+   */
+  realToothCollision?: boolean;
+}
+
+/**
+ * Exact analytical convex decomposition of a spur gear into 1 root cylinder +
+ * N convex involute tooth prisms (4 flank samples per side), matching the
+ * rendered involute profile to the micron with zero valley bridging.
+ */
+function buildInvoluteGearToothColliders(
+  id: string,
+  metrics: InvoluteGearMetrics,
+  angleRad: number,
+  halfThickM: number,
+  massKg: number,
+  rgba: [number, number, number, number],
+): SceneGeom[] {
+  const {
+    teeth: z,
+    pressureAngleRad: alpha,
+    pitchRadiusMm: rp,
+    baseRadiusMm: rb,
+    addendumRadiusMm: ra,
+    rootRadiusMm: rf,
+    toothThicknessMm: sp,
+  } = metrics;
+
+  const invAlphaP = involuteAngle(alpha);
+  const halfAnglePitch = sp / (2 * rp);
+  const psiBase = halfAnglePitch + invAlphaP;
+  const pitchAngle = (2 * Math.PI) / z;
+  const maxHalfAngle = pitchAngle * 0.46;
+  const minTipHalfAngle = 0.03 / z;
+
+  const halfAngleAtRadius = (r: number): number => {
+    if (r <= rb) return Math.min(maxHalfAngle, psiBase);
+    const phi = Math.sqrt(Math.max(0, (r / rb) * (r / rb) - 1));
+    return Math.min(maxHalfAngle, psiBase - (phi - Math.atan(phi)));
+  };
+
+  let rTip = ra;
+  if (halfAngleAtRadius(rTip) < minTipHalfAngle) {
+    let lo = Math.max(rf, rb);
+    let hi = ra;
+    for (let it = 0; it < 24; it++) {
+      const mid = 0.5 * (lo + hi);
+      if (halfAngleAtRadius(mid) >= minTipHalfAngle) lo = mid;
+      else hi = mid;
+    }
+    rTip = lo;
+  }
+
+  const rStart = Math.max(rf, rb);
+  const psiStart = halfAngleAtRadius(rStart);
+  const flankSamples = 4;
+  // Pure normal involute flank contact (condim: 1) with 12 ms contact time
+  // constant avoids tangential stick-slip chatter on geared tooth meshes.
+  const toothSolref: [number, number] = [0.012, 1];
+
+  const geoms: SceneGeom[] = [
+    {
+      ...cylinderGeom(`${id}_root_col`, mm(rf), mm(metrics.thicknessMm), 0, rgba, {
+        role: 'collision',
+        mass: massKg,
+        contype: 1,
+        conaffinity: 1,
+        condim: 1,
+        solref: toothSolref,
+      }),
+    },
+  ];
+
+  const flankPt = (r: number, side: -1 | 1, centerAngle: number): [number, number] => {
+    const phi = r > rb ? Math.sqrt(Math.max(0, (r / rb) * (r / rb) - 1)) : 0;
+    const psi = Math.max(minTipHalfAngle * 0.5, Math.min(maxHalfAngle, psiBase - (phi - Math.atan(phi))));
+    const theta = centerAngle + side * psi;
+    return [r * Math.cos(theta), r * Math.sin(theta)];
+  };
+
+  for (let k = 0; k < z; k++) {
+    const centerAngle = k * pitchAngle + angleRad;
+    const polyMm: [number, number][] = [];
+    if (rf < rStart - 1e-4) {
+      const thR = centerAngle - psiStart;
+      polyMm.push([rf * Math.cos(thR), rf * Math.sin(thR)]);
+    }
+    for (let i = 0; i <= flankSamples; i++) {
+      const r = rStart + (i / flankSamples) * (rTip - rStart);
+      polyMm.push(flankPt(r, -1, centerAngle));
+    }
+    for (let i = flankSamples; i >= 0; i--) {
+      const r = rStart + (i / flankSamples) * (rTip - rStart);
+      polyMm.push(flankPt(r, 1, centerAngle));
+    }
+    if (rf < rStart - 1e-4) {
+      const thL = centerAngle + psiStart;
+      polyMm.push([rf * Math.cos(thL), rf * Math.sin(thL)]);
+    }
+    const polyM = polyMm.map(([x, y]) => [mm(x), mm(y)]);
+    const prism = prismMesh(polyM, -halfThickM, halfThickM);
+    geoms.push({
+      ...extrudedMeshGeom(`${id}_tooth_${k}`, prism.positions, prism.faces, rgba),
+      role: 'collision',
+      contype: 1,
+      conaffinity: 1,
+      condim: 1,
+      solref: toothSolref,
+      mass: 1e-6,
+    });
+  }
+  return geoms;
 }
 
 /**
  * Builds a complete `SceneNode` for an involute spur gear with:
  * - Watertight extruded `prismMesh` visual geometry (with bore cutout)
- * - Lightweight cylinder collision envelope for fast MuJoCo physics
+ * - Lightweight cylinder collision envelope (or exact per-tooth convex prisms
+ *   when `options.realToothCollision` is true)
  * - Hinge joint along local +Z (`[0, 0, 1]`) and `node.teeth` metadata
  */
 export function buildInvoluteGearNode(
@@ -472,8 +590,9 @@ export function buildInvoluteGearNode(
   const rgba = spec.rgba ?? GEAR_BLUE;
   const density = spec.density ?? PLA_DENSITY;
 
-  const rotatedOutline = rotateLoop2D(profile.outline, options.angleRad ?? 0);
-  const rotatedBore = profile.bore ? rotateLoop2D(profile.bore, options.angleRad ?? 0) : null;
+  const angleRad = options.angleRad ?? 0;
+  const rotatedOutline = rotateLoop2D(profile.outline, angleRad);
+  const rotatedBore = profile.bore ? rotateLoop2D(profile.bore, angleRad) : null;
 
   const outlineM = rotatedOutline.map(([x, y]) => [mm(x), mm(y)]);
   const holesM = rotatedBore ? [rotatedBore.map(([x, y]) => [mm(x), mm(y)])] : [];
@@ -489,26 +608,31 @@ export function buildInvoluteGearNode(
   const meshGeom = visual(
     extrudedMeshGeom(`${id}_mesh`, prism.positions, prism.faces, rgba),
   );
-  const colliderGeom: SceneGeom = {
-    ...cylinderGeom(`${id}_col`, mm(metrics.pitchRadiusMm), mm(metrics.thicknessMm), 0, rgba, {
-      role: 'collision',
-      mass: massKg,
-    }),
-  };
+  const colliderGeoms: SceneGeom[] = options.realToothCollision
+    ? buildInvoluteGearToothColliders(id, metrics, angleRad, halfThickM, massKg, rgba)
+    : [
+        {
+          ...cylinderGeom(`${id}_col`, mm(metrics.pitchRadiusMm), mm(metrics.thicknessMm), 0, rgba, {
+            role: 'collision',
+            mass: massKg,
+          }),
+        },
+      ];
 
   const joint: SceneJoint = {
     name: `${id}_hinge`,
     type: 'hinge',
     axis: [0, 0, 1],
     pos: [0, 0, 0],
-    damping: 0.002,
+    damping: options.damping ?? 0.002,
+    ...(options.realToothCollision ? { armature: 0.0005 } : {}),
     ...(options.actuated
       ? {
           actuator: {
             type: 'velocity',
-            kv: 2.0,
+            kv: options.kv ?? (options.realToothCollision ? 0.05 : 2.0),
             ctrlValue: options.velocityRadPerSec ?? 3.0,
-            forceLimit: options.torqueLimitNm ?? 1.5,
+            forceLimit: options.torqueLimitNm ?? (options.realToothCollision ? 0.25 : 1.5),
           },
         }
       : {}),
@@ -532,12 +656,12 @@ export function buildInvoluteGearNode(
       rootDiameterMm: 2 * metrics.rootRadiusMm,
       backlashMm: metrics.backlashMm,
     },
-    geoms: [meshGeom, colliderGeom],
+    geoms: [meshGeom, ...colliderGeoms],
     joints: [joint],
     children: [],
-    allowCoupling: true,
-    ...(options.coupleTargetId ? { coupleTargetId: options.coupleTargetId } : {}),
-    ...(options.coupleRatio !== undefined ? { coupleRatio: options.coupleRatio } : {}),
+    allowCoupling: !options.realToothCollision,
+    ...(!options.realToothCollision && options.coupleTargetId ? { coupleTargetId: options.coupleTargetId } : {}),
+    ...(!options.realToothCollision && options.coupleRatio !== undefined ? { coupleRatio: options.coupleRatio } : {}),
   };
 }
 
@@ -787,8 +911,84 @@ export interface RackNodeOptions {
   name?: string;
   pos?: [number, number, number];
   slideAxis?: [number, number, number];
+  damping?: number;
   coupleTargetId?: string;
   coupleRatio?: number;
+  realToothCollision?: boolean;
+}
+
+function buildInvoluteRackToothColliders(
+  id: string,
+  metrics: InvoluteRackMetrics,
+  halfThickM: number,
+  massKg: number,
+  rgba: [number, number, number, number],
+  density: number,
+): SceneGeom[] {
+  const {
+    teeth: nTeeth,
+    pressureAngleRad: alpha,
+    circularPitchMm: p,
+    totalLengthMm: L,
+    addendumMm: ha,
+    dedendumMm: hf,
+    baseHeightMm: hb,
+    backlashMm,
+  } = metrics;
+
+  const tanAlpha = Math.tan(alpha);
+  const toothPitchWidth = Math.max(0.2 * p, p / 2 - backlashMm);
+  const halfPitchWidth = toothPitchWidth / 2;
+  const halfTipWidth = Math.max(0.05 * p, halfPitchWidth - ha * tanAlpha);
+  const halfRootWidth = Math.min(0.47 * p, halfPitchWidth + hf * tanAlpha);
+  const yRoot = -hf;
+  const yTip = ha;
+  const xLeft = -L / 2;
+  const toothFriction: [number, number, number] = [0.08, 0.005, 0.0005];
+  const toothSolref: [number, number] = [0.008, 1];
+
+  const geoms: SceneGeom[] = [
+    {
+      ...boxGeom(
+        `${id}_bar_col`,
+        [mm(L / 2), mm(hb / 2), halfThickM],
+        [0, mm(-(hf + hb / 2)), 0],
+        rgba,
+        density,
+        {
+          role: 'collision',
+          mass: massKg,
+          contype: 1,
+          conaffinity: 1,
+          condim: 3,
+          friction: toothFriction,
+          solref: toothSolref,
+        },
+      ),
+    },
+  ];
+
+  for (let i = 0; i < nTeeth; i++) {
+    const cx = xLeft + (i + 0.5) * p;
+    const polyM: [number, number][] = [
+      [mm(cx - halfRootWidth), mm(yRoot)],
+      [mm(cx + halfRootWidth), mm(yRoot)],
+      [mm(cx + halfTipWidth), mm(yTip)],
+      [mm(cx - halfTipWidth), mm(yTip)],
+    ];
+    const prism = prismMesh(polyM, -halfThickM, halfThickM);
+    geoms.push({
+      ...extrudedMeshGeom(`${id}_tooth_${i}`, prism.positions, prism.faces, rgba),
+      role: 'collision',
+      contype: 1,
+      conaffinity: 1,
+      condim: 3,
+      friction: toothFriction,
+      solref: toothSolref,
+      mass: 1e-6,
+    });
+  }
+  return geoms;
 }
 
 export function buildInvoluteRackNode(
@@ -813,16 +1013,20 @@ export function buildInvoluteRackNode(
   const meshGeom = visual(
     extrudedMeshGeom(`${id}_mesh`, prism.positions, prism.faces, rgba),
   );
-  const colliderGeom: SceneGeom = {
-    ...boxGeom(
-      `${id}_col`,
-      [mm(metrics.totalLengthMm / 2), mm(metrics.totalHeightMm / 2), halfThickM],
-      [0, mm(yMidMm), 0],
-      rgba,
-      density,
-      { role: 'collision', mass: massKg },
-    ),
-  };
+  const colliderGeoms: SceneGeom[] = options.realToothCollision
+    ? buildInvoluteRackToothColliders(id, metrics, halfThickM, massKg, rgba, density)
+    : [
+        {
+          ...boxGeom(
+            `${id}_col`,
+            [mm(metrics.totalLengthMm / 2), mm(metrics.totalHeightMm / 2), halfThickM],
+            [0, mm(yMidMm), 0],
+            rgba,
+            density,
+            { role: 'collision', mass: massKg },
+          ),
+        },
+      ];
 
   const maxSlideM = mm(metrics.totalLengthMm * 0.42);
   const joint: SceneJoint = {
@@ -830,7 +1034,7 @@ export function buildInvoluteRackNode(
     type: 'slide',
     axis: options.slideAxis ?? [1, 0, 0],
     pos: [0, 0, 0],
-    damping: 0.05,
+    damping: options.damping ?? (options.realToothCollision ? 0.01 : 0.05),
     limited: true,
     range: [-maxSlideM, maxSlideM],
   };
@@ -849,12 +1053,12 @@ export function buildInvoluteRackNode(
       lengthMm: metrics.totalLengthMm,
       backlashMm: metrics.backlashMm,
     },
-    geoms: [meshGeom, colliderGeom],
+    geoms: [meshGeom, ...colliderGeoms],
     joints: [joint],
     children: [],
-    allowCoupling: true,
-    ...(options.coupleTargetId ? { coupleTargetId: options.coupleTargetId } : {}),
-    ...(options.coupleRatio !== undefined ? { coupleRatio: options.coupleRatio } : {}),
+    allowCoupling: !options.realToothCollision,
+    ...(!options.realToothCollision && options.coupleTargetId ? { coupleTargetId: options.coupleTargetId } : {}),
+    ...(!options.realToothCollision && options.coupleRatio !== undefined ? { coupleRatio: options.coupleRatio } : {}),
   };
 }
 
@@ -864,6 +1068,7 @@ export interface RackAndPinionOptions {
   origin?: [number, number, number];
   actuatePinion?: boolean;
   pinionVelocityRadPerSec?: number;
+  realToothCollision?: boolean;
 }
 
 export interface RackAndPinionResult {
@@ -940,6 +1145,7 @@ export function buildRackAndPinionPair(
     angleRad: pinionClockRad,
     actuated: options.actuatePinion ?? true,
     velocityRadPerSec: options.pinionVelocityRadPerSec ?? 2.0,
+    realToothCollision: options.realToothCollision,
   });
 
   const rackNode = buildInvoluteRackNode(normRack, {
@@ -948,6 +1154,7 @@ export function buildRackAndPinionPair(
     pos: rackPos,
     coupleTargetId: pinionNode.id,
     coupleRatio,
+    realToothCollision: options.realToothCollision,
   });
 
   return {

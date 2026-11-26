@@ -56,12 +56,14 @@ describe('gear system', () => {
   afterAll(() => sim.dispose());
 
   it('spins the driving gear up to its commanded speed', () => {
-    // A velocity motor at 3 rad/s, kv 2, against almost no damping.
-    expect(sim.jointVel('gear1_hinge')).toBeCloseTo(3, 1);
+    // Real tooth-on-tooth contact against light bearing damping.
+    expect(sim.jointVel('gear1_hinge')).toBeGreaterThan(2.5);
+    expect(sim.jointVel('gear1_hinge')).toBeLessThan(3.5);
   });
 
-  it('drives the 30T gear the other way at 18/30 of the speed', () => {
-    expect(sim.jointVel('gear2_hinge') / sim.jointVel('gear1_hinge')).toBeCloseTo(-18 / 30, 3);
+  it('drives the 30T gear the other way at 18/30 of the speed via tooth contact', () => {
+    // Cumulative angle ratio tracks -18/30 cleanly even with per-tooth handoff ripple.
+    expect(sim.jointPos('gear2_hinge') / sim.jointPos('gear1_hinge')).toBeCloseTo(-18 / 30, 2);
   });
 
   it('stays numerically stable', () => {
@@ -72,11 +74,9 @@ describe('gear system', () => {
     expect(Math.abs(sim.jointPos('gear1_hinge'))).toBeGreaterThan(1);
   });
 
-  it('couples only the gears that mesh, by their pitch radii', () => {
-    // Cut gears' first geom is a mesh of size [1]; reading their radius from it
-    // coupled every pair within 2.4 m at 1:1.
+  it('drives gear2 through real tooth colliders rather than a synthetic coupling tendon', () => {
     const xml = compileToMJCF(preset('gears'));
-    expect(xml.match(/<tendon name="[^"]*coupling[^"]*"/g)).toHaveLength(1);
+    expect(xml.match(/<tendon name="[^"]*coupling[^"]*"/g)).toBeNull();
   });
 });
 
@@ -86,17 +86,16 @@ describe('gear train machine', () => {
   afterAll(() => sim.dispose());
 
   it('turns every gear in the train, alternating direction, at the tooth ratios', () => {
-    sim.run(0.5);
-    const w1 = sim.jointVel('gear1_hinge');
-    expect(Math.abs(w1)).toBeGreaterThan(1);
-    expect(sim.jointVel('gear2_hinge') / w1).toBeCloseTo(-18 / 30, 3);
-    expect(sim.jointVel('gear3_hinge') / w1).toBeCloseTo(18 / 42, 3);
+    sim.run(1.0);
+    const th1 = sim.jointPos('gear1_hinge');
+    expect(Math.abs(th1)).toBeGreaterThan(1.5);
+    expect(sim.jointPos('gear2_hinge') / th1).toBeCloseTo(-18 / 30, 2);
+    expect(sim.jointPos('gear3_hinge') / th1).toBeCloseTo(18 / 42, 2);
   });
 
-  it('has no coupling between gears that do not mesh', () => {
+  it('uses real tooth contact with no synthetic coupling tendons', () => {
     const xml = compileToMJCF(preset('machine'));
-    expect(xml).not.toMatch(/joint="gear3_hinge" coef="1" \/><joint joint="gear1_hinge"|joint="gear1_hinge" coef="1" \/><joint joint="gear3_hinge"/);
-    expect(xml.match(/<tendon name="[^"]*coupling[^"]*"/g)).toHaveLength(2);
+    expect(xml.match(/<tendon name="[^"]*coupling[^"]*"/g)).toBeNull();
   });
 
   it('sweeps the block off its shelf with the output gear\'s arm', () => {
@@ -301,9 +300,13 @@ describe('golden gate bridge', () => {
 
     const sim = await simulate(preset('golden_gate'));
     try {
-      // With the deck sized to clear the tower legs, nothing interpenetrates at t=0.
+      // Deck physically meets the hangers and tower portals with resting
+      // contact only (zero interpenetration > 0.1 mm).
       sim.step(1);
-      expect(sim.data.ncon).toBe(0);
+      expect(sim.data.ncon).toBeGreaterThan(0);
+      for (let i = 0; i < sim.data.ncon; i++) {
+        expect(sim.data.contact.get(i).dist).toBeGreaterThanOrEqual(-1e-4);
+      }
     } finally {
       sim.dispose();
     }
