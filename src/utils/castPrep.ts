@@ -318,27 +318,29 @@ const WELD = 1e-7;
  * Tapers one closed, outward-wound triangle soup (world, metres, 9 numbers per
  * triangle) and hands it back indexed.
  *
- * Every vertex moves only sideways, by an amount set by its height:
+ * Every vertex moves only sideways, by an amount set by its height relative to
+ * its own local wall/feature reach (not the entire body's global Z extents):
  *
- *   - h = |z − partingZ|, and H the body's furthest reach on that side.
+ *   - h = |z − partingZ|, and H the local wall component's furthest reach on that side.
  *   - add:    out by (H − h)·tanθ — far faces nominal, the parting line grows.
  *   - remove: in by h·tanθ — the parting line nominal, the far faces shrink.
  *
- * Moving each point by an amount linear in its height leans every wall by θ,
- * whichever way it faces: an outside wall leans out toward the plane, and a
- * pocket's wall — whose outward normal points into the pocket — closes in
- * toward its floor, which is exactly the draft a pocket needs.
+ * Using per-wall-component local reach prevents tall features (e.g. a 65 mm
+ * hook on a 13 mm base plate) from over-drafting small holes or low walls on
+ * the base plate and pinching them shut.
  *
- * Which way a vertex moves is a miter of the walls around it: the d with
- * d·ĥᵢ = 1 for each wall's horizontal normal ĥᵢ, solved in least squares, so a
- * box's faces stay flat and its corners move √2 as far. Faces that are flat to
- * within 3° (tops, floors) have no say. `extents` is the body's z range, so all
- * of its geoms lean from the same top and bottom.
+ * Which way a vertex moves is a least-squares miter of the walls around it:
+ * d·ĥᵢ = offsetᵢ for each wall's horizontal normal ĥᵢ, so a box's faces stay
+ * flat and its corners move √2 as far, and perpendicular walls of different
+ * heights meet cleanly. Faces that are flat to within 3° (tops, floors) have
+ * no say. Finally, an iterative triangle-orientation guard scales back any
+ * local displacement that would pinch or invert a triangle (e.g. a deep small
+ * hole or thin wall under aggressive draft).
  */
 export function draftTriangles(
   tris: ArrayLike<number>,
   p: DraftParams,
-  extents?: { minZ: number; maxZ: number },
+  _extents?: { minZ: number; maxZ: number },
 ): { positions: number[]; faces: number[]; undraftedPositions: number[] } {
   const index = new Map<string, number>();
   const positions: number[] = [];
@@ -362,33 +364,119 @@ export function draftTriangles(
   }
 
   const n = positions.length / 3;
-  let minZ = extents?.minZ ?? Infinity, maxZ = extents?.maxZ ?? -Infinity;
-  if (!extents) for (let i = 0; i < n; i++) { minZ = Math.min(minZ, positions[i * 3 + 2]); maxZ = Math.max(maxZ, positions[i * 3 + 2]); }
+  const faceCount = faces.length / 3;
 
-  // Per vertex: Σ ĥĥᵀ (a11, a12, a22) and Σ ĥ (b1, b2).
-  const acc = new Float64Array(n * 5);
+  // Classify faces and store unit normals, horizontal unit normals, and Z bounds.
   const FLAT = Math.sin((3 * Math.PI) / 180);
-  for (let f = 0; f < faces.length; f += 3) {
-    const ia = faces[f] * 3, ib = faces[f + 1] * 3, ic = faces[f + 2] * 3;
+  const STEEP = Math.sin((20 * Math.PI) / 180);
+  const H_COS = Math.cos((50 * Math.PI) / 180);
+  const N_COS = Math.cos((50 * Math.PI) / 180);
+
+  const isWall = new Uint8Array(faceCount);
+  const fNx = new Float64Array(faceCount);
+  const fNy = new Float64Array(faceCount);
+  const fNz = new Float64Array(faceCount);
+  const fHx = new Float64Array(faceCount);
+  const fHy = new Float64Array(faceCount);
+  const fHl = new Float64Array(faceCount);
+  const fMinZ = new Float64Array(faceCount);
+  const fMaxZ = new Float64Array(faceCount);
+  // Undrafted unnormalized cross products for the post-draft inversion guard.
+  const oldN = new Float64Array(faceCount * 3);
+  const oldN2 = new Float64Array(faceCount);
+
+  for (let f = 0; f < faceCount; f++) {
+    const ia = faces[f * 3] * 3, ib = faces[f * 3 + 1] * 3, ic = faces[f * 3 + 2] * 3;
     const ux = positions[ib] - positions[ia], uy = positions[ib + 1] - positions[ia + 1], uz = positions[ib + 2] - positions[ia + 2];
     const vx = positions[ic] - positions[ia], vy = positions[ic + 1] - positions[ia + 1], vz = positions[ic + 2] - positions[ia + 2];
     const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-    const len = Math.hypot(nx, ny, nz);
+    oldN[f * 3] = nx; oldN[f * 3 + 1] = ny; oldN[f * 3 + 2] = nz;
+    const n2 = nx * nx + ny * ny + nz * nz;
+    oldN2[f] = n2;
+    const len = Math.sqrt(n2);
     if (len === 0) continue;
     const hl = Math.hypot(nx, ny) / len;
     if (hl < FLAT) continue;
-    const hx = nx / (hl * len), hy = ny / (hl * len);
-    for (let k = 0; k < 3; k++) {
-      const o = faces[f + k] * 5;
-      acc[o] += hx * hx; acc[o + 1] += hx * hy; acc[o + 2] += hy * hy;
-      acc[o + 3] += hx; acc[o + 4] += hy;
+    isWall[f] = 1;
+    fNx[f] = nx / len; fNy[f] = ny / len; fNz[f] = nz / len;
+    fHx[f] = nx / (hl * len); fHy[f] = ny / (hl * len);
+    fHl[f] = hl;
+    const za = positions[ia + 2], zb = positions[ib + 2], zc = positions[ic + 2];
+    fMinZ[f] = Math.min(za, zb, zc);
+    fMaxZ[f] = Math.max(za, zb, zc);
+  }
+
+  // Group connected wall faces into local features via union-find so each wall
+  // (e.g. a base-plate hole vs a tall hook) drafts from its own local height.
+  const parent = new Int32Array(faceCount);
+  for (let f = 0; f < faceCount; f++) parent[f] = f;
+  const find = (x: number): number => {
+    while (parent[x] !== x) {
+      parent[x] = parent[parent[x]];
+      x = parent[x];
+    }
+    return x;
+  };
+  const union = (a: number, b: number) => {
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) parent[ra] = rb;
+  };
+
+  const edgeOwner = new Map<number, number>();
+  for (let f = 0; f < faceCount; f++) {
+    if (!isWall[f]) continue;
+    const i0 = faces[f * 3], i1 = faces[f * 3 + 1], i2 = faces[f * 3 + 2];
+    const edges: [number, number][] = [[i0, i1], [i1, i2], [i2, i0]];
+    for (let e = 0; e < 3; e++) {
+      const u = edges[e][0], v = edges[e][1];
+      const key = u < v ? u * n + v : v * n + u;
+      const other = edgeOwner.get(key);
+      if (other === undefined) {
+        edgeOwner.set(key, f);
+      } else if (
+        Math.max(fHl[f], fHl[other]) >= STEEP
+        && fHx[f] * fHx[other] + fHy[f] * fHy[other] >= H_COS
+        && fNx[f] * fNx[other] + fNy[f] * fNy[other] + fNz[f] * fNz[other] >= N_COS
+      ) {
+        union(f, other);
+      }
     }
   }
 
+  const compMinZ = new Float64Array(faceCount).fill(Infinity);
+  const compMaxZ = new Float64Array(faceCount).fill(-Infinity);
+  for (let f = 0; f < faceCount; f++) {
+    if (!isWall[f]) continue;
+    const r = find(f);
+    if (fMinZ[f] < compMinZ[r]) compMinZ[r] = fMinZ[f];
+    if (fMaxZ[f] > compMaxZ[r]) compMaxZ[r] = fMaxZ[f];
+  }
+
+  // Per vertex: Σ ĥĥᵀ (a11, a12, a22) and Σ offset·ĥ (b1, b2).
   const tan = Math.tan((p.deg * Math.PI) / 180);
-  const upReach = Math.max(0, maxZ - p.partingZ);
-  const downReach = Math.max(0, p.partingZ - minZ);
-  const out = positions.slice();
+  const acc = new Float64Array(n * 5);
+  const maxAbsOffset = new Float64Array(n);
+  for (let f = 0; f < faceCount; f++) {
+    if (!isWall[f]) continue;
+    const r = find(f);
+    const upReach = Math.max(0, compMaxZ[r] - p.partingZ);
+    const downReach = Math.max(0, p.partingZ - compMinZ[r]);
+    const hx = fHx[f], hy = fHy[f];
+    for (let k = 0; k < 3; k++) {
+      const vi = faces[f * 3 + k];
+      const z = positions[vi * 3 + 2];
+      const h = Math.abs(z - p.partingZ);
+      const reach = z >= p.partingZ ? upReach : downReach;
+      const offset = p.mode === 'add' ? Math.max(0, reach - h) * tan : -h * tan;
+      const absOff = Math.abs(offset);
+      if (absOff > maxAbsOffset[vi]) maxAbsOffset[vi] = absOff;
+      const o = vi * 5;
+      acc[o] += hx * hx; acc[o + 1] += hx * hy; acc[o + 2] += hy * hy;
+      acc[o + 3] += hx * offset; acc[o + 4] += hy * offset;
+    }
+  }
+
+  const disp = new Float64Array(n * 2);
   for (let i = 0; i < n; i++) {
     const o = i * 5;
     const a11 = acc[o], a12 = acc[o + 1], a22 = acc[o + 2], b1 = acc[o + 3], b2 = acc[o + 4];
@@ -405,15 +493,59 @@ export function draftTriangles(
       dy = b2 / trace;
     }
     // A knife-edge corner would miter off toward infinity.
+    const maxDisp = 2 * maxAbsOffset[i];
     const dl = Math.hypot(dx, dy);
-    if (dl > 2) { dx *= 2 / dl; dy *= 2 / dl; }
+    if (dl > maxDisp && dl > 0) { dx *= maxDisp / dl; dy *= maxDisp / dl; }
+    disp[i * 2] = dx;
+    disp[i * 2 + 1] = dy;
+  }
 
-    const z = positions[i * 3 + 2];
-    const h = Math.abs(z - p.partingZ);
-    const reach = z >= p.partingZ ? upReach : downReach;
-    const offset = p.mode === 'add' ? Math.max(0, reach - h) * tan : -h * tan;
-    out[i * 3] += dx * offset;
-    out[i * 3 + 1] += dy * offset;
+  // Iterative triangle-orientation guard: scale back local displacement on any
+  // triangle that would invert or pinch below 10% of its projected area.
+  const MIN_AREA_RATIO = 0.1;
+  const MAX_CLAMP_ITERS = 16;
+  const scale = new Float64Array(n).fill(1);
+  const shrink = new Uint8Array(n);
+  for (let iter = 0; iter < MAX_CLAMP_ITERS; iter++) {
+    shrink.fill(0);
+    let anyBad = false;
+    for (let f = 0; f < faceCount; f++) {
+      const n2 = oldN2[f];
+      if (n2 < 1e-24) continue;
+      const ia = faces[f * 3], ib = faces[f * 3 + 1], ic = faces[f * 3 + 2];
+      const sa = scale[ia], sb = scale[ib], sc = scale[ic];
+      const ax = positions[ia * 3] + disp[ia * 2] * sa;
+      const ay = positions[ia * 3 + 1] + disp[ia * 2 + 1] * sa;
+      const az = positions[ia * 3 + 2];
+      const bx = positions[ib * 3] + disp[ib * 2] * sb;
+      const by = positions[ib * 3 + 1] + disp[ib * 2 + 1] * sb;
+      const bz = positions[ib * 3 + 2];
+      const cx = positions[ic * 3] + disp[ic * 2] * sc;
+      const cy = positions[ic * 3 + 1] + disp[ic * 2 + 1] * sc;
+      const cz = positions[ic * 3 + 2];
+      const ux = bx - ax, uy = by - ay, uz = bz - az;
+      const vx = cx - ax, vy = cy - ay, vz = cz - az;
+      const nx = uy * vz - uz * vy;
+      const ny = uz * vx - ux * vz;
+      const nz = ux * vy - uy * vx;
+      const dot = nx * oldN[f * 3] + ny * oldN[f * 3 + 1] + nz * oldN[f * 3 + 2];
+      if (dot < MIN_AREA_RATIO * n2) {
+        anyBad = true;
+        shrink[ia] = 1;
+        shrink[ib] = 1;
+        shrink[ic] = 1;
+      }
+    }
+    if (!anyBad) break;
+    for (let i = 0; i < n; i++) {
+      if (shrink[i]) scale[i] = iter === MAX_CLAMP_ITERS - 1 ? 0 : scale[i] * 0.5;
+    }
+  }
+
+  const out = positions.slice();
+  for (let i = 0; i < n; i++) {
+    out[i * 3] += disp[i * 2] * scale[i];
+    out[i * 3 + 1] += disp[i * 2 + 1] * scale[i];
   }
   return { positions: out, faces, undraftedPositions: positions };
 }
@@ -535,13 +667,11 @@ function shiftWorldPointByDraft(
 export function draftBodyGeoms(node: SceneNode, world: THREE.Matrix4, p: DraftParams): SceneGeom[] | null {
   const solids = bodySolids(node, world);
   if (solids.length === 0) return null;
-  let minZ = Infinity, maxZ = -Infinity;
-  for (const s of solids) for (let i = 2; i < s.tris.length; i += 3) { minZ = Math.min(minZ, s.tris[i]); maxZ = Math.max(maxZ, s.tris[i]); }
 
   const toLocal = world.clone().invert();
   const v = new THREE.Vector3();
   return solids.map(({ geom, tris }) => {
-    const { positions, faces, undraftedPositions } = draftTriangles(tris, p, { minZ, maxZ });
+    const { positions, faces, undraftedPositions } = draftTriangles(tris, p);
     const local = new Array<number>(positions.length);
     for (let i = 0; i < positions.length; i += 3) {
       v.set(positions[i], positions[i + 1], positions[i + 2]).applyMatrix4(toLocal);

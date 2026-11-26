@@ -4,9 +4,10 @@
 // ---------------------------------------------------------------------------
 
 import { useStore } from '../../store/useStore';
+import { framingPatch } from '../../store/sceneFraming';
 import { loadManifold } from '../../utils/sculptCut';
 import {
-  collectIndividualPartSoups, decomposeSolidIntoPlanks, resolveTimberTargetIds, type PlankJointType,
+  collectIndividualPartSoups, decomposeSolidIntoPlanks, isNonWoodNode, resolveTimberTargetIds, type PlankJointType,
 } from '../../utils/timberBreakdown';
 import {
   synthesizeTimberJoinery, type TenonCornerFit, type TimberEdgeProfile, type TimberJointMode,
@@ -94,9 +95,14 @@ const breakdownJoineryCommand: McpHandler = async (msg, { store, toId }) => {
     return { ok: false, error: `No body called ${missingWith.join(', ')}.` };
   }
   const others = rawWithIds.map((raw) => findNodeInScene(store.sceneGraph.nodes, resolveId(raw))!.id);
+  const woodRoots = store.sceneGraph.nodes.filter((n) => !isNonWoodNode(n));
   const targetIds = explicitBodyId
     ? [explicitBodyId, ...others]
-    : resolveTimberTargetIds(store.sceneGraph.nodes, store.selectedNodeId, others);
+    : rawWithIds.length > 0
+      ? resolveTimberTargetIds(store.sceneGraph.nodes, store.selectedNodeId, others)
+      : woodRoots.length > 1
+        ? woodRoots.map((n) => n.id)
+        : resolveTimberTargetIds(store.sceneGraph.nodes, store.selectedNodeId, others);
   if (!targetIds.length) return { ok: false, error: 'Give bodyId, or add a body to the scene first.' };
   const primary = findNodeInScene(store.sceneGraph.nodes, targetIds[0]);
   if (!primary) return { ok: false, error: `No body called ${rawBodyId ?? targetIds[0]}.` };
@@ -105,6 +111,7 @@ const breakdownJoineryCommand: McpHandler = async (msg, { store, toId }) => {
     strictIds: rawWithIds.length > 0,
   });
   if (!items.length) return { ok: false, error: `${primary.name} has no solid geometry to break down.` };
+  const targetedIds = Array.from(new Set([...targetIds, ...absorbed]));
 
   const boardThick = checkPos(msg.boardThicknessMm ?? msg.board_thickness_mm, 'boardThicknessMm');
   if (!boardThick.ok) return boardThick;
@@ -213,6 +220,7 @@ const breakdownJoineryCommand: McpHandler = async (msg, { store, toId }) => {
       return {
         ok: true,
         mode: 'planks',
+        targetedIds,
         applied: !!ids,
         placement: ids ? placement : undefined,
         options: plankRes.options,
@@ -304,6 +312,7 @@ const breakdownJoineryCommand: McpHandler = async (msg, { store, toId }) => {
         return {
           ok: true,
           mode: 'planks',
+          targetedIds,
           applied: !!ids,
           placement: ids ? placement : undefined,
           options: plankRes.options,
@@ -359,9 +368,16 @@ const breakdownJoineryCommand: McpHandler = async (msg, { store, toId }) => {
           })
         : null;
 
+    const hasMortisedLegs = outcome.parts.some((p) => p.member.role === 'leg' && p.mortises.length > 0);
+    const buildGuideMarkdown =
+      !hasMortisedLegs && cutPlan.birdsEyeMapMarkdown
+        ? cutPlan.buildGuideMarkdown.replace(`\n\n---\n\n${cutPlan.birdsEyeMapMarkdown}`, '')
+        : cutPlan.buildGuideMarkdown;
+
     return {
       ok: true,
       mode: 'frame',
+      targetedIds,
       applied: !!ids,
       placement: ids ? placement : undefined,
       parts: outcome.parts.map((p, idx) => ({
@@ -369,7 +385,7 @@ const breakdownJoineryCommand: McpHandler = async (msg, { store, toId }) => {
         id: p.member.id,
         ...(ids ? { sceneNodeId: ids[idx] } : {}),
         title: p.member.title,
-        role: p.member.role,
+        role: p.member.id.startsWith('Corner_Cleat_') ? 'cleat' : p.member.role,
         mirrorOf: p.member.mirrorOf,
         finishedDimsMm: [p.totalFinishedLengthMm, p.crossSectionMm[0], p.crossSectionMm[1]],
         shoulderToShoulderMm: p.shoulderToShoulderMm,
@@ -400,7 +416,7 @@ const breakdownJoineryCommand: McpHandler = async (msg, { store, toId }) => {
         operationsSummary: s.operationsSummary,
         gcode: s.gcode,
       })),
-      buildGuideMarkdown: cutPlan.buildGuideMarkdown,
+      buildGuideMarkdown,
       warnings: outcome.warnings,
     };
   } catch (err) {
@@ -567,9 +583,10 @@ const buildMechanismCommand: McpHandler = async (msg, { store, toId }) => {
     ...(msg as MechanismRequest),
     ...(typeof msg.arborId === 'string' ? { arborId: String(toId ? toId(msg.arborId) : msg.arborId) } : {}),
   };
+  const prevNodes = store.sceneGraph.nodes ?? [];
   try {
     // Added to the scene as it is; see utils/buildMechanism.ts.
-    const built = buildMechanism(resolvedMsg, store.sceneGraph.nodes);
+    const built = buildMechanism(resolvedMsg, prevNodes);
     if ('error' in built) return { ok: false, error: built.error };
     // Added to the scene: its notes, fidelity and pictures stay, as for any body
     // added (replacing the scene dropped them). And the reply comes once the
@@ -577,6 +594,12 @@ const buildMechanismCommand: McpHandler = async (msg, { store, toId }) => {
     // background (collisionPending), and waiting on them pushed a build past
     // send_command's ten seconds although it had worked.
     const settled = await settleScene(built.nodes, { replacesScene: false, waitForColliders: false });
+    if (prevNodes.length === 0 && settled.ok) {
+      const latestScene = useStore.getState().sceneGraph;
+      const sceneForFraming = latestScene.nodes.length > 0 ? latestScene : { ...latestScene, nodes: built.nodes };
+      const patch = framingPatch(sceneForFraming, null);
+      if (patch.cameraOverride) useStore.setState(patch);
+    }
     // Said, not done quietly: a 0.5 mm lead built as 1 mm runs twice as far.
     const metricWarnings = Array.isArray(built.metrics.warnings)
       ? built.metrics.warnings.filter((w): w is string => typeof w === 'string')

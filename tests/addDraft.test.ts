@@ -1,7 +1,13 @@
 // Add Draft: the part tapered to pull straight up as it stands.
 import { describe, it, expect } from 'vitest';
+import fs from 'fs';
+import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
+import createOpenSCAD from '@lofcz/openscad-wasm';
 import { addDraftToBodies } from '../src/utils/castPrep';
-import type { SceneGraph } from '../src/types/scene';
+import { csgProgram } from '../src/utils/csg';
+import { indexScadTriangles } from '../src/utils/scadMesh';
+import { analyzeMesh, meshShells, weldByPosition } from '../src/utils/meshIntegrity';
+import type { SceneGraph, SceneNode } from '../src/types/scene';
 
 const boxScene = (): SceneGraph => ({
   nodes: [{
@@ -79,4 +85,68 @@ describe('Add Draft', () => {
     expect(scene.nodes[0].geoms[0].mass).toBeUndefined();
     expect(scene.nodes[0].geoms[0].density).toBe(8800);
   });
+
+  it('uses local feature height so a 65 mm tower does not pinch a Ø5.5 mm hole in a 13 mm base plate', async () => {
+    const wasm = fs.readFileSync('node_modules/@lofcz/openscad-wasm/openscad.wasm');
+    const mod = await WebAssembly.compile(wasm);
+    const inst = await createOpenSCAD({
+      noInitialRun: true,
+      print: () => {},
+      printErr: () => {},
+      instantiateWasm: (imports: WebAssembly.Imports, done: (i: WebAssembly.Instance, m: WebAssembly.Module) => void) => {
+        WebAssembly.instantiate(mod, imports).then((i) => done(i, mod));
+        return {};
+      },
+    });
+    const baseNode = {
+      id: 'plate_with_tower', name: 'plate_with_tower', type: 'body', pos: [0, 0, 0.0065], csgEnabled: true, children: [],
+      geoms: [
+        { name: 'plate', type: 'box', size: [0.04, 0.03, 0.0065], pos: [0, 0, 0] },
+        { name: 'tower', type: 'box', size: [0.01, 0.01, 0.027], pos: [-0.02, -0.01, 0.0315], csg: 'union' },
+        { name: 'm5_hole', type: 'cylinder', size: [0.00275, 0.016], pos: [0.018, 0.008, 0], csg: 'difference' },
+      ],
+    } as unknown as SceneNode;
+    inst.FS.writeFile('/in.scad', csgProgram(baseNode, { rounds: false, always: true })!);
+    inst.callMain(['/in.scad', '-o', '/out.stl', '--backend', 'Manifold', '--export-format', 'binstl']);
+    const stl = inst.FS.readFile('/out.stl');
+    const geom = new STLLoader().parse(stl.buffer.slice(stl.byteOffset, stl.byteOffset + stl.byteLength));
+    const compiled = indexScadTriangles(geom.attributes.position.array as Float32Array);
+
+    for (const deg of [2, 3]) {
+      const scene = {
+        nodes: [{
+          id: 'plate_with_tower', name: 'plate_with_tower', type: 'body', pos: [0, 0, 0.0065], joints: [], children: [],
+          geoms: [{
+            name: 'mesh', type: 'mesh', size: [1], rgba: [0.8, 0.5, 0.2, 1],
+            renderVertices: Array.from(compiled.renderVertices),
+            vertices: [],
+            faces: Array.from(compiled.faces),
+          }],
+        }],
+      } as unknown as SceneGraph;
+
+      const r = addDraftToBodies(scene, ['plate_with_tower'], deg, 'add');
+      expect(r.drafted.map((d) => d.id)).toEqual(['plate_with_tower']);
+      const draftedGeom = scene.nodes[0].geoms[0];
+      const rv = draftedGeom.renderVertices!;
+      const w = weldByPosition(rv, draftedGeom.faces!);
+      const integrity = analyzeMesh(w.positions, w.faces)!;
+      const shells = meshShells(w.positions, w.faces)!;
+      expect(integrity.closed).toBe(true);
+      expect(integrity.consistentlyWound).toBe(true);
+      expect(integrity.nonManifoldEdges).toBe(0);
+      expect(integrity.boundaryEdges).toBe(0);
+      expect(integrity.volume).toBeGreaterThan(0);
+      expect(shells.shells).toBe(1);
+      expect(shells.pieces).toBe(1);
+
+      // Hole at local (0.018, 0.008) must stay open (> 4 mm diameter)
+      let minR = Infinity;
+      for (let i = 0; i < rv.length; i += 3) {
+        const rDist = Math.hypot(rv[i] - 0.018, rv[i + 1] - 0.008);
+        if (rDist < 0.004) minR = Math.min(minR, rDist);
+      }
+      expect(minR * 2000).toBeGreaterThan(4.0);
+    }
+  }, 30000);
 });

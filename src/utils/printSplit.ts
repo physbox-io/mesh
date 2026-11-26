@@ -632,11 +632,20 @@ interface Piece {
   pose: PoseEval;
   /** Outward normals of its cut faces, for the pose search. */
   cutDowns: Vec3[];
+  /** Number of topologically disconnected solid components in `m`. */
+  components: number;
+}
+
+function countComponents(m: Manifold): number {
+  const parts = m.decompose();
+  const count = parts.length;
+  deleteAll(parts);
+  return count;
 }
 
 function makePiece(m: Manifold, cutDowns: Vec3[], ctx: Ctx): Piece {
   const geo = geoOf(m);
-  return { m, geo, pose: bestPose(geo, cutDowns, ctx), cutDowns };
+  return { m, geo, pose: bestPose(geo, cutDowns, ctx), cutDowns, components: countComponents(m) };
 }
 
 const PERMS = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
@@ -763,9 +772,18 @@ function waistPlanes(piece: Piece, normals: Vec3[]): { n: Vec3; offset: number }
       let end = i;
       while (end + 1 < WAIST_SAMPLES && isNarrow(areas[end + 1])) end++;
       // Running out at the end of the piece is still a neck, a rod left standing
-      // out of a block, as long as it is more than a pointed tip.
+      // out of a block, as long as it is more than a pointed tip and actually
+      // steps up into a wider body rather than tapering smoothly like a gable
+      // roof or an oblique box corner.
       const atEnd = i === 0 || end === WAIST_SAMPLES - 1;
-      if (!atEnd || end - i >= MOST_TIP_SAMPLES) {
+      let isNeck = !atEnd;
+      if (atEnd && end - i >= MOST_TIP_SAMPLES) {
+        const outer = i === 0 ? areas[i] : areas[end];
+        const inner = i === 0 ? areas[end] : areas[i];
+        const wide = i === 0 ? areas[end + 1] : areas[i - 1];
+        isNeck = inner > 0 && outer >= 0.35 * inner && wide >= 2 * inner;
+      }
+      if (isNeck) {
         const ks = [(i + end) / 2];
         if (i > 0) ks.push(i);
         if (end < WAIST_SAMPLES - 1) ks.push(end);
@@ -799,7 +817,8 @@ function sectionsPast(piece: Piece, ctx: Ctx, depth = 0): number {
   }
   if (!c) return predictedSections(piece, ctx);
   try {
-    return sectionsPast(c.pos, ctx, depth + 1) + sectionsPast(c.neg, ctx, depth + 1) + (c.thin ? THIN_SEAM_SECTIONS : 0);
+    const waistCount = sectionsPast(c.pos, ctx, depth + 1) + sectionsPast(c.neg, ctx, depth + 1) + (c.thin ? THIN_SEAM_SECTIONS : 0);
+    return c.thin ? waistCount : Math.min(predictedSections(piece, ctx), waistCount);
   } finally {
     dropChoice(c);
   }
@@ -856,8 +875,10 @@ function tryCut(piece: Piece, n: Vec3, offset: number, ctx: Ctx, slender = false
     const sections = predictedSections(pos, ctx) + predictedSections(neg, ctx);
     const support = pos.pose.supportMm2 + neg.pose.supportMm2;
     const skewPenalty = isAxisAligned(n) ? 0 : 5e8;
+    const extraPieces = Math.max(0, pos.components + neg.components - (piece.components + 1));
+    const islandPenalty = Math.min(extraPieces, 2) * 2e8;
     const noRoomPenalty = Math.min(face.noRoom, 40) * 1e7;
-    const score = sections * 1e9 + (face.thin ? 1e12 : 0) + skewPenalty + noRoomPenalty + support + 0.25 * face.area;
+    const score = sections * 1e9 + (face.thin ? 1e12 : 0) + skewPenalty + islandPenalty + noRoomPenalty + support + 0.25 * face.area;
     transferred = true;
     return { n, offset, pos, neg, score, thin: face.thin };
   } finally {
@@ -1765,6 +1786,10 @@ export function splitForPrint(wasm: ManifoldToplevel, soups: ArrayLike<number>[]
 
     // --- Final poses, on the real geometry.
     const sections: SplitSection[] = final.map((m, s) => {
+      const components = countComponents(m);
+      if (components > 1) {
+        ctx.warnings.push(`Section ${s + 1} contains ${components} disconnected pieces (floating island); inspect or adjust the cut plane before printing.`);
+      }
       const geo = geoOf(m);
       const pose = bestPose(geo, leafInfo[s].cutDowns, ctx);
       const out = toMetres(m);

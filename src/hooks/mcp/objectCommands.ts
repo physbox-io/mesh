@@ -15,11 +15,11 @@ import { runMcpRepairMesh } from '../../utils/meshRepair';
 import { patternSurfaces } from '../../utils/facePatternPick';
 import { carryAcrossCut, knifeSoups, seamsAcross } from '../../utils/knife';
 import { splitSeams } from '../../utils/surfaceTexture';
-import { Vector3 } from 'three';
+import { Quaternion, Vector3 } from 'three';
 import { checkIncomingBody, normalizeAcousticFields } from '../../utils/incomingBodyCheck';
 import type { SceneNode, SceneGeom, SceneJoint, HardwarePartKind } from '../../types/scene';
 import type { RawNode } from '../../utils/sceneNodes';
-import { HARDWARE_PARTS, documentWorldMatrix } from '../../utils/hardwareParts';
+import { HARDWARE_PARTS, documentWorldMatrix, quietHardwarePart, sharedSeamPoint } from '../../utils/hardwareParts';
 import { withoutNulls } from '../../utils/withoutNulls';
 import { jointAxisWarnings } from '../../utils/jointAxisCheck';
 import {
@@ -795,6 +795,38 @@ export const objectCommands: McpCommands = {
       ? [findNodeInScene(store.sceneGraph.nodes, betweenPair[0]), findNodeInScene(store.sceneGraph.nodes, betweenPair[1])] as const
       : null;
     const bothExtrusions = !!(betweenNodes?.[0]?.hardwarePart?.kind === 'extrusion' && betweenNodes?.[1]?.hardwarePart?.kind === 'extrusion');
+    let betweenMountedTo: string | null = null;
+    let betweenOtherId: string | null = null;
+    let betweenMovingId: string | null = null;
+
+    /** Reparent a freshly added top-level hardware node as a rigid child of `hostId` at `worldPos`. */
+    const attachHardwareRigidlyTo = (partId: string, hostId: string, worldPos: number[], weldOtherId?: string) => {
+      const currentScene = useStore.getState().sceneGraph;
+      const cloned = structuredClone(currentScene);
+      const topIdx = cloned.nodes.findIndex((n) => n.id === partId);
+      const hostNode = findNodeInScene(cloned.nodes, hostId);
+      if (topIdx < 0 || !hostNode) return;
+      const [partNode] = cloned.nodes.splice(topIdx, 1);
+      const mHost = documentWorldMatrix(currentScene, hostId);
+      if (mHost) {
+        const invHost = mHost.clone().invert();
+        const localPos = new Vector3(worldPos[0], worldPos[1], worldPos[2]).applyMatrix4(invHost);
+        const hostQuat = new Quaternion().setFromRotationMatrix(mHost).invert();
+        partNode.pos = [localPos.x, localPos.y, localPos.z].map((v) => +v.toFixed(7));
+        partNode.quat = [hostQuat.w, hostQuat.x, hostQuat.y, hostQuat.z].map((v) => +v.toFixed(9));
+      } else {
+        partNode.pos = [...worldPos];
+      }
+      partNode.joints = [];
+      quietHardwarePart(partNode);
+      if (weldOtherId) {
+        partNode.weldTargetId = weldOtherId;
+        partNode.weldRigid = true;
+        if (partNode.hardwarePart) partNode.hardwarePart.fastens = weldOtherId;
+      }
+      hostNode.children = [...(hostNode.children || []), partNode];
+      useStore.setState({ sceneGraph: cloned, selectedNodeId: partId });
+    };
 
     if (strictJoinKind || (kind === 'corner_bracket' && bothExtrusions)) {
       if (!betweenPair) {
@@ -808,19 +840,32 @@ export const objectCommands: McpCommands = {
       if (!betweenNodes?.[0]) return { ok: false, error: `No object with id '${betweenPair[0]}'` };
       if (!betweenNodes?.[1]) return { ok: false, error: `No object with id '${betweenPair[1]}'` };
       const placed = isFiniteVec3(at);
-      let pos: number[];
-      if (placed) {
-        pos = at.map((v) => v / 1000);
-      } else {
-        const mA = documentWorldMatrix(store.sceneGraph, betweenNodes[0].id);
-        const mB = documentWorldMatrix(store.sceneGraph, betweenNodes[1].id);
-        const pA = mA ? new Vector3().setFromMatrixPosition(mA) : new Vector3(...(betweenNodes[0].pos as [number, number, number]));
-        const pB = mB ? new Vector3().setFromMatrixPosition(mB) : new Vector3(...(betweenNodes[1].pos as [number, number, number]));
-        const mid = pA.add(pB).multiplyScalar(0.5);
-        pos = [mid.x, mid.y, mid.z];
-      }
+      const pos = placed
+        ? at.map((v) => v / 1000)
+        : sharedSeamPoint(store.sceneGraph, betweenNodes[0], betweenNodes[1]);
       const mountTarget = into ?? betweenNodes[0].id;
-      id = store.addHardwarePart(partKind, pos, mountTarget, { exact: true, mount: true });
+      const otherTarget = mountTarget === betweenNodes[1].id ? betweenNodes[0].id : betweenNodes[1].id;
+      id = store.addHardwarePart(partKind, pos, null, { exact: true, mount: false });
+      if (id) {
+        attachHardwareRigidlyTo(id, mountTarget, pos, otherTarget);
+        betweenMountedTo = mountTarget;
+        betweenOtherId = otherTarget;
+      }
+    } else if ((kind === 'butt_hinge' || kind === 'hasp_latch') && betweenPair) {
+      if (!betweenNodes?.[0]) return { ok: false, error: `No object with id '${betweenPair[0]}'` };
+      if (!betweenNodes?.[1]) return { ok: false, error: `No object with id '${betweenPair[1]}'` };
+      const placed = isFiniteVec3(at);
+      const pos = placed
+        ? at.map((v) => v / 1000)
+        : sharedSeamPoint(store.sceneGraph, betweenNodes[0], betweenNodes[1]);
+      const fixedTarget = into ?? betweenNodes[0].id;
+      const movingTarget = betweenNodes[1].id;
+      id = store.addHardwarePart(partKind, pos, null, { exact: true, mount: false });
+      if (id) {
+        attachHardwareRigidlyTo(id, fixedTarget, pos);
+        betweenMountedTo = fixedTarget;
+        betweenMovingId = movingTarget;
+      }
     } else if (kind === 'vslot_carriage') {
       if (!into) return { ok: false, error: 'A V-slot carriage runs on a profile: give its id as into' };
       const placed = store.addCarriage(into);
@@ -884,7 +929,18 @@ export const objectCommands: McpCommands = {
         ...(typeof washer === 'boolean' ? { washer } : {}),
       });
     }
-    if (fixTo) {
+    if (betweenMovingId) {
+      const currentScene = useStore.getState().sceneGraph;
+      const cloned = structuredClone(currentScene);
+      const added = findNodeInScene(cloned.nodes, id);
+      const piece = added && movingPieceOf(added);
+      if (piece) {
+        piece.weldTargetId = betweenMovingId;
+        piece.weldRigid = true;
+        useStore.setState({ sceneGraph: cloned });
+      }
+    }
+    if (fixTo && fixTo !== betweenMovingId) {
       const added = findNodeInScene(useStore.getState().sceneGraph.nodes, id);
       const piece = added && movingPieceOf(added);
       const why = piece ? useStore.getState().fixToPiece(piece.id, fixTo) : `A ${info.label.toLowerCase()} has no moving piece to fix a body to`;
@@ -892,13 +948,16 @@ export const objectCommands: McpCommands = {
     }
     await compileCsgNodes(true);
     await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
-    const part = findNodeInScene(useStore.getState().sceneGraph.nodes, id);
+    const finalScene = useStore.getState().sceneGraph;
+    const part = findNodeInScene(finalScene.nodes, id);
     const spec = part?.hardwarePart;
     if (!part || !spec) return { ok: false, error: 'The part could not be added' };
     if (wasEmpty) {
-      const patch = framingPatch(useStore.getState().sceneGraph, null);
+      const patch = framingPatch(finalScene, null);
       if (patch.cameraOverride) useStore.setState(patch);
     }
+    const worldMat = documentWorldMatrix(finalScene, part.id);
+    const worldPos = worldMat ? new Vector3().setFromMatrixPosition(worldMat).toArray() : part.pos;
     const innerPiece = part.children.find((c) => c.hardwarePart?.piece === 'inner');
     const innerKey = spec.kind === 'stepper'
       ? 'shaftId'
@@ -913,11 +972,16 @@ export const objectCommands: McpCommands = {
       ...(spec.washer ? { washer: true } : {}),
       ...(spec.seat ? { seatedIn: spec.seat === 'bore' ? 'bearing bore' : spec.seat } : {}),
       ...(spec.fastens ? { fastens: spec.fastens } : {}),
+      ...(betweenMountedTo ? { mountedTo: betweenMountedTo } : {}),
+      ...(betweenMovingId ? { fixedTo: betweenMovingId } : {}),
+      ...(betweenMountedTo && (betweenMovingId || betweenOtherId)
+        ? { between: [betweenMountedTo, betweenMovingId ?? betweenOtherId] }
+        : {}),
       ...(part.weldTargetId ? { weldedTo: part.weldTargetId } : {}),
       ...(innerPiece ? { [innerKey]: innerPiece.id } : {}),
       ...(part.children.some((c) => c.hardwarePart?.piece === 'carriage')
         ? { carriageId: part.children.find((c) => c.hardwarePart?.piece === 'carriage')!.id } : {}),
-      posMm: part.pos.map((v) => Math.round(v * 1e6) / 1000),
+      posMm: worldPos.map((v) => Math.round(v * 1e6) / 1000),
       ...(spec.kind === 'oring' && into && spec.seat ? { sealCheck: sealCheckFor(useStore.getState().sceneGraph, into, spec.seat) } : {}),
     };
   },

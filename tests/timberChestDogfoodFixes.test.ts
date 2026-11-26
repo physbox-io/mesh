@@ -251,4 +251,90 @@ describe('Timber Breakdown dogfooding regression fixes', () => {
     expect(cutPlan.buildGuideMarkdown).not.toContain('Tabletop Plank');
     expect(cutPlan.buildGuideMarkdown).not.toContain('Z-Clip');
   });
+
+  it('4a. targets the full wood assembly (and returns targetedIds) when body_id and with_ids are omitted on a multi-board scene', async () => {
+    if (typeof globalThis.navigator === 'undefined') {
+      vi.stubGlobal('navigator', { hardwareConcurrency: 2 });
+    }
+    const { partBuildCommands } = await import('../src/hooks/mcp/partBuildCommands');
+    const { scene: nestedScene } = build15BoardStorageChestScene(true);
+    // Flatten into top-level boards + top-level metal hardware, with selectedNodeId pointing at a single board.
+    const root = nestedScene.nodes[0];
+    const flatNodes: SceneNode[] = [
+      { ...root, children: [] },
+      ...root.children.map((c) => ({
+        ...c,
+        pos: [c.pos[0], c.pos[1], c.pos[2] + root.pos[2]],
+      })),
+    ];
+
+    const res = (await partBuildCommands.TIMBER_BREAKDOWN(
+      { mode: 'auto', board_thickness_mm: 19 },
+      {
+        store: {
+          sceneGraph: { nodes: flatNodes },
+          selectedNodeId: 'lid_batten_right',
+          cncBed: { widthMm: 300, depthMm: 300, heightMm: 60 },
+        } as never,
+      },
+    )) as { ok: boolean; mode?: string; targetedIds?: string[]; planks?: { id: string }[] };
+
+    expect(res.ok).toBe(true);
+    expect(res.targetedIds).toBeDefined();
+    expect(res.targetedIds!.length).toBe(15);
+    expect(res.targetedIds).toContain('bottom_panel');
+    expect(res.targetedIds).toContain('front_panel');
+    expect(res.targetedIds).toContain('lid_batten_right');
+    expect(res.targetedIds).not.toContain('steel_bracket_fl');
+    expect(res.targetedIds).not.toContain('brass_hasp');
+    expect((res.planks?.length ?? 0)).toBeGreaterThanOrEqual(15);
+  });
+
+  it('4b. labels narrow (<=35 mm) vertical corner cleats in enclosed casework as Corner_Cleat_* (role: cleat) and omits Corner Leg Orientation Map', async () => {
+    if (typeof globalThis.navigator === 'undefined') {
+      vi.stubGlobal('navigator', { hardwareConcurrency: 2 });
+    }
+    const { partBuildCommands } = await import('../src/hooks/mcp/partBuildCommands');
+    const caseNodes: SceneNode[] = [
+      makeBoxNode('bottom_panel', 'bottom_panel', [0, 0, 9.5], [600, 360, 19], { density: 650 }),
+      makeBoxNode('front_panel', 'front_panel', [0, -170.5, 194], [600, 19, 350], { density: 650 }),
+      makeBoxNode('back_panel', 'back_panel', [0, 170.5, 194], [600, 19, 350], { density: 650 }),
+      makeBoxNode('left_panel', 'left_panel', [-290.5, 0, 194], [19, 322, 350], { density: 650 }),
+      makeBoxNode('right_panel', 'right_panel', [290.5, 0, 194], [19, 322, 350], { density: 650 }),
+      // 4 narrow 25x25 mm internal vertical corner cleats
+      makeBoxNode('cleat_fl', 'cleat_fl', [-268.5, -148.5, 194], [25, 25, 330], { density: 650 }),
+      makeBoxNode('cleat_fr', 'cleat_fr', [268.5, -148.5, 194], [25, 25, 330], { density: 650 }),
+      makeBoxNode('cleat_bl', 'cleat_bl', [-268.5, 148.5, 194], [25, 25, 330], { density: 650 }),
+      makeBoxNode('cleat_br', 'cleat_br', [268.5, 148.5, 194], [25, 25, 330], { density: 650 }),
+    ];
+
+    const res = (await partBuildCommands.TIMBER_BREAKDOWN(
+      { mode: 'frame', joint_mode: 'dado' },
+      {
+        store: {
+          sceneGraph: { nodes: caseNodes },
+          selectedNodeId: null,
+          cncBed: { widthMm: 300, depthMm: 300, heightMm: 60 },
+        } as never,
+      },
+    )) as {
+      ok: boolean;
+      targetedIds?: string[];
+      parts?: { id: string; role: string; title: string; mortiseCount: number }[];
+      buildGuideMarkdown?: string;
+    };
+
+    expect(res.ok).toBe(true);
+    expect(res.targetedIds?.length).toBe(9);
+    const cleats = (res.parts ?? []).filter((p) => p.role === 'cleat');
+    expect(cleats.length).toBe(4);
+    expect(cleats.map((c) => c.id).sort()).toEqual([
+      'Corner_Cleat_BL',
+      'Corner_Cleat_BR',
+      'Corner_Cleat_FL',
+      'Corner_Cleat_FR',
+    ]);
+    expect((res.parts ?? []).some((p) => p.id.startsWith('Leg_') || p.role === 'leg')).toBe(false);
+    expect(res.buildGuideMarkdown).not.toContain('Corner Leg Orientation Map');
+  });
 });

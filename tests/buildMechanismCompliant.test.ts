@@ -13,6 +13,7 @@ vi.mock('../src/hooks/mcp/settleScene', () => ({
 }));
 
 import { partBuildCommands } from '../src/hooks/mcp/partBuildCommands';
+import { useStore } from '../src/store/useStore';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 let mj: any;
@@ -214,5 +215,49 @@ describe('buildMechanism compliant flexure families', () => {
     expect(res.metrics.parasiticShiftMm).toBeGreaterThan(0);
     expect(res.metrics.warnings.some((w: string) => w.includes('PLA'))).toBe(true);
     expect(res.warnings.some((w: string) => w.includes('PLA'))).toBe(true);
+  });
+
+  it('auto-frames the camera via framingPatch when BUILD_MECHANISM adds to a previously empty scene', async () => {
+    useStore.setState({ sceneGraph: { nodes: [] }, cameraOverride: null });
+
+    const resEmpty = (await partBuildCommands.BUILD_MECHANISM(
+      {
+        family: 'parallel_flexure',
+        filament: 'petg',
+        idPrefix: 'autoframe_stage',
+      },
+      { store: { sceneGraph: { nodes: [] as SceneNode[] } } } as any,
+    )) as Record<string, any>;
+
+    expect(resEmpty.ok).toBe(true);
+    const camAfterEmpty = useStore.getState().cameraOverride;
+    expect(camAfterEmpty).not.toBeNull();
+    expect(camAfterEmpty?.position).toHaveLength(3);
+    expect(camAfterEmpty?.target).toHaveLength(3);
+
+    // When the scene already has a body, BUILD_MECHANISM must not overwrite the camera.
+    const sentinel = { position: [1.23, 4.56, 7.89] as [number, number, number], target: [0, 0, 0] as [number, number, number] };
+    const existingNode: SceneNode = {
+      id: 'existing_body',
+      name: 'existing_body',
+      type: 'body',
+      pos: [0, 0, 0.05],
+      geoms: [{ name: 'b', type: 'box', size: [0.05, 0.05, 0.05], mass: 0.2, dynamic: true }],
+      joints: [],
+      children: [],
+    };
+    useStore.setState({ sceneGraph: { nodes: [existingNode] }, cameraOverride: sentinel });
+
+    const resNonEmpty = (await partBuildCommands.BUILD_MECHANISM(
+      {
+        family: 'cantilever_pawl',
+        filament: 'petg',
+        idPrefix: 'nonempty_pawl',
+      },
+      { store: { sceneGraph: { nodes: [existingNode] } } } as any,
+    )) as Record<string, any>;
+
+    expect(resNonEmpty.ok).toBe(true);
+    expect(useStore.getState().cameraOverride).toEqual(sentinel);
   });
 });

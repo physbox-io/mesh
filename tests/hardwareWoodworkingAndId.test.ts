@@ -275,7 +275,8 @@ describe('ADD_HARDWARE user-supplied id, woodworking kinds, and timber corner_br
     expect(mounted.size).toBe('30');
     expect(mounted.weldedTo).toBe('panel_left');
 
-    // 3. Given `between` two timber panels (non-extrusions): succeeds without extrusion error.
+    // 3. Given `between` two timber panels (non-extrusions): succeeds without extrusion error,
+    // mounts rigidly to panel_left (joints: []) and welds to panel_back.
     const betweenTimber = await callAddHardware({
       partId: 'bracket_corner',
       kind: 'corner_bracket',
@@ -284,8 +285,131 @@ describe('ADD_HARDWARE user-supplied id, woodworking kinds, and timber corner_br
     });
     expect(betweenTimber.ok).toBe(true);
     expect(betweenTimber.id).toBe('bracket_corner');
-    expect(betweenTimber.weldedTo).toBe('panel_left');
+    expect(betweenTimber.mountedTo).toBe('panel_left');
+    expect(betweenTimber.weldedTo).toBe('panel_back');
+    expect(betweenTimber.between).toEqual(['panel_left', 'panel_back']);
     expect(betweenTimber.posMm).toEqual([-75, -75, 100]);
+    const bracketNode = find('bracket_corner')!;
+    expect(bracketNode.joints).toEqual([]);
+    expect(bracketNode.weldTargetId).toBe('panel_back');
+    expect(find('panel_left')!.children.some((c) => c.id === 'bracket_corner')).toBe(true);
+  });
+
+  it('places timber corner_bracket with between:[bodyA, bodyB] at the shared AABB seam (not mid-air) and welds both bodies', async () => {
+    const makeRail = (id: string, posMm: [number, number, number], sizeMm: [number, number, number]): SceneNode => ({
+      id,
+      name: id,
+      type: 'body',
+      pos: [posMm[0] / 1000, posMm[1] / 1000, posMm[2] / 1000],
+      geoms: [{ name: `${id}_box`, type: 'box', size: [sizeMm[0] / 2000, sizeMm[1] / 2000, sizeMm[2] / 2000], mass: 0.5, dynamic: true } as SceneGeom],
+      joints: [],
+      children: [],
+    });
+    useStore.getState().updateScene({
+      nodes: [
+        makeRail('plinth_front', [0, -160.5, 22.5], [740, 19, 45]),
+        makeRail('plinth_left', [-360.5, 0, 22.5], [19, 302, 45]),
+      ],
+    });
+
+    const res = await callAddHardware({
+      partId: 'plinth_bracket_fl',
+      kind: 'corner_bracket',
+      size: '20',
+      between: ['plinth_front', 'plinth_left'],
+    });
+    expect(res.ok).toBe(true);
+    // Exact butt-joint seam between plinth_front and plinth_left (NOT body-center midpoint [-180.25, -80.25, 22.5]).
+    expect(res.posMm[0]).toBeCloseTo(-360.5, 2);
+    expect(res.posMm[1]).toBeCloseTo(-151, 2);
+    expect(res.posMm[2]).toBeCloseTo(22.5, 2);
+    expect(res.mountedTo).toBe('plinth_front');
+    expect(res.weldedTo).toBe('plinth_left');
+
+    const bracket = find('plinth_bracket_fl')!;
+    expect(bracket.joints).toEqual([]);
+    expect(bracket.weldTargetId).toBe('plinth_left');
+    expect(bracket.weldRigid).toBe(true);
+    expect(find('plinth_front')!.children.some((c) => c.id === 'plinth_bracket_fl')).toBe(true);
+
+    const xml = compileToMJCF(useStore.getState().sceneGraph, -9.81, 1, 0, 0, 0, 0);
+    expect(xml).toMatch(/<weld[^>]*body1="20 corner bracket"[^>]*body2="plinth_left"/);
+  });
+
+  it('wires butt_hinge and hasp_latch with between:[fixedBody, movingBody] onto the shared seam and welds both bodies', async () => {
+    const makePanel = (id: string, posMm: [number, number, number], sizeMm: [number, number, number]): SceneNode => ({
+      id,
+      name: id,
+      type: 'body',
+      pos: [posMm[0] / 1000, posMm[1] / 1000, posMm[2] / 1000],
+      geoms: [{ name: `${id}_box`, type: 'box', size: [sizeMm[0] / 2000, sizeMm[1] / 2000, sizeMm[2] / 2000], mass: 1.0, dynamic: true } as SceneGeom],
+      joints: [],
+      children: [],
+    });
+    useStore.getState().updateScene({
+      nodes: [
+        makePanel('back_panel', [0, 190.5, 220], [800, 19, 350]),
+        makePanel('front_panel', [0, -190.5, 220], [800, 19, 350]),
+        makePanel('lid_panel', [0, 0, 404.5], [812, 412, 19]),
+      ],
+    });
+
+    // 1. butt_hinge without `at`: auto-computes shared seam [0, 190.5, 395].
+    const hinge1 = await callAddHardware({
+      partId: 'rear_hinge_l',
+      kind: 'butt_hinge',
+      size: '75mm',
+      between: ['back_panel', 'lid_panel'],
+    });
+    expect(hinge1.ok).toBe(true);
+    expect(hinge1.mountedTo).toBe('back_panel');
+    expect(hinge1.fixedTo).toBe('lid_panel');
+    expect(hinge1.between).toEqual(['back_panel', 'lid_panel']);
+    expect(hinge1.posMm[0]).toBeCloseTo(0, 2);
+    expect(hinge1.posMm[1]).toBeCloseTo(190.5, 2);
+    expect(hinge1.posMm[2]).toBeCloseTo(395, 2);
+
+    const h1Node = find('rear_hinge_l')!;
+    expect(h1Node.joints).toEqual([]);
+    expect(find('back_panel')!.children.some((c) => c.id === 'rear_hinge_l')).toBe(true);
+    const h1Leaf = find('rear_hinge_l_leaf_b')!;
+    expect(h1Leaf.weldTargetId).toBe('lid_panel');
+    expect(h1Leaf.weldRigid).toBe(true);
+
+    // 2. Second butt_hinge on the same lid with explicit `at` does not conflict.
+    const hinge2 = await callAddHardware({
+      partId: 'rear_hinge_r',
+      kind: 'butt_hinge',
+      size: '75mm',
+      between: ['back_panel', 'lid_panel'],
+      at: [250, 190.5, 395],
+    });
+    expect(hinge2.ok).toBe(true);
+    expect(hinge2.posMm[0]).toBeCloseTo(250, 2);
+    expect(find('rear_hinge_r_leaf_b')?.weldTargetId).toBe('lid_panel');
+
+    // 3. hasp_latch with between:[front_panel, lid_panel] without `at`: auto seam [0, -190.5, 395].
+    const hasp = await callAddHardware({
+      partId: 'chest_hasp',
+      kind: 'hasp_latch',
+      size: '75mm',
+      between: ['front_panel', 'lid_panel'],
+    });
+    expect(hasp.ok).toBe(true);
+    expect(hasp.mountedTo).toBe('front_panel');
+    expect(hasp.fixedTo).toBe('lid_panel');
+    expect(hasp.posMm[0]).toBeCloseTo(0, 2);
+    expect(hasp.posMm[1]).toBeCloseTo(-190.5, 2);
+    expect(hasp.posMm[2]).toBeCloseTo(395, 2);
+    expect(find('chest_hasp')!.joints).toEqual([]);
+    expect(find('front_panel')!.children.some((c) => c.id === 'chest_hasp')).toBe(true);
+    expect(find('chest_hasp_strap')!.weldTargetId).toBe('lid_panel');
+    expect(find('chest_hasp_strap')!.weldRigid).toBe(true);
+
+    const xml = compileToMJCF(useStore.getState().sceneGraph, -9.81, 1, 0, 0, 0, 0);
+    expect(xml).toMatch(/<weld[^>]*body1="75mm butt hinge moving leaf"[^>]*body2="lid_panel"/);
+    expect(xml).toMatch(/<weld[^>]*body1="75mm butt hinge moving leaf_2"[^>]*body2="lid_panel"/);
+    expect(xml).toMatch(/<weld[^>]*body1="75mm hasp latch drop strap"[^>]*body2="lid_panel"/);
   });
 
   it('seats wood_screw and screw into countersink cut groups with contacts disabled', async () => {

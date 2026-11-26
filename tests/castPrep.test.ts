@@ -7,7 +7,7 @@ import { findFeatureEdges } from '../src/utils/featureEdges';
 import { relaxFacetedCurveSetbacks } from '../src/utils/edgeRoundBase';
 import { csgProgram } from '../src/utils/csg';
 import { indexScadTriangles } from '../src/utils/scadMesh';
-import { analyzeMesh, weldByPosition } from '../src/utils/meshIntegrity';
+import { analyzeMesh, meshShells, weldByPosition } from '../src/utils/meshIntegrity';
 import { meshWatertightIssue, stripAddedCircleEdges } from '../src/utils/castPrepRunner';
 import {
   bakeDraftInto,
@@ -451,6 +451,131 @@ describe('cast prep watertightness with M5 counterbore holes', () => {
       expect(draftedIntegrity.nonManifoldEdges).toBe(0);
       expect(draftedIntegrity.boundaryEdges).toBe(0);
     }
+  }, 30000);
+
+  it('keeps M5 countersunk holes in a 13 mm base plate open (> 4 mm) and watertight when a 65 mm tall hook rises above the plate', async () => {
+    // Round 2 dogfooding repro: 13 mm shield backplate (Z in [0, 13] mm) with
+    // two Ø5.5 mm M5 countersunk holes plus a tall hook rising to Z = 65 mm.
+    const holeX = [-0.025, 0.025];
+    const plateNode = {
+      id: 'shield_plate', name: 'shield_plate', type: 'body', pos: [0, 0, 0.0065], csgEnabled: true, children: [],
+      geoms: [
+        // 13 mm base plate: Z in [-0.0065, +0.0065] local -> [0, 13] mm world
+        { name: 'plate', type: 'box', size: [0.05, 0.03, 0.0065], pos: [0, 0, 0] },
+        // Tall hook rising to Z = 65 mm world (local Z from +0.0045 to +0.0585, overlapping 2 mm into plate)
+        { name: 'hook', type: 'box', size: [0.01, 0.008, 0.027], pos: [0, -0.015, 0.0315], csg: 'union' },
+        // Two Ø5.5 mm M5 through-holes (R = 2.75 mm) + 90° countersinks (Z in [6, 13] mm)
+        ...holeX.flatMap((hx, i) => [
+          { name: `hole_${i}`, type: 'cylinder', size: [0.00275, 0.016], pos: [hx, 0.008, 0], csg: 'difference' },
+          { name: `csink_${i}`, type: 'cylinder', size: [0.005, 0.004], pos: [hx, 0.008, 0.0055], csg: 'difference' },
+        ]),
+      ],
+    } as unknown as SceneNode;
+
+    const baseMesh = await compileScadNode(csgProgram(plateNode, { rounds: false, always: true })!);
+    const baseW = weldByPosition(baseMesh.renderVertices, baseMesh.faces);
+    expect(analyzeMesh(baseW.positions, baseW.faces)?.closed).toBe(true);
+
+    // Measure minimum radius around each hole centre (hx, 0.008) for vertices within 4 mm of the hole axis.
+    const minHoleDiameterMm = (positions: ArrayLike<number>, hx: number, hy: number): number => {
+      let minR = Infinity;
+      for (let i = 0; i < positions.length; i += 3) {
+        const z = positions[i + 2];
+        if (z < -1e-4 || z > 0.0131) continue;
+        const r = Math.hypot(positions[i] - hx, positions[i + 1] - hy);
+        if (r < 0.0042) minR = Math.min(minR, r);
+      }
+      return minR * 2000;
+    };
+
+    const toWorldTris = (rv: ArrayLike<number>, faces: ArrayLike<number>) => {
+      const tris: number[] = [];
+      for (let i = 0; i < faces.length; i++) {
+        const vi = faces[i] * 3;
+        tris.push(rv[vi] + plateNode.pos![0], rv[vi + 1] + plateNode.pos![1], rv[vi + 2] + plateNode.pos![2]);
+      }
+      return tris;
+    };
+
+    // Test 2° and 3° draft on the base mesh
+    const baseTris = toWorldTris(baseMesh.renderVertices, baseMesh.faces);
+    for (const deg of [2, 3]) {
+      const drafted = draftTriangles(baseTris, { deg, mode: 'add', partingZ: 0 });
+      const w = weldByPosition(drafted.positions, drafted.faces);
+      const integrity = analyzeMesh(w.positions, w.faces)!;
+      const shells = meshShells(w.positions, w.faces)!;
+      expect(integrity.closed).toBe(true);
+      expect(integrity.consistentlyWound).toBe(true);
+      expect(integrity.boundaryEdges).toBe(0);
+      expect(integrity.nonManifoldEdges).toBe(0);
+      expect(integrity.degenerateTriangles).toBe(0);
+      expect(integrity.volume).toBeGreaterThan(0);
+      expect(shells.shells).toBe(1);
+      expect(shells.pieces).toBe(1);
+      expect(shells.voids).toBe(0);
+      for (const hx of holeX) {
+        expect(minHoleDiameterMm(drafted.positions, hx, 0.008)).toBeGreaterThan(4.0);
+      }
+    }
+
+    // Also test full cast-prep pipeline: edges=true + 3° sand draft
+    const found = findFeatureEdges(baseMesh.renderVertices, baseMesh.faces, { up: [0, 0, 1] });
+    relaxFacetedCurveSetbacks(found, baseMesh.renderVertices, baseMesh.faces);
+    const world = new THREE.Matrix4().makeTranslation(plateNode.pos![0], plateNode.pos![1], plateNode.pos![2]);
+    const plan = planEdgeRounds(found.edges, 0.013, 1, [], (e) => e.edge.convex && edgeOnPlane(e, world, 0));
+    expect(plan.broken).toBeGreaterThan(0);
+
+    const roundedMesh = await compileScadNode(csgProgram({ ...plateNode, edgeRounds: plan.features })!);
+    const roundedDrafted = draftTriangles(
+      toWorldTris(roundedMesh.renderVertices, roundedMesh.faces),
+      { deg: 3, mode: 'add', partingZ: 0 },
+    );
+    const rw = weldByPosition(roundedDrafted.positions, roundedDrafted.faces);
+    const rIntegrity = analyzeMesh(rw.positions, rw.faces)!;
+    const rShells = meshShells(rw.positions, rw.faces)!;
+    expect(rIntegrity.closed).toBe(true);
+    expect(rIntegrity.consistentlyWound).toBe(true);
+    expect(rIntegrity.nonManifoldEdges).toBe(0);
+    expect(rIntegrity.boundaryEdges).toBe(0);
+    expect(rShells.shells).toBe(1);
+    expect(rShells.pieces).toBe(1);
+    for (const hx of holeX) {
+      expect(minHoleDiameterMm(roundedDrafted.positions, hx, 0.008)).toBeGreaterThan(4.0);
+    }
+  }, 30000);
+
+  it('prevents hole inversion even when local draft alone would exceed the hole radius', async () => {
+    // Deep Ø4 mm hole (R = 2 mm) in a 50 mm tall block drafted at 5°:
+    // 50 * tan(5°) = 4.37 mm > 2 mm radius. The orientation guard must prevent inversion.
+    const deepBlock = {
+      id: 'deep_hole', name: 'deep_hole', type: 'body', pos: [0, 0, 0.025], csgEnabled: true, children: [],
+      geoms: [
+        { name: 'block', type: 'box', size: [0.015, 0.015, 0.025], pos: [0, 0, 0] },
+        { name: 'hole', type: 'cylinder', size: [0.002, 0.03], pos: [0, 0, 0], csg: 'difference' },
+      ],
+    } as unknown as SceneNode;
+    const mesh = await compileScadNode(csgProgram(deepBlock, { rounds: false, always: true })!);
+    const tris: number[] = [];
+    for (let i = 0; i < mesh.faces.length; i++) {
+      const vi = mesh.faces[i] * 3;
+      tris.push(mesh.renderVertices[vi], mesh.renderVertices[vi + 1], mesh.renderVertices[vi + 2] + 0.025);
+    }
+    const drafted = draftTriangles(tris, { deg: 5, mode: 'add', partingZ: 0 });
+    const w = weldByPosition(drafted.positions, drafted.faces);
+    const integrity = analyzeMesh(w.positions, w.faces)!;
+    const shells = meshShells(w.positions, w.faces)!;
+    expect(integrity.closed).toBe(true);
+    expect(integrity.consistentlyWound).toBe(true);
+    expect(integrity.volume).toBeGreaterThan(0);
+    expect(shells.shells).toBe(1);
+    expect(shells.pieces).toBe(1);
+    // Hole stays open (radius > 0)
+    let minR = Infinity;
+    for (let i = 0; i < drafted.positions.length; i += 3) {
+      const r = Math.hypot(drafted.positions[i], drafted.positions[i + 1]);
+      if (r < 0.004) minR = Math.min(minR, r);
+    }
+    expect(minR).toBeGreaterThan(0.0001);
   }, 30000);
 
   it('meshWatertightIssue detects open/non-manifold CSG meshes and stripAddedCircleEdges drops only newly added rims', () => {

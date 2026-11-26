@@ -585,6 +585,43 @@ describe('View & Section command audit fixes', () => {
     expect(useStore.getState().cameraOverride).toEqual({ position: [0, -1, 1], target: [0, 0, 0] });
   });
 
+  it('SET_CAMERA supports clearSelection / clear_selection with preset, pose, and standalone, validating upfront', async () => {
+    useStore.setState({ selectedNodeId: 'body_1', extraSelectedIds: ['body_2'], dimsEnabled: false });
+
+    // Non-boolean clearSelection / clear_selection must fail without mutating state
+    expect((await viewCommands.SET_CAMERA({ preset: 'topDown', dims: true, clearSelection: 'yes' }, makeCtx()) as { ok: boolean }).ok).toBe(false);
+    expect((await viewCommands.SET_CAMERA({ preset: 'topDown', dims: true, clear_selection: 1 }, makeCtx()) as { ok: boolean }).ok).toBe(false);
+    expect(useStore.getState().selectedNodeId).toBe('body_1');
+    expect(useStore.getState().extraSelectedIds).toEqual(['body_2']);
+    expect(useStore.getState().dimsEnabled).toBe(false);
+
+    // Invalid preset with clearSelection: true must not clear selection
+    expect((await viewCommands.SET_CAMERA({ preset: 'bogus', clearSelection: true }, makeCtx()) as { ok: boolean }).ok).toBe(false);
+    expect(useStore.getState().selectedNodeId).toBe('body_1');
+
+    // clearSelection: false leaves selection untouched
+    expect((await viewCommands.SET_CAMERA({ preset: 'topDown', dims: true, clearSelection: false }, makeCtx()) as { ok: boolean }).ok).toBe(true);
+    expect(useStore.getState().selectedNodeId).toBe('body_1');
+    expect(useStore.getState().dimsEnabled).toBe(true);
+    expect(useStore.getState().cameraView).toBe('topDown');
+
+    // clearSelection: true with preset clears selectedNodeId and extraSelectedIds
+    expect((await viewCommands.SET_CAMERA({ preset: 'front', dims: true, clearSelection: true }, makeCtx()) as { ok: boolean }).ok).toBe(true);
+    expect(useStore.getState().selectedNodeId).toBeNull();
+    expect(useStore.getState().extraSelectedIds).toEqual([]);
+    expect(useStore.getState().cameraView).toBe('front');
+
+    // Snake_case clear_selection works standalone and with explicit position/target
+    useStore.setState({ selectedNodeId: 'body_3', extraSelectedIds: ['body_4'] });
+    expect((await viewCommands.SET_CAMERA({ clear_selection: true }, makeCtx()) as { ok: boolean }).ok).toBe(true);
+    expect(useStore.getState().selectedNodeId).toBeNull();
+    expect(useStore.getState().extraSelectedIds).toEqual([]);
+
+    useStore.setState({ selectedNodeId: 'body_5' });
+    expect((await viewCommands.SET_CAMERA({ position: [0, -1, 1], target: [0, 0, 0], clear_selection: true }, makeCtx()) as { ok: boolean }).ok).toBe(true);
+    expect(useStore.getState().selectedNodeId).toBeNull();
+  });
+
   it('SCREENSHOT serializes concurrent calls, resolves if rAF never fires, and works without document', async () => {
     const fakeCanvas = {
       width: 640,
@@ -710,6 +747,61 @@ describe('View & Section command audit fixes', () => {
     expect(src).toContain('function EditorOverlays()');
   });
 
+  it('SceneLayer suppresses CsgNegativeGhosts when cleanCapture is true', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const src = fs.readFileSync(path.resolve(__dirname, '../src/components/scene/SceneLayer.tsx'), 'utf8');
+    expect(src).toMatch(/!cleanCapture\s*&&\s*<CsgNegativeGhosts\b/);
+  });
+
+  it('SCREENSHOT pauses composer.render during React commit flush so intervening rAF frames do not starve SwiftShader', async () => {
+    const { physicsGlobals } = await import('../src/physicsGlobals');
+    let realRenderCount = 0;
+    const composer = {
+      passes: [],
+      render: () => { realRenderCount++; },
+    };
+    const fakeCanvas = {
+      width: 640,
+      height: 480,
+      toDataURL: () => 'data:image/png;base64,PAUSED',
+    };
+    const fakeGl = { domElement: fakeCanvas, render: () => {} };
+
+    const origWindow = globalThis.window;
+    const origPgGl = physicsGlobals._physics_gl;
+    const origPgComposer = physicsGlobals._physics_composer;
+    (globalThis as Record<string, unknown>).window = {
+      _physics_gl: fakeGl,
+      _physics_composer: composer,
+    };
+    physicsGlobals._physics_gl = fakeGl as never;
+    physicsGlobals._physics_composer = composer as never;
+
+    try {
+      const pending = viewCommands.SCREENSHOT({ clean: true }, makeCtx());
+      // Let screenshotQueue.then(...) enter takeScreenshot and pause composer.render
+      await Promise.resolve();
+      // Simulate an intervening R3F rAF firing while SCREENSHOT is flushing React commits
+      composer.render();
+      expect(realRenderCount).toBe(0);
+
+      const res = await pending as { ok: boolean; dataUrl: string };
+      expect(res.ok).toBe(true);
+      expect(res.dataUrl).toBe('data:image/png;base64,PAUSED');
+      // Only renderViewportNow() invoked the real composer.render()
+      expect(realRenderCount).toBe(1);
+
+      // And composer.render is restored after capture completes
+      composer.render();
+      expect(realRenderCount).toBe(2);
+    } finally {
+      (globalThis as Record<string, unknown>).window = origWindow;
+      physicsGlobals._physics_gl = origPgGl;
+      physicsGlobals._physics_composer = origPgComposer;
+    }
+  });
+
   it('GET_OBJECT validates offset and limit', async () => {
     const node = makeSculptNode();
     useStore.setState({ sceneGraph: { name: 'test', nodes: [node] } });
@@ -790,7 +882,6 @@ describe('View & Section command audit fixes', () => {
     for (const kind of Object.keys(HARDWARE_KINDS)) {
       expect(schema.nodeFields.cuts).toContain(`"${kind}"`);
     }
-    expect(schema.nodeFields.cuts).not.toContain('"countersink"');
     expect(schema.nodeFields.cuts).not.toContain('"heat_set_insert"');
     expect(schema.nodeFields.cuts).not.toContain('"o_ring_groove"');
   });

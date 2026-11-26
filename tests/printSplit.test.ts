@@ -187,6 +187,99 @@ describe('splitForPrint — cutting', () => {
     expect(r.joints.some((j) => j.pins.length > 0)).toBe(true);
   });
 
+  it('splits a rectilinear 420x240x364 mm hollow dollhouse with pitched roof into 4 axis-aligned quadrants on a 256 mm bed', () => {
+    // 420 × 240 × 364 mm open-front dollhouse centered at X = 0, Y = 0, Z = [0, 364].
+    // Usable bed is 246 × 246 × 256 mm -> 2 axis-aligned cuts (X ≈ 0, Z ≈ 182) give 4 clean quadrants.
+    const floor1 = box(420, 240, 10, [-210, -120, 0]);
+    const backWall = box(420, 10, 240, [-210, 110, 10]);
+    const leftWall = box(10, 240, 240, [-210, -120, 10]);
+    const rightWall = box(10, 240, 240, [200, -120, 10]);
+    const midFloor = box(400, 230, 10, [-200, -120, 125]);
+    const atticFloor = box(400, 230, 10, [-200, -120, 240]);
+    const partition = box(10, 230, 230, [-5, -120, 10]);
+    // Pitched roof from Z = 250 to Z = 364 using Manifold extrude of a hollow gable profile.
+    const gableOuter = new wasm.CrossSection([[[-120, 250], [120, 250], [0, 364]]]);
+    const gableInner = new wasm.CrossSection([[[-104, 250], [104, 250], [0, 350]]]);
+    const roofShell2d = gableOuter.subtract(gableInner);
+    const roof = roofShell2d.extrude(420).rotate([90, 0, 90]).translate([-210, 0, 0]);
+    // Chimney off-center on the roof (asymmetry tilts principal axes of the convex hull).
+    const chimney = box(40, 40, 90, [110, 20, 274]);
+    const roofGm = roof.getMesh();
+    const roofSoup = new Float64Array(roofGm.triVerts.length * 3);
+    for (let i = 0; i < roofGm.triVerts.length; i++) {
+      const v = roofGm.triVerts[i] * roofGm.numProp;
+      roofSoup[i * 3] = roofGm.vertProperties[v] / 1000;
+      roofSoup[i * 3 + 1] = roofGm.vertProperties[v + 1] / 1000;
+      roofSoup[i * 3 + 2] = roofGm.vertProperties[v + 2] / 1000;
+    }
+    gableOuter.delete();
+    gableInner.delete();
+    roofShell2d.delete();
+    roof.delete();
+
+    const dollhouse = [floor1, backWall, leftWall, rightWall, midFloor, atticFloor, partition, roofSoup, chimney];
+    const r = ok(splitForPrint(wasm, dollhouse, {
+      bed: { widthMm: 256, depthMm: 256, heightMm: 256 },
+      joinery: { kind: 'dowel' },
+    }));
+
+    expect(r.sections).toHaveLength(4);
+    for (const s of r.sections) {
+      expect(s.fits).toBe(true);
+      expect(Math.min(...s.sizeMm)).toBeGreaterThanOrEqual(15);
+    }
+    for (const c of r.cuts) {
+      expect(Math.max(Math.abs(c.normal[0]), Math.abs(c.normal[1]), Math.abs(c.normal[2]))).toBeGreaterThan(0.999);
+    }
+    expect(r.joints.every((j) => j.pins.length > 0)).toBe(true);
+  });
+
+  it('nudges the cut plane away from creating a disconnected floating island through a handrail', () => {
+    // Tall frame (220 × 120 × 320 mm) with an interior balcony handrail whose horizontal top rail
+    // sits right at the midpoint Z = [155, 165] mm. A naive cut at Z = 160 slices through the rail
+    // and detaches a floating strip on the upper section; the plane search should nudge clear of it.
+    const base = box(220, 120, 15, [0, 0, 0]);
+    const leftCol = box(20, 120, 290, [0, 0, 15]);
+    const rightCol = box(20, 120, 290, [200, 0, 15]);
+    const topBar = box(220, 120, 15, [0, 0, 305]);
+    const balcony = box(180, 50, 10, [20, 0, 110]);
+    const postL = box(10, 10, 45, [50, 0, 120]);
+    const postR = box(10, 10, 45, [160, 0, 120]);
+    const handrail = box(120, 10, 10, [50, 0, 155]);
+
+    const r = ok(splitForPrint(wasm, [base, leftCol, rightCol, topBar, balcony, postL, postR, handrail], {
+      bed: { widthMm: 256, depthMm: 256, heightMm: 256 },
+      joinery: { kind: 'dowel' },
+    }));
+
+    expect(r.sections).toHaveLength(2);
+    for (const s of r.sections) {
+      const verts = new Float32Array(s.positions.length);
+      for (let i = 0; i < s.positions.length; i++) verts[i] = s.positions[i] * 1000;
+      const m = new wasm.Manifold(new wasm.Mesh({ numProp: 3, vertProperties: verts, triVerts: s.faces }));
+      const parts = m.decompose();
+      expect(parts.length).toBe(1);
+      for (const p of parts) p.delete();
+      m.delete();
+    }
+  });
+
+  it('emits a warning when a final split section inevitably contains disconnected pieces', () => {
+    // Tall U-frame (180 × 120 × 300 mm) on a 256 mm bed: only Z exceeds the bed, so any horizontal
+    // cut across both legs leaves two disconnected leg tops in the upper section.
+    const base = box(180, 120, 20, [0, 0, 0]);
+    const leftLeg = box(25, 120, 280, [0, 0, 20]);
+    const rightLeg = box(25, 120, 280, [155, 0, 20]);
+
+    const r = ok(splitForPrint(wasm, [base, leftLeg, rightLeg], {
+      bed: { widthMm: 256, depthMm: 256, heightMm: 256 },
+      joinery: { kind: 'dowel' },
+    }));
+
+    expect(r.sections).toHaveLength(2);
+    expect(r.warnings.some((w) => /disconnected pieces/i.test(w))).toBe(true);
+  });
+
   it('refuses something that is not a solid, and says why', () => {
     const open = box(50, 50, 50).slice(0, 9 * 10);
     // Ten of twelve triangles: two rims meeting at corners, not fillable as simple loops.

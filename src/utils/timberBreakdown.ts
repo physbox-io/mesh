@@ -235,7 +235,7 @@ function isNonWoodGeom(g: SceneGeom): boolean {
   return typeof g.density === 'number' && g.density > MAX_WOOD_DENSITY_KG_M3;
 }
 
-function isNonWoodNode(n: SceneNode): boolean {
+export function isNonWoodNode(n: SceneNode): boolean {
   if (isBoughtIn(n) || n.hardwareType) return true;
   if (typeof n.density === 'number' && n.density > MAX_WOOD_DENSITY_KG_M3) return true;
   if (n.deformMaterial && NON_WOOD_MATERIALS.has(n.deformMaterial)) return true;
@@ -1152,6 +1152,15 @@ export function extractTimberMembers(
     (item, idx) => prelimRoles[idx] === 'panel' && Math.abs(item.obb.axes[2][2]) < 0.5,
   ).length;
   const isCasework = prelimVertPanelCount >= 3 || (prelimVertPanelCount >= 2 && prelimLegCount < 2);
+  const isCornerCleat = new Set<number>();
+  if (isCasework) {
+    for (let i = 0; i < prelim.length; i++) {
+      if (prelimRoles[i] === 'leg' && prelim[i].obb.dimsMm[1] <= 35) {
+        prelimRoles[i] = 'rail';
+        isCornerCleat.add(i);
+      }
+    }
+  }
 
   // Assign semantic names (Leg_FL, Leg_FR, Leg_BL, Leg_BR, Apron_Front, etc.)
   let legCounter = 1;
@@ -1200,6 +1209,23 @@ export function extractTimberMembers(
       }
       legCounter++;
       void legCounter;
+    } else if (isCornerCleat.has(index)) {
+      const dx = obb.centerMm[0] - assemblyCenterMm[0];
+      const dy = obb.centerMm[1] - assemblyCenterMm[1];
+      const spanXY = Math.hypot(maxAll[0] - minAll[0], maxAll[1] - minAll[1]);
+      if (Math.hypot(dx, dy) < spanXY * 0.12) {
+        cornerTag = 'C';
+        id = uniqueId('Corner_Cleat_C');
+        title = `Center Cleat (${id})`;
+      } else {
+        const frontBack = dy <= 0 ? 'F' : 'B';
+        const leftRight = dx <= 0 ? 'L' : 'R';
+        cornerTag = `${frontBack}${leftRight}` as CornerTag;
+        id = uniqueId(`Corner_Cleat_${cornerTag}`);
+        const fbWord = frontBack === 'F' ? 'Front' : 'Back';
+        const lrWord = leftRight === 'L' ? 'Left' : 'Right';
+        title = `${fbWord}-${lrWord} Corner Cleat (${id})`;
+      }
     } else if (role === 'rail') {
       if (isCasework && parsedHint) {
         id = uniqueId(parsedHint.id);

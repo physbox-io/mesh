@@ -55,6 +55,11 @@ const VALID_HISTORY_INCLUDE = new Set(['bodies', 'joints', 'contacts', 'aero']);
 
 /** Serializes overlapping SCREENSHOT calls so temporary view toggles cannot corrupt each other. */
 let screenshotQueue: Promise<unknown> = Promise.resolve();
+let screenshotsInFlight = 0;
+
+/** Yields a single macrotask with a fresh deadline so overdue timers (like WORKING heartbeats) run first. */
+const yieldMacrotask = (): Promise<void> =>
+  new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 /**
  * Yields two macrotasks so React commits Zustand view-flag / clean-capture
@@ -63,8 +68,37 @@ let screenshotQueue: Promise<unknown> = Promise.resolve();
  * each under SwiftShader) right before `renderViewportNow()` renders again.
  */
 const flushReactCommit = (): Promise<void> =>
-  new Promise<void>((resolve) => setTimeout(resolve, 0))
-    .then(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+  yieldMacrotask().then(() => yieldMacrotask());
+
+/**
+ * Temporarily no-ops `composer.render` (or `gl.render` when no composer is
+ * active) while SCREENSHOT flushes React commits. Background V-HACD collider
+ * updates (`applyNodeColliders`), recompiles, and `clean: true` unmounts all
+ * call R3F's `invalidate()`, which can fire a 4–6 s SwiftShader `rAF` render
+ * right before `renderViewportNow()` renders again — pushing total blocking
+ * time past the 10 s MCP hub timeout. Pausing the renderer during the commit
+ * flush lets `useFrame` state updates run while skipping redundant GPU draws.
+ */
+function pauseRendererDuringFlush(composer: unknown, gl: unknown): () => void {
+  const restores: Array<() => void> = [];
+  const stub = (target: unknown) => {
+    if (!target || typeof target !== 'object') return;
+    const obj = target as { render?: unknown };
+    if (typeof obj.render !== 'function') return;
+    const hasOwn = Object.prototype.hasOwnProperty.call(obj, 'render');
+    const orig = obj.render;
+    obj.render = () => {};
+    restores.push(() => {
+      if (hasOwn) obj.render = orig;
+      else delete obj.render;
+    });
+  };
+  stub(composer);
+  if (!composer) stub(gl);
+  return () => {
+    for (const restore of restores) restore();
+  };
+}
 
 interface OutlineLikeEffect {
   selection: Iterable<unknown> & { clear: () => void; set: (values: unknown[]) => void };
@@ -111,10 +145,15 @@ function suppressComposerOutlines(composer: unknown): () => void {
   };
 }
 
-async function takeScreenshot(msg: Record<string, unknown>) {
+async function takeScreenshot(msg: Record<string, unknown>, waitedInQueue = false) {
   const win = getPhysicsWindow();
   const gl = win?._physics_gl;
   if (!gl || !gl.domElement) return { ok: false, error: 'Renderer not ready yet' };
+
+  const startMs = Date.now();
+  // If we waited behind an earlier screenshot, yield a fresh macrotask so any
+  // overdue MCP WORKING heartbeat timer runs before we start rendering.
+  if (waitedInQueue) await yieldMacrotask();
 
   const viewQuality = useViewQuality.getState();
   const before = {
@@ -139,14 +178,25 @@ async function takeScreenshot(msg: Record<string, unknown>) {
   if (overridden) apply(wanted);
   if (clean) useCapture.setState({ clean: true });
   let restoreOutlines: (() => void) | null = null;
+  let restoreRenderer: (() => void) | null = null;
   let dataUrl: string;
   try {
-    if (overridden || clean) await flushReactCommit();
+    if (overridden || clean) {
+      restoreRenderer = pauseRendererDuringFlush(win?._physics_composer, gl);
+      await flushReactCommit();
+    }
+    // If anything (e.g. a background V-HACD collider install or recompile)
+    // stalled the main thread during the flush, yield one fresh macrotask so
+    // useMCPBridge's 2 s WORKING heartbeat can fire before renderViewportNow().
+    if (Date.now() - startMs >= 250) await yieldMacrotask();
+    restoreRenderer?.();
+    restoreRenderer = null;
     if (clean) restoreOutlines = suppressComposerOutlines(win?._physics_composer);
     // Through the composer when there is one; see renderViewportNow.
     renderViewportNow();
     dataUrl = gl.domElement.toDataURL('image/png');
   } finally {
+    restoreRenderer?.();
     restoreOutlines?.();
     if (overridden) apply(before);
     if (clean) useCapture.setState({ clean: false });
@@ -223,20 +273,33 @@ export const viewCommands: McpCommands = {
     // (perspective) pose. Both position and target are in MuJoCo world
     // space, same convention as every other pos field in this API.
     // `dims` switches the Dims overlay with either form, or alone.
+    // `clearSelection` (or `clear_selection`) clears body selection so
+    // `dims: true` dimensions the whole scene instead of only the last-added body.
     // Validate ALL parameters before mutating store state.
     if (msg.dims !== undefined && typeof msg.dims !== 'boolean') {
       return { ok: false, error: 'dims must be true or false' };
     }
+    if (msg.clearSelection !== undefined && typeof msg.clearSelection !== 'boolean') {
+      return { ok: false, error: 'clearSelection must be true or false' };
+    }
+    if (msg.clear_selection !== undefined && typeof msg.clear_selection !== 'boolean') {
+      return { ok: false, error: 'clear_selection must be true or false' };
+    }
+    const clearSelectionOpt = msg.clearSelection !== undefined ? msg.clearSelection : msg.clear_selection;
+    const applyAux = () => {
+      if (msg.dims !== undefined) store.setDimsEnabled(msg.dims as boolean);
+      if (clearSelectionOpt === true) store.setSelectedNodeId(null);
+    };
     if (msg.preset !== undefined) {
       if (typeof msg.preset !== 'string' || !CAMERA_VIEWS.includes(msg.preset as CameraView)) {
         return { ok: false, error: `preset must be one of ${CAMERA_VIEWS.map((v) => `'${v}'`).join(', ')}` };
       }
-      if (msg.dims !== undefined) store.setDimsEnabled(msg.dims);
+      applyAux();
       store.setCameraView(msg.preset as CameraView);
       return { ok: true };
     }
-    if (msg.dims !== undefined && msg.position === undefined && msg.target === undefined) {
-      store.setDimsEnabled(msg.dims);
+    if ((msg.dims !== undefined || clearSelectionOpt !== undefined) && msg.position === undefined && msg.target === undefined) {
+      applyAux();
       return { ok: true };
     }
     if (!isFiniteVec3(msg.position)) {
@@ -250,7 +313,7 @@ export const viewCommands: McpCommands = {
     if (Math.hypot(position[0] - target[0], position[1] - target[1], position[2] - target[2]) < 1e-6) {
       return { ok: false, error: 'position and target must not be coincident' };
     }
-    if (msg.dims !== undefined) store.setDimsEnabled(msg.dims);
+    applyAux();
     store.setCameraOverride({ position, target });
     return { ok: true };
   },
@@ -604,8 +667,16 @@ export const viewCommands: McpCommands = {
     };
   },
   SCREENSHOT: async (msg) => {
-    const run = screenshotQueue.then(() => takeScreenshot(msg), () => takeScreenshot(msg));
-    screenshotQueue = run.then(() => undefined, () => undefined);
+    const waited = screenshotsInFlight > 0;
+    screenshotsInFlight++;
+    const run = screenshotQueue.then(
+      () => takeScreenshot(msg, waited),
+      () => takeScreenshot(msg, waited),
+    );
+    screenshotQueue = run.then(
+      () => { screenshotsInFlight = Math.max(0, screenshotsInFlight - 1); },
+      () => { screenshotsInFlight = Math.max(0, screenshotsInFlight - 1); },
+    );
     return run;
   },
   GET_NOTE_CARDS: async () => {

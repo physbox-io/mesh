@@ -585,14 +585,13 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
   const flatShading = type === 'mesh' && showPaint && !node?.isSculpt;
   const glow = geomEntry?.glow ?? 0;
   const materialProps = useMemo(() => {
-    const [r, g, b] = color ?? [0.8, 0.8, 0.8];
     return {
-      color: bodyColor([r, g, b]),
+      color: bodyColor([baseR, baseG, baseB]),
       // The tint marks the selection only with Hi-Res off; with it on, the
       // composer outlines the selection instead (SelectionOutline).
       ...(isSelected && !hiRes
         ? { emissive: '#3b82f6', emissiveIntensity: 0.2 }
-        : { emissive: glow > 0 ? bodyColor([r, g, b]) : '#000', emissiveIntensity: glowIntensity(glow, [r, g, b]) }),
+        : { emissive: glow > 0 ? bodyColor([baseR, baseG, baseB]) : '#000', emissiveIntensity: glowIntensity(glow, [baseR, baseG, baseB]) }),
       // The tracer turns emissive off, but for this: see PathTracedView.
       userData: { glow },
       // Satin, like a printed or moulded part. At 0.85 the studio lights in
@@ -622,7 +621,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
       ...(vertexColored ? { vertexColors: true, color: new THREE.Color(1, 1, 1) } : {}),
       ...(alpha < 1 ? { transparent: true, opacity: alpha, depthWrite: false } : {}),
     };
-  }, [color, isSelected, hiRes, alpha, wireframe, showEdges, vertexColored, flatShading, glow]);
+  }, [baseR, baseG, baseB, isSelected, hiRes, alpha, wireframe, showEdges, vertexColored, flatShading, glow]);
 
   // Handlers for physical spring dragging, mapped from Three.js coordinates to MuJoCo coordinate space
   const setOrbitEnabled = useOrbitEnable();
@@ -945,8 +944,8 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     [type, node?.isSculpt, faces],
   );
   const insideColor = useMemo(
-    () => bodyColor(color).multiplyScalar(0.45),
-    [color],
+    () => bodyColor([baseR, baseG, baseB]).multiplyScalar(0.45),
+    [baseR, baseG, baseB],
   );
 
   // R3F frees nothing passed in through `geometry=`, so every sculpt stroke,
@@ -1987,7 +1986,7 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
         <PulleyRopesRenderer model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} />
         <FlexureLeaves model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} />
         <ClothLayer model={model} data={data} sceneGraph={sceneGraph} />
-        <CsgNegativeGhosts model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} selectedNodeId={selectedNodeId} />
+        {!cleanCapture && <CsgNegativeGhosts model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} selectedNodeId={selectedNodeId} />}
         {showColliders && <ColliderOverlay model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} />}
         <MouseDragForceRenderer model={model} data={data} mujoco={mujoco} />
         <CurveControlHandles />

@@ -37,7 +37,7 @@
 
 import * as THREE from 'three';
 import type { CorePartKind, HardwareCutKind, HardwarePart, HardwarePartKind, SceneGeom, SceneGraph, SceneNode } from '../types/scene';
-import { csgFrameOffset, csgSourceGeoms, fromtoFrame, geomMatrixOf, surfaceUnder } from './csg';
+import { csgFrameOffset, csgSourceGeoms, fromtoFrame, geomMatrixOf, sourcePositiveBounds, surfaceUnder } from './csg';
 import { hardwareSpecOf } from './hardwareCuts';
 import { getNodeWorldTransform } from './laserCutExporter';
 import {
@@ -501,6 +501,10 @@ export function rebuildPart(node: SceneNode, spec: HardwarePart): void {
 }
 
 /** Takes a part's geoms out of the contact solver; see note 1 at the top. */
+export function quietHardwarePart(node: SceneNode): void {
+  quiet(node);
+}
+
 function quiet(node: SceneNode) {
   for (const body of partBodies(node)) {
     for (const g of body.geoms) {
@@ -783,6 +787,49 @@ export function documentWorldMatrix(scene: SceneGraph, id: string): THREE.Matrix
   let m: THREE.Matrix4 | undefined;
   for (const n of path) m = getNodeWorldTransform(n, m);
   return m ?? null;
+}
+
+/** A body's world-space axis-aligned bounding box from its positive source geoms, in metres. */
+export function nodeWorldAabb(scene: SceneGraph, node: SceneNode): { min: THREE.Vector3; max: THREE.Vector3 } | null {
+  const b = sourcePositiveBounds(node);
+  const m = documentWorldMatrix(scene, node.id);
+  if (!b || !m) return null;
+  const off = csgFrameOffset(node);
+  const box = new THREE.Box3();
+  for (const x of [b.min[0], b.max[0]]) {
+    for (const y of [b.min[1], b.max[1]]) {
+      for (const z of [b.min[2], b.max[2]]) {
+        box.expandByPoint(
+          new THREE.Vector3(x - (off[0] ?? 0), y - (off[1] ?? 0), z - (off[2] ?? 0)).applyMatrix4(m),
+        );
+      }
+    }
+  }
+  return { min: box.min, max: box.max };
+}
+
+/**
+ * Contact/seam midpoint between two bodies in world metres, computed from their
+ * world AABBs (midpoint of the overlap interval on touching/overlapping axes,
+ * and midpoint of the closest gap on separated axes). Falls back to the midpoint
+ * of their world origins if either body has no positive geometry bounds.
+ */
+export function sharedSeamPoint(scene: SceneGraph, nodeA: SceneNode, nodeB: SceneNode): [number, number, number] {
+  const boxA = nodeWorldAabb(scene, nodeA);
+  const boxB = nodeWorldAabb(scene, nodeB);
+  if (boxA && boxB) {
+    return [
+      0.5 * (Math.max(boxA.min.x, boxB.min.x) + Math.min(boxA.max.x, boxB.max.x)),
+      0.5 * (Math.max(boxA.min.y, boxB.min.y) + Math.min(boxA.max.y, boxB.max.y)),
+      0.5 * (Math.max(boxA.min.z, boxB.min.z) + Math.min(boxA.max.z, boxB.max.z)),
+    ];
+  }
+  const mA = documentWorldMatrix(scene, nodeA.id);
+  const mB = documentWorldMatrix(scene, nodeB.id);
+  const pA = mA ? new THREE.Vector3().setFromMatrixPosition(mA) : new THREE.Vector3(...(nodeA.pos as [number, number, number]));
+  const pB = mB ? new THREE.Vector3().setFromMatrixPosition(mB) : new THREE.Vector3(...(nodeB.pos as [number, number, number]));
+  const mid = pA.add(pB).multiplyScalar(0.5);
+  return [mid.x, mid.y, mid.z];
 }
 
 export interface FastenTarget {
