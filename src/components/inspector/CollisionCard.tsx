@@ -32,6 +32,7 @@ export function CollisionCard({ node }: { node: SceneNode }) {
 
   const mode = collisionModeOf(node);
   const colliders = (node.geoms || []).filter((g) => g.csgDerived === 'collider');
+  const hfieldCollider = colliders.find((g) => g.type === 'hfield' && g.hfield);
   const stale = collidersAreStale(node);
   const solidity = node.collisionSolidity ?? null;
 
@@ -45,13 +46,14 @@ export function CollisionCard({ node }: { node: SceneNode }) {
         value={mode}
         onChange={(e) => updateNode(node.id, { collision: e.target.value as SceneNode['collision'] })}
         className="w-full px-2.5 py-1.5 border border-slate-200 dark:border-slate-700 rounded text-xs bg-white dark:bg-slate-950 text-slate-700 dark:text-slate-200 outline-none focus:border-blue-500 cursor-pointer font-medium"
-        title="MuJoCo collides a mesh as its convex hull, which fills in any hollow. Auto breaks a hollow shape into convex pieces so it behaves like the shape it looks like."
+        title="MuJoCo collides a mesh as its convex hull, which fills in any hollow. Auto uses a heightfield for static 2.5D reliefs and breaks other hollow shapes into convex pieces."
       >
         <option value="auto">Auto</option>
         <option value="decompose">Convex pieces</option>
+        <option value="hfield">Heightfield</option>
         <option value="hull">Convex hull</option>
       </select>
-      {mode !== 'hull' && (
+      {mode !== 'hull' && mode !== 'hfield' && !hfieldCollider && (
         <label className="flex items-center justify-between gap-2 text-[11px] text-slate-600 dark:text-slate-300">
           Detail
           <select
@@ -71,9 +73,11 @@ export function CollisionCard({ node }: { node: SceneNode }) {
         </label>
       )}
       <p className="text-[10px] text-slate-400 dark:text-slate-500 leading-snug">
-        {colliders.length > 0
-          ? `Colliding as ${colliders.length} convex pieces, so anything hollow in this shape is really hollow — a ball dropped into it lands inside.`
-          : 'Colliding as one convex hull, so any hollow in this shape is filled in for contact.'}
+        {hfieldCollider
+          ? `Colliding as a ${hfieldCollider.hfield!.nrow}×${hfieldCollider.hfield!.ncol} heightfield, so valleys and ridges collide directly with zero filled cavities.`
+          : colliders.length > 0
+            ? `Colliding as ${colliders.length} convex pieces, so anything hollow in this shape is really hollow — a ball dropped into it lands inside.`
+            : 'Colliding as one convex hull, so any hollow in this shape is filled in for contact.'}
         {solidity !== null && ` Solidity ${(solidity * 100).toFixed(0)}% — how much of its own hull this shape actually fills.`}
       </p>
       {node.collisionWarning && (

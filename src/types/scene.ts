@@ -5,7 +5,7 @@ import type { PourBoxOptions } from '../utils/siliconeMold';
 import type { LinerPairId } from '../utils/linerMaterials';
 import type { BrickworkOptions } from '../utils/brickwork';
 import type { ClothSpec, BodyFormMeasurements } from './cloth';
-export type GeomType = 'capsule' | 'sphere' | 'box' | 'plane' | 'cylinder' | 'ellipsoid' | 'mesh';
+export type GeomType = 'capsule' | 'sphere' | 'box' | 'plane' | 'cylinder' | 'ellipsoid' | 'mesh' | 'hfield';
 export type JointType = 'hinge' | 'slide' | 'ball' | 'free';
 
 // How a geom takes part in a body's CSG (boolean) program. Only meaningful on a
@@ -20,7 +20,7 @@ export type CsgOp = 'union' | 'difference' | 'intersection';
 export type GeomRole = 'visual' | 'collision';
 
 // How a body's geometry reaches MuJoCo's contact solver. See SceneNode.collision.
-export type CollisionMode = 'auto' | 'hull' | 'decompose' | 'primitives';
+export type CollisionMode = 'auto' | 'hull' | 'decompose' | 'primitives' | 'hfield';
 
 /** The hardware features a part can have cut into it; see utils/hardwareCuts.ts. */
 export type HardwareCutKind = 'nut_trap' | 'nut_slot' | 'counterbore' | 'insert' | 'insert_boss' | 'bearing' | 'oring' | 'seal_cord'
@@ -467,6 +467,16 @@ export interface SceneGeom {
    * write that changes the mesh rebuilds the copy (store/denseColliders.ts).
    */
   denseColliderOf?: string;
+  /**
+   * For type='hfield': MuJoCo heightfield elevation grid, row-major
+   * `[row * ncol + col]` with row 0 = -Y, col 0 = -X, normalized in [0, 1].
+   * `size` carries `[radius_x, radius_y, elevation_z, base_z]`.
+   */
+  hfield?: {
+    nrow: number;
+    ncol: number;
+    data: number[];
+  };
 }
 
 export interface SceneJoint {
@@ -1051,10 +1061,12 @@ export interface SceneNode {
    * hull of every one of them. That is why a cup is solid to a ball.
    *
    *   'auto'       — decide from the mesh: convex enough, or too coarse or too
-   *                  dense to be worth it, and it collides as its hull; concave,
-   *                  and it is decomposed into convex pieces.
+   *                  dense to be worth it, and it collides as its hull; static
+   *                  2.5D reliefs/terrains collide as a native MuJoCo <hfield>;
+   *                  other concave shapes are decomposed into convex pieces.
    *   'hull'       — one convex hull. MuJoCo's own behaviour; cavities fill in.
    *   'decompose'  — force decomposition even when 'auto' would decline.
+   *   'hfield'     — force native MuJoCo <hfield> collision on a static mesh.
    *   'primitives' — CSG only: the authored positives collide, mesh is visual.
    *
    * Absent means 'auto'. See utils/convexDecomposition.ts.

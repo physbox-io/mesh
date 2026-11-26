@@ -1845,6 +1845,7 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
       const name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM.value, i);
       if (name && !knownGeomNames.has(name) && name !== 'floor') {
         const typeId = model.geom_type[i];
+        if (typeId === 1) continue; // mjGEOM_HFIELD: collision-only, never drawn as an implicit sphere
         let typeStr: GeomType = 'sphere';
         if (typeId === 2) typeStr = 'sphere';
         else if (typeId === 3) typeStr = 'capsule';

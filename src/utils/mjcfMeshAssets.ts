@@ -1,7 +1,7 @@
 import type { SceneGeom, SceneNode } from '../types/scene';
 import { analyzeMesh } from './meshIntegrity';
 import { checkMeshInertia } from './meshInertiaCheck';
-import { encodeMsh, mshFileName, type MeshFileSink } from './meshVfs';
+import { encodeHfield, encodeMsh, hfieldFileName, mshFileName, type MeshFileSink } from './meshVfs';
 import { PairMemo } from './arrayMemo';
 import { flatMesh } from './mjcfFlatMesh';
 import { xmlAttr } from './xmlAttr';
@@ -119,14 +119,60 @@ const meshAsset = (g: SceneGeom, sink: MeshFileSink | undefined): string => {
   return `    <mesh name="${xmlAttr(g.name)}"${meshInertia(g)}${hull} vertex="${verts.join(' ')}"${face} />`;
 };
 
+/** Every heightfield geom in scene order: the ones that need an `<hfield>` asset. */
+export function collectHfieldAssets(nodes: SceneNode[]): SceneGeom[] {
+  const out: SceneGeom[] = [];
+  const walk = (list: SceneNode[]) => {
+    if (!list) return;
+    for (const node of list) {
+      if (!node.isPulleyRope && !node.cloth && !node.isComposite) {
+        for (const g of node.geoms || []) {
+          if (g.type === 'hfield' && g.hfield && g.hfield.nrow >= 2 && g.hfield.ncol >= 2 && g.hfield.data.length >= g.hfield.nrow * g.hfield.ncol) {
+            out.push(g);
+          }
+        }
+      }
+      walk(node.children);
+    }
+  };
+  walk(nodes);
+  return out;
+}
+
+const hfieldFileNames = new WeakMap<number[], string>();
+
+const hfieldAsset = (g: SceneGeom, sink: MeshFileSink | undefined): string => {
+  const hf = g.hfield!;
+  const sizeStr = (g.size?.length >= 4 ? g.size.slice(0, 4) : [0.5, 0.5, 0.1, 0.002]).join(' ');
+  if (sink) {
+    let encoded: Uint8Array | undefined;
+    let file = hfieldFileNames.get(hf.data);
+    if (!file) {
+      encoded = encodeHfield(hf.nrow, hf.ncol, hf.data);
+      file = hfieldFileName(encoded);
+      hfieldFileNames.set(hf.data, file);
+    }
+    if (sink.useFile(file, true)) {
+      if (!sink.holds?.(file)) sink.files.set(file, encoded ?? encodeHfield(hf.nrow, hf.ncol, hf.data));
+      return `    <hfield name="${xmlAttr(g.name)}" size="${sizeStr}" file="${file}" />`;
+    }
+  }
+  const elev = hf.data.map((v) => +v.toFixed(5)).join(' ');
+  return `    <hfield name="${xmlAttr(g.name)}" nrow="${hf.nrow}" ncol="${hf.ncol}" size="${sizeStr}" elevation="${elev}" />`;
+};
+
 /**
- * The `<asset>` block for these meshes (empty when there are none), each as
- * inline vertex text or, where the sink says so, as a binary file in the
- * worker's VFS (utils/meshVfs.ts).
+ * The `<asset>` block for these meshes and heightfields (empty when there are
+ * none), each as inline text or, where the sink says so, as a binary file in
+ * the worker's VFS (utils/meshVfs.ts).
  */
-export function meshAssetsXml(meshes: SceneGeom[], sink: MeshFileSink | undefined): string {
+export function meshAssetsXml(meshes: SceneGeom[], sink: MeshFileSink | undefined, hfields: SceneGeom[] = []): string {
   sink?.begin();
-  return meshes.length > 0
-    ? `\n  <asset>\n${meshes.map((g) => meshAsset(g, sink)).join('\n')}\n  </asset>`
+  const entries = [
+    ...meshes.map((g) => meshAsset(g, sink)),
+    ...hfields.map((g) => hfieldAsset(g, sink)),
+  ];
+  return entries.length > 0
+    ? `\n  <asset>\n${entries.join('\n')}\n  </asset>`
     : '';
 }

@@ -31,10 +31,14 @@ import {
   meshChecksum, meshVolumeAndCentroid, primitiveVolume, type Hull,
 } from './csg';
 import { authoredQuat } from './bodyOrientation';
+import { isNodeRotationBaked } from './sceneTree';
 import { tidyMesh } from './meshTidy';
 import type { CollisionMode, SceneGeom, SceneNode } from '../types/scene';
 import { wallThickness, type FilledCavity } from './filledCavities';
 import { COLLISION_FLAG, scadProxyHulls, usesCollisionProxies } from './scadColliders';
+import {
+  checkHfieldEligibility, hfieldToColliderGeom, rasterizeHeightfield, type HfieldRasterResult,
+} from './hfieldCollision';
 
 /**
  * Above this a mesh is convex enough that its hull is the honest answer, and
@@ -156,7 +160,7 @@ export function collisionDetailLevels(): Record<'standard' | 'fine' | 'finest', 
   };
 }
 
-export type DecompositionStrategy = 'hull' | 'sectors' | 'decompose' | 'primitives';
+export type DecompositionStrategy = 'hull' | 'sectors' | 'decompose' | 'primitives' | 'hfield';
 
 export interface DecompositionVerdict {
   strategy: DecompositionStrategy;
@@ -165,8 +169,18 @@ export interface DecompositionVerdict {
   triangles: number;
   /** How many convex pieces to ask for, when the strategy is 'decompose'. */
   maxHulls: number;
-  reason: 'no-mesh' | 'too-coarse' | 'too-dense' | 'convex-enough' | 'concave' | 'forced' | 'scad-proxies';
+  reason: 'no-mesh' | 'too-coarse' | 'too-dense' | 'convex-enough' | 'concave' | 'forced' | 'scad-proxies' | 'hfield';
   warning?: string;
+}
+
+/** Optional parent-tree context for static/grounded <hfield> eligibility. */
+export interface HfieldNodeContext {
+  /** True when this body has no joints and no ancestor has joints. */
+  isStatic?: boolean;
+  /** World-space position of this body [x, y, z]. */
+  worldPos?: readonly number[];
+  /** World-space quaternion [w, x, y, z] of this body (identity if rotation is baked). */
+  worldQuat?: readonly number[];
 }
 
 /** What a decomposition produced, ready for the store to install. */
@@ -254,7 +268,7 @@ export function hullBudget(solidity: number, requested?: number): number {
  */
 export function decompositionVerdict(
   node: SceneNode,
-  opts: { volume?: number; hullVolume?: number; hasHoleAxis?: boolean; triangles?: number; concavityDepth?: number; size?: number } = {},
+  opts: { volume?: number; hullVolume?: number; hasHoleAxis?: boolean; triangles?: number; concavityDepth?: number; size?: number; hfieldEligible?: boolean } = {},
 ): DecompositionVerdict {
   const mode: CollisionMode = collisionModeOf(node);
   const meshes = solidMeshGeoms(node);
@@ -271,6 +285,13 @@ export function decompositionVerdict(
     // A body of primitives is already a set of convex solids. Nothing to do, and
     // this is the guarantee that no existing primitive scene moves.
     return { strategy: 'hull', solidity: 1, triangles: 0, maxHulls: 0, reason: 'no-mesh' };
+  }
+
+  if (mode === 'hfield') {
+    const solidity = opts.volume !== undefined && opts.hullVolume !== undefined
+      ? solidityOf(opts.volume, opts.hullVolume)
+      : 1;
+    return { strategy: 'hfield', solidity, triangles, maxHulls: 0, reason: 'forced' };
   }
 
   const measured = opts.volume !== undefined && opts.hullVolume !== undefined
@@ -301,6 +322,11 @@ export function decompositionVerdict(
   }
   if (convexEnough) {
     return { strategy: 'hull', solidity, triangles, maxHulls: 0, reason: 'convex-enough' };
+  }
+  // Static 2.5D reliefs qualify for native MuJoCo <hfield> collision — checked
+  // before MAX_DECOMPOSE_TRIANGLES so large terrains (>150k tris) still use it.
+  if (opts.hfieldEligible && !opts.hasHoleAxis) {
+    return { strategy: 'hfield', solidity, triangles, maxHulls: 0, reason: 'hfield' };
   }
   if (triangles > MAX_DECOMPOSE_TRIANGLES) {
     return {
@@ -340,8 +366,9 @@ export function colliderMass(node: SceneNode, template: SceneGeom | undefined, t
  * put back into lathed sectors, and pieces on the mesh's own faces kept.
  * 5: curved walls cut exactly (cutCurved), holes found by depth as well as by
  * solidity, and thin walls' pieces given contact to match.
+ * 6: static 2.5D relief/terrain meshes collide as native MuJoCo <hfield>.
  */
-export const COLLIDER_RECIPE = 5;
+export const COLLIDER_RECIPE = 6;
 
 /**
  * Fingerprints everything the colliders on a NON-boolean body were built from.
@@ -362,10 +389,14 @@ export function collisionHashOf(node: SceneNode): string {
   if (node.csgEnabled) return '';
   const meshes = solidMeshGeoms(node);
   if (meshes.length === 0) return '';
+  const isStatic = (node.joints?.length ?? 0) === 0;
   const key = JSON.stringify([
     COLLIDER_RECIPE,
     meshes.map(g => [meshChecksum(colliderSourceOf(g)), g.pos ?? null, g.quat ?? null, g.euler ?? null]),
     collisionModeOf(node),
+    isStatic,
+    // Groundedness matters for static irregular 2.5D silhouettes (<hfield>).
+    isStatic ? +(node.pos?.[2] ?? 0).toFixed(3) : null,
     node.collisionHulls ?? null,
     node.collisionResolution ?? null,
     // A script that draws its own proxies: they can change with the script
@@ -435,6 +466,7 @@ interface MeshColliders {
   volume: number;
   hullVolume: number;
   hulls: Hull[];
+  hfield?: HfieldRasterResult;
   cavities: FilledCavity[];
   wallContactTime?: number;
   /** How far the pieces stand proud of the surface into the air, at most, metres. */
@@ -447,7 +479,8 @@ interface MeshColliders {
 }
 
 /**
- * Decomposes a body's meshes into convex colliders, or decides not to.
+ * Decomposes a body's meshes into convex colliders (or heightfields for static
+ * 2.5D reliefs), or decides not to.
  *
  * Each colliding mesh is judged and broken up on its own, because MuJoCo hulls
  * each on its own: a Ferris wheel's two rims are two rings, not one, and a box
@@ -462,7 +495,7 @@ interface MeshColliders {
  * this module stays loadable in plain Node and in the test suite. Same rule
  * csg.ts follows for ./openscad, and for the same reason.
  */
-export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderResult | null> {
+export async function decomposeNodeColliders(node: SceneNode, ctx?: HfieldNodeContext): Promise<ColliderResult | null> {
   const hash = collisionHashOf(node);
   if (!hash) return null;
 
@@ -499,9 +532,9 @@ export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderR
   }
 
   const parts: MeshColliders[] = [];
-  for (const source of meshes) parts.push(await decomposeOneMesh(node, source));
+  for (const source of meshes) parts.push(await decomposeOneMesh(node, source, ctx));
 
-  const decomposed = parts.filter(p => p.hulls.length > 0);
+  const decomposed = parts.filter(p => p.hulls.length > 0 || !!p.hfield);
   const volume = parts.reduce((v, p) => v + p.volume, 0);
   const hullVolume = parts.reduce((v, p) => v + p.hullVolume, 0);
   // The body's verdict is its most concave mesh's, among those broken up if any were.
@@ -530,6 +563,10 @@ export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderR
   for (const p of decomposed) {
     const first = geoms.length;
     const template = colliderTemplateOf(p.source, p.source.rgba ?? [0.3, 0.6, 0.9, 1]);
+    if (p.hfield) {
+      geoms.push(hfieldToColliderGeom(p.hfield, `${baseName}_hfield_${first}`, p.source.name, template));
+      continue;
+    }
     const contact = p.source.solref ? undefined : p.wallContactTime;
     hullsToColliderGeoms(p.hulls, baseName, template, massOf(p)).forEach((g, i) => {
       geoms.push({ ...g, name: `${baseName}_csg_col${first + i}`, colliderOf: p.source.name, ...(contact ? { wallContactTime: contact } : {}) });
@@ -548,10 +585,15 @@ export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderR
   const uncovered = bare?.uncovered !== undefined && +(bare.uncovered * 1000).toFixed(1) >= 0.1
     ? { mm: +(bare.uncovered * 1000).toFixed(1), ...(bare.uncoveredAt ? { atMm: bare.uncoveredAt.map(v => +(v * 1000).toFixed(1)) as [number, number, number] } : {}) }
     : undefined;
+  const hullParts = decomposed.filter(p => p.hulls.length > 0);
   // Reported from a tenth of a millimetre, warned of from UNCOVERED_WARN_MM:
   // V-HACD's voxels leave a millimetre or two of a curved wall bare between
   // pieces, which is worth knowing about but not worth a warning on every bowl.
-  const warning = [cavityWarning(named) ?? massWarning(node, decomposed), uncovered && uncovered.mm >= UNCOVERED_WARN_MM ? uncoveredSentence(uncovered) : undefined, ...notes].filter(Boolean).join(' ');
+  const warning = [
+    cavityWarning(named) ?? (hullParts.length > 0 ? massWarning(node, hullParts) : undefined),
+    uncovered && uncovered.mm >= UNCOVERED_WARN_MM ? uncoveredSentence(uncovered) : undefined,
+    ...notes,
+  ].filter(Boolean).join(' ');
   return {
     hash, geoms, verdict, volume, hullVolume, mass,
     ...(warning ? { warning } : {}),
@@ -610,19 +652,72 @@ function largestSide(verts: number[]): number {
   return Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
 }
 
-/** Judges one mesh of a body, and breaks it into convex pieces if it earns it. */
-async function decomposeOneMesh(node: SceneNode, source: SceneGeom): Promise<MeshColliders> {
+/** Judges one mesh of a body, and breaks it into convex pieces (or a heightfield) if it earns it. */
+async function decomposeOneMesh(node: SceneNode, source: SceneGeom, ctx?: HfieldNodeContext): Promise<MeshColliders> {
   const framed = bodyFrameMesh(source);
   const verts = framed.verts;
   // Closed up first: a profile on the axis leaves zero-area triangles, and a
   // polyhedron listed the wrong way round comes out inside out. Neither is
   // ambiguous, and meshes saved before compiles were tidied still carry them.
   const { faces } = tidyMesh(verts, framed.faces);
+  const mode = collisionModeOf(node);
+  const isStatic = ctx?.isStatic ?? ((node.joints?.length ?? 0) === 0);
+  const worldPos = ctx?.worldPos ?? (node.pos ?? [0, 0, 0]);
+  const worldQuat = ctx?.worldQuat ?? (isNodeRotationBaked(node) ? [1, 0, 0, 0] : authoredQuat(node));
+
+  // Explicit heightfield override: rasterize directly without V-HACD.
+  if (mode === 'hfield') {
+    const triangles = faces.length / 3;
+    if (!isStatic) {
+      return {
+        source,
+        verdict: { strategy: 'hull', solidity: 1, triangles, maxHulls: 0, reason: 'forced' },
+        volume: 0, hullVolume: 0, hulls: [], cavities: [],
+        warning: 'Heightfield collision is only supported on static bodies (no joints); colliding as its convex hull instead.',
+      };
+    }
+    const raster = rasterizeHeightfield(verts, faces);
+    if (!raster) {
+      return {
+        source,
+        verdict: { strategy: 'hull', solidity: 1, triangles, maxHulls: 0, reason: 'forced' },
+        volume: 0, hullVolume: 0, hulls: [], cavities: [],
+        warning: 'This mesh could not be rasterized as a heightfield; colliding as its convex hull instead.',
+      };
+    }
+    const { volume, hullVolume } = triangles <= MAX_DECOMPOSE_TRIANGLES
+      ? await analyse(verts, faces)
+      : { volume: 0, hullVolume: 0 };
+    const verdict = decompositionVerdict(node, { volume, hullVolume, triangles });
+    return { source, verdict, volume, hullVolume, hulls: [], hfield: raster, cavities: [] };
+  }
+
+  // Fast O(triangles) 2.5D heightfield check before V-HACD.
+  const hfieldCheck = mode === 'auto'
+    ? checkHfieldEligibility(verts, faces, { isStatic, worldPos, worldQuat })
+    : null;
+
   const { volume, hullVolume, integrity, concavityDepth } = await analyse(verts, faces);
-  const verdict = decompositionVerdict(node, { volume, hullVolume, triangles: faces.length / 3, concavityDepth, size: largestSide(verts) });
+  let verdict = decompositionVerdict(node, {
+    volume, hullVolume, triangles: faces.length / 3, concavityDepth, size: largestSide(verts),
+    hfieldEligible: hfieldCheck?.eligible ?? false,
+  });
   const none = (warning?: string, strategy: DecompositionStrategy = verdict.strategy): MeshColliders => ({
     source, verdict: { ...verdict, strategy }, volume, hullVolume, hulls: [], cavities: [], ...(warning ? { warning } : {}),
   });
+
+  if (verdict.strategy === 'hfield') {
+    const raster = rasterizeHeightfield(verts, faces);
+    if (raster && !raster.hasMultiLayerOverlap) {
+      return { source, verdict, volume, hullVolume, hulls: [], hfield: raster, cavities: [] };
+    }
+    // Multi-layered overlapping top surface detected during rasterization:
+    // disqualify from <hfield> and fall back to V-HACD (or hull if too dense).
+    verdict = decompositionVerdict(node, {
+      volume, hullVolume, triangles: faces.length / 3, concavityDepth, size: largestSide(verts),
+      hfieldEligible: false,
+    });
+  }
 
   if (verdict.strategy !== 'decompose') return none(verdict.warning);
 

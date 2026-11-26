@@ -65,6 +65,33 @@ export function mshFileName(bytes: Uint8Array): string {
   return `m_${(a >>> 0).toString(16).padStart(8, '0')}${(b >>> 0).toString(16).padStart(8, '0')}.msh`;
 }
 
+/**
+ * A heightfield in MuJoCo's binary `.bin` layout: two int32 counts (`nrow`,
+ * `ncol`), then `nrow * ncol` float32 elevations in row-major order.
+ */
+export function encodeHfield(nrow: number, ncol: number, data: ArrayLike<number>): Uint8Array {
+  const count = nrow * ncol;
+  const buf = new ArrayBuffer(8 + count * 4);
+  const head = new Int32Array(buf, 0, 2);
+  head[0] = nrow;
+  head[1] = ncol;
+  const floats = new Float32Array(buf, 8, count);
+  for (let i = 0; i < count; i++) floats[i] = data[i] ?? 0;
+  return new Uint8Array(buf);
+}
+
+/** Content-addressed file name for an encoded MuJoCo binary heightfield. */
+export function hfieldFileName(bytes: Uint8Array): string {
+  let a = 0x811c9dc5, b = 0xcbf29ce4;
+  const words = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >>> 2);
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    a = Math.imul(a ^ w, 0x01000193);
+    b = Math.imul(b ^ ((w >>> 16) | (w << 16)), 0x01000193);
+  }
+  return `hf_${(a >>> 0).toString(16).padStart(8, '0')}${(b >>> 0).toString(16).padStart(8, '0')}.bin`;
+}
+
 /** What `compileToMJCF` needs to emit meshes as files. */
 export interface MeshFileSink {
   /** Called once as a compile starts, so a compile that threw part way leaves nothing behind. */

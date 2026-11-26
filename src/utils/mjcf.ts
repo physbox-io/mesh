@@ -5,7 +5,7 @@ import { compiledSlide, needsEllipticCone } from './contactFriction';
 import { SMALL_BODY_INERTIA_FLOOR, hasSubMillimetreMovingBody } from './incomingBodyCheck';
 import { FLOOR_CONTACT, PRINT_CONTACT_TIME } from './contactClasses';
 import { prepareScene } from './mjcfPrepare';
-import { collectMeshAssets, meshAssetsXml } from './mjcfMeshAssets';
+import { collectHfieldAssets, collectMeshAssets, meshAssetsXml } from './mjcfMeshAssets';
 import { constraintsXml } from './mjcfConstraints';
 import { buildNode } from './mjcfBody';
 
@@ -71,8 +71,9 @@ export const compileToMJCF = (
   const printFidelity = scene.simFidelity === 'print';
 
   const meshes = collectMeshAssets(nodes);
+  const hfields = collectHfieldAssets(nodes);
   if (opts.stats) opts.stats.meshTriangles = meshes.reduce((n, g) => n + g.faces!.length / 3, 0);
-  const assetXml = meshAssetsXml(meshes, opts.meshFiles);
+  const assetXml = meshAssetsXml(meshes, opts.meshFiles, hfields);
   // Before the bodies: it writes into their joints.
   const extras = constraintsXml(nodes, breaks);
 

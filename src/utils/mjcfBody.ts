@@ -81,6 +81,17 @@ const physicalAttrs = (geom: SceneGeom, massless: boolean): string => {
 };
 
 const buildGeom = (geom: SceneGeom, massless = false) => {
+  if (geom.type === 'hfield' && geom.hfield && geom.hfield.nrow >= 2 && geom.hfield.ncol >= 2 && geom.hfield.data.length >= geom.hfield.nrow * geom.hfield.ncol) {
+    let attrs = `name="${xmlAttr(geom.name)}" type="hfield" hfield="${xmlAttr(geom.name)}"`;
+    if (geom.rgba) attrs += ` rgba="${geom.rgba.join(' ')}"`;
+    if (geom.pos) attrs += ` pos="${geom.pos.join(' ')}"`;
+    if (geom.quat) {
+      attrs += ` quat="${geom.quat.join(' ')}"`;
+    } else if (geom.euler) {
+      attrs += ` euler="${geom.euler.join(' ')}"`;
+    }
+    return `<geom ${attrs}${physicalAttrs(geom, massless)} />`;
+  }
   // A mesh geom is only valid in MJCF if vertex/face array data exists to populate the <asset> block
   const hasMeshData = Array.isArray(geom.vertices) && geom.vertices.length > 0 && Array.isArray(geom.faces) && geom.faces.length > 0;
   const isMesh = geom.type === 'mesh' && hasMeshData;

@@ -315,6 +315,15 @@ export function collisionReport(node: SceneNode): Record<string, unknown> {
     };
   }
   if (colliders.length > 0) {
+    const hfields = colliders.filter(g => g.type === 'hfield' && g.hfield);
+    if (hfields.length > 0 && hfields.length === colliders.length) {
+      const dims = hfields.map(g => `${g.hfield!.nrow}x${g.hfield!.ncol}`).join(', ');
+      return {
+        collidesAs: `heightfield (${dims})`,
+        ...(node.collisionSolidity !== undefined ? { solidity: node.collisionSolidity } : {}),
+        ...(node.collisionWarning ? { collisionWarning: node.collisionWarning } : {}),
+      };
+    }
     return {
       collidesAs: `${colliders.length} convex pieces`,
       ...(node.collisionSolidity !== undefined ? { solidity: node.collisionSolidity } : {}),

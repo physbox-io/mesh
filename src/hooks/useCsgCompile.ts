@@ -21,7 +21,9 @@ import { useEffect } from 'react';
 import { useStore } from '../store/useStore';
 import { recompilesInFlight } from '../store/simulationActions';
 import { csgHashOf, evaluateNodeCsg, hasBooleanOps } from '../utils/csg';
-import { collidersAreStale, collisionHashOf, decomposeNodeColliders } from '../utils/convexDecomposition';
+import { collidersAreStale, collisionHashOf, decomposeNodeColliders, type HfieldNodeContext } from '../utils/convexDecomposition';
+import { authoredQuat } from '../utils/bodyOrientation';
+import { isNodeRotationBaked } from '../utils/sceneTree';
 import type { SceneGraph, SceneNode } from '../types/scene';
 import { bodyEdges, bodyUp } from '../utils/edgeRoundBase';
 import { keepFoundEdges } from '../utils/edgeRound';
@@ -249,14 +251,55 @@ function colliderPiecesChanged(before: SceneNode[]): boolean {
   return before.some((n) => hasPieces(n) || hasPieces(findNodeById(nodes, n.id)));
 }
 
+/** Computes static/world-pose context for a node from the scene tree. */
+function hfieldContextFor(nodes: SceneNode[], targetId: string): HfieldNodeContext | undefined {
+  const mulQuat = (a: readonly number[], b: readonly number[]): [number, number, number, number] => [
+    a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
+    a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+    a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
+    a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0],
+  ];
+  const rotVec = (q: readonly number[], v: readonly number[]): [number, number, number] => {
+    const [w, x, y, z] = q;
+    const vx = v[0] ?? 0, vy = v[1] ?? 0, vz = v[2] ?? 0;
+    const cx = y * vz - z * vy, cy = z * vx - x * vz, cz = x * vy - y * vx;
+    const dx = y * cz - z * cy, dy = z * cx - x * cz, dz = x * cy - y * cx;
+    return [vx + 2 * (w * cx + dx), vy + 2 * (w * cy + dy), vz + 2 * (w * cz + dz)];
+  };
+  const walk = (
+    list: SceneNode[],
+    ancestorMoving: boolean,
+    parentPos: [number, number, number],
+    parentQuat: [number, number, number, number],
+  ): HfieldNodeContext | undefined => {
+    for (const n of list || []) {
+      const moving = ancestorMoving || (n.joints?.length ?? 0) > 0;
+      const offset = rotVec(parentQuat, n.pos ?? [0, 0, 0]);
+      const worldPos: [number, number, number] = [
+        parentPos[0] + offset[0],
+        parentPos[1] + offset[1],
+        parentPos[2] + offset[2],
+      ];
+      const localQuat = isNodeRotationBaked(n) ? ([1, 0, 0, 0] as const) : authoredQuat(n);
+      const worldQuat = mulQuat(parentQuat, localQuat);
+      if (n.id === targetId) return { isStatic: !moving, worldPos, worldQuat };
+      const found = walk(n.children || [], moving, worldPos, worldQuat);
+      if (found) return found;
+    }
+    return undefined;
+  };
+  return walk(nodes, false, [0, 0, 0], [1, 0, 0, 0]);
+}
+
 /** One decomposition per body and hash: a second ask joins the first. */
 function decomposeColliders(node: SceneNode): Promise<void> {
   const hash = collisionHashOf(node);
   const running = collidersInFlight.get(node.id);
   if (running && running.hash === hash) return running.done;
+  const ctx = hfieldContextFor(useStore.getState().sceneGraph.nodes, node.id);
   const done: Promise<void> = (async () => {
     try {
-      const result = await decomposeNodeColliders(node);
+      const result = await decomposeNodeColliders(node, ctx);
       if (result) useStore.getState().applyNodeColliders(node.id, result, true);
     } catch (err) {
       const message = await describeLoadFailure(err instanceof Error ? err.message : String(err));

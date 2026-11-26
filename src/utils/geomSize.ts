@@ -7,7 +7,7 @@
 // already holds one.
 
 /** How many size entries each primitive reads: half-extents for a box, radius (and half-length) otherwise. */
-const USED: Record<string, number> = { sphere: 1, capsule: 2, cylinder: 2, box: 3, ellipsoid: 3 };
+const USED: Record<string, number> = { sphere: 1, capsule: 2, cylinder: 2, box: 3, ellipsoid: 3, hfield: 4 };
 
 const MEANING: Record<string, string> = {
   sphere: '[radius]',
@@ -15,6 +15,7 @@ const MEANING: Record<string, string> = {
   cylinder: '[radius, half-length]',
   box: '[half-x, half-y, half-z]',
   ellipsoid: '[radius-x, radius-y, radius-z]',
+  hfield: '[radius-x, radius-y, elevation-z, base-z]',
 };
 
 interface SizedGeom { name?: string; type?: string; size?: unknown; fromto?: unknown }

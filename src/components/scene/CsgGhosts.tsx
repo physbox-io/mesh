@@ -117,6 +117,7 @@ export const CsgGhostOutline = ({ geom, color, bounds, csgCentroid }: { geom: Sc
   const key = JSON.stringify([
     geom.type, geom.size, geom.pos, geom.euler, geom.quat, bounds, csgCentroid,
     geom.renderVertices?.length ?? 0, geom.faces?.length ?? 0,
+    geom.hfield?.nrow ?? 0, geom.hfield?.ncol ?? 0,
   ]);
 
   const edges = useMemo(() => {
@@ -143,6 +144,43 @@ export const CsgGhostOutline = ({ geom, color, bounds, csgCentroid }: { geom: Sc
         // computed on the squashed shape or the outline won't match it.
         base.scale(r, s[1] ?? r, s[2] ?? r);
         break;
+      case 'hfield': {
+        const hf = geom.hfield;
+        if (!hf || hf.nrow < 2 || hf.ncol < 2 || s.length < 3) return null;
+        // Downsample overlay to at most 32×32 so show_colliders stays crisp and fast.
+        const stepR = Math.max(1, Math.floor(hf.nrow / 32));
+        const stepC = Math.max(1, Math.floor(hf.ncol / 32));
+        const rows: number[] = [];
+        for (let r = 0; r < hf.nrow; r += stepR) rows.push(r);
+        if (rows[rows.length - 1] !== hf.nrow - 1) rows.push(hf.nrow - 1);
+        const cols: number[] = [];
+        for (let c = 0; c < hf.ncol; c += stepC) cols.push(c);
+        if (cols[cols.length - 1] !== hf.ncol - 1) cols.push(hf.ncol - 1);
+        const rx = s[0], ry = s[1], ez = s[2];
+        const verts: number[] = [];
+        const indices: number[] = [];
+        const rn = rows.length, cn = cols.length;
+        for (let ri = 0; ri < rn; ri++) {
+          const r = rows[ri];
+          const y = -ry + (r / (hf.nrow - 1)) * 2 * ry;
+          for (let ci = 0; ci < cn; ci++) {
+            const c = cols[ci];
+            const x = -rx + (c / (hf.ncol - 1)) * 2 * rx;
+            const z = (hf.data[r * hf.ncol + c] ?? 0) * ez;
+            verts.push(x, y, z);
+          }
+        }
+        for (let ri = 0; ri < rn - 1; ri++) {
+          for (let ci = 0; ci < cn - 1; ci++) {
+            const a = ri * cn + ci, b = a + 1, d = a + cn + 1, e = a + cn;
+            indices.push(a, b, d, a, d, e);
+          }
+        }
+        base = new THREE.BufferGeometry();
+        base.setAttribute('position', new THREE.Float32BufferAttribute(Float32Array.from(verts), 3));
+        base.setIndex(indices);
+        break;
+      }
       case 'mesh': {
         // A whole body merged in as a subtract — a lattice part, a sculpt, an
         // imported STL. Its shape is in its vertices; `size` is [1] and means
@@ -164,7 +202,7 @@ export const CsgGhostOutline = ({ geom, color, bounds, csgCentroid }: { geom: Sc
     // of nearly-coplanar triangles, and keeping every edge between them draws a
     // solid grey blob rather than an outline. Primitives keep the tight
     // threshold, where every edge that survives is a real one.
-    const e = new THREE.EdgesGeometry(base, geom.type === 'mesh' ? 25 : 1);
+    const e = new THREE.EdgesGeometry(base, geom.type === 'mesh' ? 25 : geom.type === 'hfield' ? 10 : 1);
     base.dispose();
 
     // Bake the geom's own pos/rotation in, so the segments are in body space and
