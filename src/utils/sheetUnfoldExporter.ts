@@ -26,6 +26,15 @@ import { nestingDepths, offsetLoop, offsetNestedLoops, pointInPolygon } from './
 
 export type SheetUnfoldMode = 'papercraft' | 'sheet_metal' | 'soft_goods';
 
+export type SheetPreset = 'letter' | 'a4' | 'cardstock_12x12' | 'tabloid';
+
+export const SHEET_PRESETS: Record<SheetPreset, { widthMm: number; heightMm: number; label: string }> = {
+  letter:          { widthMm: 215.9, heightMm: 279.4, label: 'US Letter (8.5×11")' },
+  a4:              { widthMm: 210,   heightMm: 297,   label: 'A4 (210×297 mm)' },
+  cardstock_12x12: { widthMm: 304.8, heightMm: 304.8, label: 'Cardstock 12×12"' },
+  tabloid:         { widthMm: 279.4, heightMm: 431.8, label: 'Tabloid (11×17")' },
+};
+
 export interface SheetUnfoldOptions {
   mode: SheetUnfoldMode;
   /** Coplanar angle tolerance in degrees for merging adjacent triangles into polygon faces (default 2.5). */
@@ -50,10 +59,16 @@ export interface SheetUnfoldOptions {
   stitchPitchMm: number;
   /** Alignment notch length in mm for soft_goods mode (default 2.5). */
   notchLengthMm: number;
+  /** Standard paper/cardstock sheet preset; overrides sheetWidthMm and sheetHeightMm when set. */
+  sheetPreset?: SheetPreset;
   /** Sheet width in mm (default 600). */
   sheetWidthMm: number;
   /** Sheet height in mm (default 400). */
   sheetHeightMm: number;
+  /** Pack islands of the same body color onto dedicated sheets (never mixing colors on one sheet). */
+  groupByColor?: boolean;
+  /** Pack each part (node) onto its own dedicated sheet(s). */
+  onePartPerSheet?: boolean;
   /** Sheet margin in mm (default 8). */
   marginMm: number;
   /** Minimum spacing between packed islands in mm (default 5). */
@@ -159,6 +174,8 @@ export interface UnfoldIsland {
   id: string;
   nodeId: string;
   nodeName: string;
+  /** Hex color (#rrggbb) of the source part/geom, used for groupByColor sheet packing. */
+  colorHex?: string;
   sheetIndex: number;
   placedOffsetMm: Point2D;
   faceCount: number;
@@ -181,6 +198,10 @@ export interface UnfoldSheet {
   widthMm: number;
   heightMm: number;
   islandIds: string[];
+  /** Optional group label (part name or color hex) when grouped by part or color. */
+  groupLabel?: string;
+  /** Optional color hex (#rrggbb) when all islands on this sheet share a cardstock color. */
+  colorHex?: string;
 }
 
 export interface SheetUnfoldResult {
@@ -193,6 +214,8 @@ export interface SheetUnfoldResult {
   foldCount: number;
   seamCount: number;
   glueTabCount: number;
+  /** Number of glue tabs omitted due to overlap/clearance collisions in papercraft mode. */
+  omittedTabCount: number;
   stitchHoleCount: number;
   /** Total bend allowance added across all fold edges in sheet_metal mode (mm). */
   totalBendAllowanceMm: number;
@@ -973,9 +996,16 @@ export interface PolyFace3D {
 interface PolySurface3D {
   nodeId: string;
   nodeName: string;
+  colorHex?: string;
   /** Welded 3D vertex positions in world space (metres, scaled by scaleFactor). */
   vertices: THREE.Vector3[];
   faces: PolyFace3D[];
+}
+
+function rgbaToHex(rgba?: number[]): string | undefined {
+  if (!Array.isArray(rgba) || rgba.length < 3) return undefined;
+  const toByte = (v: number) => Math.max(0, Math.min(255, Math.round((Number.isFinite(v) ? v : 0) * 255)));
+  return '#' + [rgba[0], rgba[1], rgba[2]].map((c) => toByte(c).toString(16).padStart(2, '0')).join('');
 }
 
 const WELD_TOL_M = 1e-5;
@@ -2203,9 +2233,11 @@ function extractSurfacesFromScene(
         polyFaces = filterInternalBoreFacets(vertices, polyFaces);
 
         if (polyFaces.length > 0) {
+          const nodeRgba = geoms.find((g) => g.role !== 'collision' && g.rgba)?.rgba;
           surfaces.push({
             nodeId: node.id,
             nodeName: node.name || node.id,
+            colorHex: rgbaToHex(nodeRgba),
             vertices,
             faces: polyFaces,
           });
@@ -2218,9 +2250,11 @@ function extractSurfacesFromScene(
         const geomsToProcess = compiledVisual
           ? [compiledVisual]
           : csgSourceGeoms(node).filter((g) => g.role !== 'collision' && g.csg !== 'difference');
+        const fallbackNodeRgba = geoms.find((g) => g.role !== 'collision' && g.rgba)?.rgba;
 
         for (let gi = 0; gi < geomsToProcess.length; gi++) {
           const geom = geomsToProcess[gi];
+          const geomColorHex = rgbaToHex(geom.rgba ?? fallbackNodeRgba);
           const geomMatrix = new THREE.Matrix4().multiplyMatrices(bodyMatrix, getGeomFrame(geom).matrix);
           const partName =
             geomsToProcess.length === 1
@@ -2237,13 +2271,13 @@ function extractSurfacesFromScene(
               sz[2] || 0.05,
               geomMatrix
             );
-            if (surf) surfaces.push(surf);
+            if (surf) surfaces.push({ ...surf, colorHex: geomColorHex });
           } else if (geom.type === 'cylinder') {
             const sz = geom.size || [0.025, 0.05];
             const r = sz[0] || 0.025;
             const hl = getGeomFrame(geom).halfLen ?? (sz[1] ?? r);
             const surf = extractFromCylinder(node.id, partName, r, hl, geom.facets ?? 12, geomMatrix);
-            if (surf) surfaces.push(surf);
+            if (surf) surfaces.push({ ...surf, colorHex: geomColorHex });
           } else if (geom.type === 'mesh' && (geom.renderVertices || geom.vertices) && geom.faces) {
             const rawCoords = geom.renderVertices ?? yupVertsToZup(geom.vertices || []);
             const rawPts: THREE.Vector3[] = [];
@@ -2277,6 +2311,7 @@ function extractSurfacesFromScene(
               surfaces.push({
                 nodeId: node.id,
                 nodeName: partName,
+                colorHex: geomColorHex,
                 vertices,
                 faces: polyFaces,
               });
@@ -2685,10 +2720,11 @@ function unfoldSurfaceToIslands(
   islands: UnfoldIsland[];
   nextPairId: number;
   totalBendAllowanceMm: number;
+  omittedTabCount: number;
 } {
   const { faces, vertices } = surface;
   if (faces.length === 0) {
-    return { islands: [], nextPairId: startPairId, totalBendAllowanceMm: 0 };
+    return { islands: [], nextPairId: startPairId, totalBendAllowanceMm: 0, omittedTabCount: 0 };
   }
 
   // 1. Build face adjacency graph across shared 3D edges
@@ -3720,6 +3756,7 @@ function unfoldSurfaceToIslands(
       id: islandId,
       nodeId: surface.nodeId,
       nodeName: surface.nodeName,
+      ...(surface.colorHex ? { colorHex: surface.colorHex } : {}),
       sheetIndex: 0,
       placedOffsetMm: { x: 0, y: 0 },
       faceCount: unfoldedFaces.length,
@@ -3739,7 +3776,7 @@ function unfoldSurfaceToIslands(
     });
   }
 
-  return { islands, nextPairId, totalBendAllowanceMm };
+  return { islands, nextPairId, totalBendAllowanceMm, omittedTabCount: omittedGlueTabPairs.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -3847,61 +3884,104 @@ function packIslandsOntoSheets(
     }
   }
 
-  // Sort by height descending for shelf packing
-  const sorted = [...islands].sort(
-    (a, b) => b.boundsMm.height - a.boundsMm.height || b.boundsMm.width - a.boundsMm.width
-  );
+  // Build packing groups: one-part-per-sheet > group-by-color > single combined group.
+  const groups: Array<{ label?: string; colorHex?: string; items: UnfoldIsland[] }> = [];
+  if (options.onePartPerSheet) {
+    const byNode = new Map<string, UnfoldIsland[]>();
+    for (const isl of islands) {
+      const list = byNode.get(isl.nodeId);
+      if (list) list.push(isl);
+      else byNode.set(isl.nodeId, [isl]);
+    }
+    for (const items of byNode.values()) {
+      const colors = new Set(items.map((i) => i.colorHex).filter((c): c is string => Boolean(c)));
+      groups.push({
+        label: items[0].nodeName,
+        ...(colors.size === 1 ? { colorHex: [...colors][0] } : {}),
+        items,
+      });
+    }
+  } else if (options.groupByColor) {
+    const byColor = new Map<string, UnfoldIsland[]>();
+    for (const isl of islands) {
+      const key = isl.colorHex ?? 'default';
+      const list = byColor.get(key);
+      if (list) list.push(isl);
+      else byColor.set(key, [isl]);
+    }
+    for (const [key, items] of byColor.entries()) {
+      groups.push({
+        label: key === 'default' ? 'default' : key,
+        ...(key !== 'default' ? { colorHex: key } : {}),
+        items,
+      });
+    }
+  } else {
+    groups.push({ items: islands });
+  }
 
   const sheets: UnfoldSheet[] = [];
-  let currentSheetIdx = 0;
-  let cursorX = margin;
-  let cursorY = margin;
-  let shelfHeight = 0;
 
-  sheets.push({
-    index: 0,
-    widthMm: sheetW,
-    heightMm: sheetH,
-    islandIds: [],
-  });
+  for (const group of groups) {
+    // Sort by height descending for shelf packing within each group
+    const sorted = [...group.items].sort(
+      (a, b) => b.boundsMm.height - a.boundsMm.height || b.boundsMm.width - a.boundsMm.width
+    );
 
-  for (const isl of sorted) {
-    const w = isl.boundsMm.width;
-    const h = isl.boundsMm.height;
+    let currentSheetIdx = sheets.length;
+    let cursorX = margin;
+    let cursorY = margin;
+    let shelfHeight = 0;
 
-    if (w > usableW || h > usableH) {
-      warnings.push(
-        `Unfolded pattern "${isl.nodeName}" (${w.toFixed(1)} × ${h.toFixed(1)} mm) exceeds usable sheet size (${usableW.toFixed(0)} × ${usableH.toFixed(0)} mm).`
-      );
+    sheets.push({
+      index: currentSheetIdx,
+      widthMm: sheetW,
+      heightMm: sheetH,
+      islandIds: [],
+      ...(group.label ? { groupLabel: group.label } : {}),
+      ...(group.colorHex ? { colorHex: group.colorHex } : {}),
+    });
+
+    for (const isl of sorted) {
+      const w = isl.boundsMm.width;
+      const h = isl.boundsMm.height;
+
+      if (w > usableW || h > usableH) {
+        warnings.push(
+          `Unfolded pattern "${isl.nodeName}" (${w.toFixed(1)} × ${h.toFixed(1)} mm) exceeds usable sheet size (${usableW.toFixed(0)} × ${usableH.toFixed(0)} mm).`
+        );
+      }
+
+      if (cursorX > margin && cursorX + w > sheetW - margin) {
+        // Advance to next shelf on current sheet
+        cursorX = margin;
+        cursorY += shelfHeight + spacing;
+        shelfHeight = 0;
+      }
+
+      if (sheets[currentSheetIdx].islandIds.length > 0 && cursorY + h > sheetH - margin) {
+        // Open a new sheet within the same group
+        currentSheetIdx = sheets.length;
+        sheets.push({
+          index: currentSheetIdx,
+          widthMm: sheetW,
+          heightMm: sheetH,
+          islandIds: [],
+          ...(group.label ? { groupLabel: group.label } : {}),
+          ...(group.colorHex ? { colorHex: group.colorHex } : {}),
+        });
+        cursorX = margin;
+        cursorY = margin;
+        shelfHeight = 0;
+      }
+
+      isl.sheetIndex = currentSheetIdx;
+      translateIslandInPlace(isl, cursorX, cursorY);
+      sheets[currentSheetIdx].islandIds.push(isl.id);
+
+      cursorX += w + spacing;
+      if (h > shelfHeight) shelfHeight = h;
     }
-
-    if (cursorX > margin && cursorX + w > sheetW - margin) {
-      // Advance to next shelf on current sheet
-      cursorX = margin;
-      cursorY += shelfHeight + spacing;
-      shelfHeight = 0;
-    }
-
-    if (sheets[currentSheetIdx].islandIds.length > 0 && cursorY + h > sheetH - margin) {
-      // Open a new sheet
-      currentSheetIdx++;
-      sheets.push({
-        index: currentSheetIdx,
-        widthMm: sheetW,
-        heightMm: sheetH,
-        islandIds: [],
-      });
-      cursorX = margin;
-      cursorY = margin;
-      shelfHeight = 0;
-    }
-
-    isl.sheetIndex = currentSheetIdx;
-    translateIslandInPlace(isl, cursorX, cursorY);
-    sheets[currentSheetIdx].islandIds.push(isl.id);
-
-    cursorX += w + spacing;
-    if (h > shelfHeight) shelfHeight = h;
   }
 
   return sheets;
@@ -3935,8 +4015,9 @@ function renderSheetUnfoldSvg(
         `    <rect x="0" y="${fmt(y0)}" width="${fmt(sheetW)}" height="${fmt(sheetH)}" data-operation="ghost" fill="none" stroke="#94a3b8" stroke-width="0.35" stroke-dasharray="6,4" />`
       );
       if (options.includeLabels) {
+        const groupSuffix = sheets[s]?.groupLabel ? ` — ${escapeXml(sheets[s].groupLabel!)}` : '';
         sheetOutlineParts.push(
-          `    <text x="10" y="${fmt(y0 + 20)}" data-operation="ghost" font-family="sans-serif" font-size="12" font-weight="bold" fill="#64748b">Sheet ${s + 1} (${fmt(sheetW)}mm x ${fmt(sheetH)}mm, ${options.mode})</text>`
+          `    <text x="10" y="${fmt(y0 + 20)}" data-operation="ghost" font-family="sans-serif" font-size="12" font-weight="bold" fill="#64748b">Sheet ${s + 1}${groupSuffix} (${fmt(sheetW)}mm x ${fmt(sheetH)}mm, ${options.mode})</text>`
         );
       }
     }
@@ -4076,9 +4157,11 @@ export function exportSheetUnfold(
   options?: Partial<SheetUnfoldOptions> & { material?: MaterialId; machine?: 'laser' | 'cnc' },
   targetNodeIds?: string[]
 ): SheetUnfoldResult {
+  const presetDims = options?.sheetPreset ? SHEET_PRESETS[options.sheetPreset] : undefined;
   const opts: SheetUnfoldOptions = {
     ...DEFAULT_SHEET_UNFOLD_OPTIONS,
     ...options,
+    ...(presetDims ? { sheetWidthMm: presetDims.widthMm, sheetHeightMm: presetDims.heightMm } : {}),
   };
 
   const { surfaces, warnings } = extractSurfacesFromScene(scene, opts, targetNodeIds);
@@ -4095,6 +4178,7 @@ export function exportSheetUnfold(
       foldCount: 0,
       seamCount: 0,
       glueTabCount: 0,
+      omittedTabCount: 0,
       stitchHoleCount: 0,
       totalBendAllowanceMm: 0,
       warnings,
@@ -4105,12 +4189,14 @@ export function exportSheetUnfold(
   const allIslands: UnfoldIsland[] = [];
   let nextPairId = 1;
   let totalBendAllowanceMm = 0;
+  let omittedTabCount = 0;
 
   for (const surface of surfaces) {
     const res = unfoldSurfaceToIslands(surface, opts, nextPairId, allIslands.length, warnings);
     allIslands.push(...res.islands);
     nextPairId = res.nextPairId;
     totalBendAllowanceMm += res.totalBendAllowanceMm;
+    omittedTabCount += res.omittedTabCount;
   }
 
   const sheets = packIslandsOntoSheets(allIslands, opts, warnings);
@@ -4185,6 +4271,7 @@ export function exportSheetUnfold(
     foldCount,
     seamCount,
     glueTabCount,
+    omittedTabCount,
     stitchHoleCount,
     totalBendAllowanceMm,
     warnings,

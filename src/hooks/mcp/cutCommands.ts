@@ -15,7 +15,13 @@ import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
 import type { SceneGraph, SceneNode } from '../../types/scene';
 import { DEFAULT_CONTOUR_OPTIONS, type ContourSliceResult } from '../../utils/contourSliceExporter';
-import { DEFAULT_SHEET_UNFOLD_OPTIONS, exportSheetUnfold, type SheetUnfoldOptions } from '../../utils/sheetUnfoldExporter';
+import {
+  DEFAULT_SHEET_UNFOLD_OPTIONS,
+  SHEET_PRESETS,
+  exportSheetUnfold,
+  type SheetPreset,
+  type SheetUnfoldOptions,
+} from '../../utils/sheetUnfoldExporter';
 import { getNodeWorldTransform, type LaserCutResult } from '../../utils/laserCutExporter';
 import { layoutCutOutset, layoutKerf, layoutMargin } from '../../utils/sheetCutRecipe';
 import type { EtchSheetSpec } from '../../utils/etchHandoff';
@@ -30,6 +36,7 @@ import type { McpCommands } from './types';
 const KINDS = ['panels', 'contour', 'unfold'] as const;
 type CutKind = (typeof KINDS)[number];
 const SHEET_MODES = ['papercraft', 'sheet_metal', 'soft_goods'] as const;
+const SHEET_PRESET_NAMES = Object.keys(SHEET_PRESETS) as SheetPreset[];
 const JOINT_MODES = ['finger', 'slot', 'glue'] as const;
 
 const fileSafe = (s: string) => s.toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'cut';
@@ -164,7 +171,9 @@ export const cutCommands: McpCommands = {
       ? 'laser'
       : msg.machine === 'cnc' || msg.machine === 'router'
         ? 'cnc'
-        : state.machineTarget === 'laser' ? 'laser' : 'cnc';
+        : kind === 'unfold'
+          ? 'laser'
+          : state.machineTarget === 'laser' ? 'laser' : 'cnc';
     const stock = state.stock;
     const name = `${subject.label} ${kind}`;
     const pack = (
@@ -191,6 +200,19 @@ export const cutCommands: McpCommands = {
         && (typeof rawMode !== 'string' || !(SHEET_MODES as readonly string[]).includes(rawMode))) {
         return { ok: false, error: `sheetMode is one of ${SHEET_MODES.join(', ')}.` };
       }
+      const rawPreset = msg.sheetPreset ?? msg.sheet_preset;
+      if (rawPreset !== undefined && rawPreset !== null
+        && (typeof rawPreset !== 'string' || !(SHEET_PRESET_NAMES as readonly string[]).includes(rawPreset))) {
+        return { ok: false, error: `sheetPreset is one of ${SHEET_PRESET_NAMES.join(', ')}.` };
+      }
+      const rawGroupByColor = msg.groupByColor !== undefined ? msg.groupByColor : msg.group_by_color;
+      if (rawGroupByColor !== undefined && rawGroupByColor !== null && typeof rawGroupByColor !== 'boolean') {
+        return { ok: false, error: 'groupByColor must be a boolean.' };
+      }
+      const rawOnePartPerSheet = msg.onePartPerSheet !== undefined ? msg.onePartPerSheet : msg.one_part_per_sheet;
+      if (rawOnePartPerSheet !== undefined && rawOnePartPerSheet !== null && typeof rawOnePartPerSheet !== 'boolean') {
+        return { ok: false, error: 'onePartPerSheet must be a boolean.' };
+      }
       const t1 = checkPos(msg.thicknessMm, 'thicknessMm');
       if (!t1.ok) return t1;
       const t2 = checkPos(msg.materialThicknessMm, 'materialThicknessMm');
@@ -210,12 +232,17 @@ export const cutCommands: McpCommands = {
         return { ok: false, error: 'kFactor must be a finite number between 0 and 1.' };
       }
       const thick = t1.value ?? t2.value ?? DEFAULT_SHEET_UNFOLD_OPTIONS.thicknessMm;
+      const sheetPreset = typeof rawPreset === 'string' ? (rawPreset as SheetPreset) : undefined;
+      const presetDims = sheetPreset ? SHEET_PRESETS[sheetPreset] : undefined;
       const options: SheetUnfoldOptions & { material?: typeof state.material; machine?: 'laser' | 'cnc' } = {
         ...DEFAULT_SHEET_UNFOLD_OPTIONS,
         ...(rawMode ? { mode: rawMode as SheetUnfoldOptions['mode'] } : {}),
         thicknessMm: thick,
-        sheetWidthMm: stock.widthMm,
-        sheetHeightMm: stock.depthMm,
+        ...(sheetPreset ? { sheetPreset } : {}),
+        sheetWidthMm: presetDims ? presetDims.widthMm : stock.widthMm,
+        sheetHeightMm: presetDims ? presetDims.heightMm : stock.depthMm,
+        ...(rawGroupByColor === true ? { groupByColor: true } : {}),
+        ...(rawOnePartPerSheet === true ? { onePartPerSheet: true } : {}),
         ...(bend.value !== undefined ? { bendRadiusMm: bend.value } : {}),
         ...(typeof msg.kFactor === 'number' ? { kFactor: msg.kFactor } : {}),
         ...(scale.value !== undefined ? { scaleFactor: scale.value } : {}),
@@ -229,7 +256,37 @@ export const cutCommands: McpCommands = {
         const res = exportSheetUnfold(subject.scene, options);
         if (!res.success || !res.svg) return { ok: false, error: res.error || 'Nothing here unfolds.', warnings: res.warnings };
         const sheets: EtchSheetSpec[] = res.sheets.map((s) => ({ widthMm: s.widthMm, heightMm: s.heightMm, thicknessMm: thick }));
-        return pack(res.svg, thick, { mode: res.mode, pieces: res.islands.length, sheets: res.sheets.length || 1 }, res.warnings, sheets);
+        const suggestedTabWidthMm = Math.max(1.5, Math.round(options.tabWidthMm * 0.5 * 10) / 10);
+        const sheetGroups = res.sheets.some((s) => s.groupLabel || s.colorHex)
+          ? res.sheets.map((s) => ({
+              sheet: s.index + 1,
+              widthMm: s.widthMm,
+              heightMm: s.heightMm,
+              pieces: s.islandIds.length,
+              ...(s.groupLabel ? { group: s.groupLabel } : {}),
+              ...(s.colorHex ? { colorHex: s.colorHex } : {}),
+            }))
+          : undefined;
+        return pack(
+          res.svg,
+          thick,
+          {
+            mode: res.mode,
+            pieces: res.islands.length,
+            sheets: res.sheets.length || 1,
+            glueTabs: res.glueTabCount,
+            omittedTabs: res.omittedTabCount,
+            ...(res.omittedTabCount > 0
+              ? {
+                  omittedTabsHint: `${res.omittedTabCount} glue tab(s) were omitted due to overlap/clearance collisions; try a narrower tab_width_mm (e.g. ${suggestedTabWidthMm} mm) to fit more tabs.`,
+                }
+              : {}),
+            ...(sheetPreset ? { sheetPreset } : {}),
+            ...(sheetGroups ? { sheetGroups } : {}),
+          },
+          res.warnings,
+          sheets,
+        );
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }

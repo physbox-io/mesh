@@ -758,7 +758,20 @@ export const sceneCommands: McpCommands = {
       ...(typeof stockDepthMm === 'number' ? { depthMm: stockDepthMm } : {}),
       ...(typeof stockThicknessMm === 'number' ? { thicknessMm: stockThicknessMm } : {}),
     };
-    if (Object.keys(stockPatch).length > 0) store.setStock(stockPatch);
+    const stockClamped: string[] = [];
+    if (Object.keys(stockPatch).length > 0) {
+      store.setStock(stockPatch);
+      const applied = useStore.getState().stock;
+      if (typeof stockWidthMm === 'number' && Math.abs(applied.widthMm - stockWidthMm) > 1e-6) {
+        stockClamped.push(`stockWidthMm clamped from ${stockWidthMm} to ${applied.widthMm} mm (valid range: 1..3000 mm)`);
+      }
+      if (typeof stockDepthMm === 'number' && Math.abs(applied.depthMm - stockDepthMm) > 1e-6) {
+        stockClamped.push(`stockDepthMm clamped from ${stockDepthMm} to ${applied.depthMm} mm (valid range: 1..3000 mm)`);
+      }
+      if (typeof stockThicknessMm === 'number' && Math.abs(applied.thicknessMm - stockThicknessMm) > 1e-6) {
+        stockClamped.push(`stockThicknessMm clamped from ${stockThicknessMm} to ${applied.thicknessMm} mm (valid range: 0.1..300 mm)`);
+      }
+    }
     if (fidelity !== undefined) {
       store.setSimFidelity(fidelity === 'standard' ? 'standard' : 'print');
     }
@@ -803,6 +816,7 @@ export const sceneCommands: McpCommands = {
       ...(Object.keys(stockPatch).length > 0
         ? { stock: stockReport(useStore.getState().sceneGraph, useStore.getState().stock) }
         : {}),
+      ...(stockClamped.length > 0 ? { warning: stockClamped.join('; ') } : {}),
     };
   },
   BUILD_SCENE: async (msg) => {

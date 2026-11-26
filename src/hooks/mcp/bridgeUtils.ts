@@ -18,10 +18,20 @@ export interface PhysicsWindow extends Window {
   _physics_getNoteCards?: () => NoteCard[];
   _physics_setCopilotMessages?: (msgs: SavedCopilotMessage[]) => void;
   _physics_getCopilotMessages?: () => SavedCopilotMessage[];
-  _physics_gl?: { domElement: HTMLCanvasElement; render: (scene: unknown, camera: unknown) => void };
+  _physics_gl?: {
+    domElement: HTMLCanvasElement;
+    render: (scene: unknown, camera: unknown) => void;
+    getPixelRatio?: () => number;
+    setPixelRatio?: (dpr: number) => void;
+    getSize?: (target: { x: number; y: number }) => { x: number; y: number };
+    setSize?: (width: number, height: number, updateStyle?: boolean) => void;
+  };
   _physics_scene?: unknown;
   _physics_camera?: unknown;
-  _physics_composer?: { render: () => void };
+  _physics_composer?: {
+    render: () => void;
+    setSize?: (width: number, height: number, updateStyle?: boolean) => void;
+  };
 }
 
 /**
