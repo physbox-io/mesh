@@ -829,18 +829,139 @@ export function balanceBody(
           const exactSeat = targetComLocal.clone().addScaledVector(dir, usableLever);
           const finalCenter = clampInsideBounds(exactSeat, boundsLocal, nutMargin * 0.6);
 
-          // Spread multiple nuts compactly perpendicular to `dir` around `finalCenter`
-          const nutHeightM = (HEX_NUTS[szNut]?.[1] ?? 6.8) / 1000;
-          const perpA = Math.abs(dir.z) < 0.9
-            ? new THREE.Vector3(-dir.y, dir.x, 0).normalize()
-            : new THREE.Vector3(1, 0, 0);
-          const nuts: SceneNode[] = [];
-          for (let k = 0; k < count; k++) {
-            const offsetIdx = k - (count - 1) / 2;
-            const p = new THREE.Vector3(...finalCenter).addScaledVector(perpA, offsetIdx * Math.min(nutHeightM * 0.5, minSpan * 0.06));
-            const posLocal = clampInsideBounds(p, boundsLocal, nutMargin * 0.4);
-            nuts.push(makeSilentBallastNut(working.id, k + 1, szNut, posLocal));
+          // Pack multiple nuts without overlapping each other, staying inside the
+          // body's solid geometry (preferring the extreme `dir` end for maximum lever arm).
+          const [flatsMm, heightMm] = HEX_NUTS[szNut] ?? [10, 6.8];
+          const nutR = (flatsMm / (2 * Math.cos(Math.PI / 6))) / 1000;
+          const nutH = heightMm / 1000;
+          const stepXY = nutR * 2 + 0.001;
+          const stepZ = nutH + 0.0006;
+
+          const solidGeoms = (working.geoms ?? []).filter(
+            (g) => !g.csgDerived && g.csg !== 'difference' && g.role !== 'visual',
+          );
+          const fitsInsideBody = (pt: THREE.Vector3, wallM: number): boolean => {
+            if (solidGeoms.length === 0) return true;
+            for (const g of solidGeoms) {
+              const gp = g.pos ?? [0, 0, 0];
+              const dx = pt.x - (gp[0] ?? 0);
+              const dy = pt.y - (gp[1] ?? 0);
+              const dz = pt.z - (gp[2] ?? 0);
+              if (g.type === 'cylinder' && g.size && g.size.length >= 2 && !g.euler && !g.quat) {
+                const r = g.size[0];
+                const hh = g.size[1];
+                if (Math.hypot(dx, dy) + nutR + wallM <= r && Math.abs(dz) + nutH * 0.5 + wallM <= hh) {
+                  return true;
+                }
+              } else if (g.type === 'box' && g.size && g.size.length >= 3 && !g.euler && !g.quat) {
+                if (
+                  Math.abs(dx) + nutR + wallM <= g.size[0] &&
+                  Math.abs(dy) + nutR + wallM <= g.size[1] &&
+                  Math.abs(dz) + nutH * 0.5 + wallM <= g.size[2]
+                ) {
+                  return true;
+                }
+              } else if (g.type === 'sphere' && g.size && g.size.length >= 1) {
+                if (Math.hypot(dx, dy, dz) + Math.hypot(nutR, nutH * 0.5) + wallM <= g.size[0]) {
+                  return true;
+                }
+              }
+            }
+            return false;
+          };
+
+          const hasPrimitiveShell = solidGeoms.some(
+            (g) => (g.type === 'cylinder' || g.type === 'box' || g.type === 'sphere') && !g.euler && !g.quat,
+          );
+
+          const placed: THREE.Vector3[] = [];
+          const overlapsPlaced = (cand: THREE.Vector3): boolean =>
+            placed.some(
+              (q) =>
+                Math.hypot(cand.x - q.x, cand.y - q.y) < stepXY - 1e-5 &&
+                Math.abs(cand.z - q.z) < stepZ - 1e-5,
+            );
+
+          const isVerticalDir = Math.abs(dir.z) >= 0.85;
+          if (count === 1) {
+            placed.push(new THREE.Vector3(...finalCenter));
+          } else if (isVerticalDir) {
+            // Stack layers from the deepest `dir.z` end back toward the center,
+            // packing symmetric non-overlapping rings on each layer.
+            const zSign = dir.z < 0 ? 1 : -1; // step away from extreme end
+            const zStart = dir.z < 0
+              ? boundsLocal.min[2] + nutH * 0.5 + Math.min(minWallM, nutMargin)
+              : boundsLocal.max[2] - nutH * 0.5 - Math.min(minWallM, nutMargin);
+            const wallCheck = Math.min(minWallM, 0.002);
+            const cx = finalCenter[0];
+            const cy = finalCenter[1];
+            for (let layer = 0; layer < count + 4 && placed.length < count; layer++) {
+              const z = zStart + zSign * layer * stepZ;
+              if (z < boundsLocal.min[2] + nutH * 0.5 || z > boundsLocal.max[2] - nutH * 0.5) break;
+              const remaining = count - placed.length;
+              // Try a symmetric ring of up to 4 nuts if multiple remain and fit on this layer
+              const ringCount = remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
+              let placedOnLayer = false;
+              if (ringCount > 1) {
+                const ringR = ringCount === 2 ? stepXY * 0.52 : stepXY / Math.SQRT2 + 0.0005;
+                const phase = ringCount === 4 ? Math.PI / 4 : 0;
+                const ringPts = Array.from({ length: ringCount }, (_, j) => {
+                  const a = phase + (j * 2 * Math.PI) / ringCount;
+                  return new THREE.Vector3(cx + ringR * Math.cos(a), cy + ringR * Math.sin(a), z);
+                });
+                const allFit = ringPts.every(
+                  (p) =>
+                    !overlapsPlaced(p) &&
+                    (hasPrimitiveShell
+                      ? fitsInsideBody(p, wallCheck)
+                      : p.x - nutR >= boundsLocal.min[0] &&
+                        p.x + nutR <= boundsLocal.max[0] &&
+                        p.y - nutR >= boundsLocal.min[1] &&
+                        p.y + nutR <= boundsLocal.max[1]),
+                );
+                if (allFit) {
+                  placed.push(...ringPts);
+                  placedOnLayer = true;
+                }
+              }
+              if (!placedOnLayer) {
+                const centerPt = new THREE.Vector3(cx, cy, z);
+                if (!overlapsPlaced(centerPt)) {
+                  placed.push(centerPt);
+                }
+              }
+            }
+          } else {
+            // Horizontal balance (stand / spin): arrange along tangent or stack in Z without overlap
+            const perpA = new THREE.Vector3(-dir.y, dir.x, 0).normalize();
+            const cols = Math.max(1, Math.min(count, Math.floor((Math.max(sx, sy) - 2 * nutMargin) / stepXY)));
+            for (let k = 0; k < count; k++) {
+              const col = k % cols;
+              const row = Math.floor(k / cols);
+              const totalRows = Math.ceil(count / cols);
+              const colOffset = (col - (cols - 1) / 2) * stepXY;
+              const rowOffset = (row - (totalRows - 1) / 2) * stepZ;
+              const p = new THREE.Vector3(...finalCenter)
+                .addScaledVector(perpA, colOffset)
+                .add(new THREE.Vector3(0, 0, rowOffset));
+              placed.push(new THREE.Vector3(...clampInsideBounds(p, boundsLocal, nutMargin * 0.4)));
+            }
           }
+
+          // Fallback if layer loop exited early
+          while (placed.length < count) {
+            const k = placed.length;
+            const zSign = dir.z <= 0 ? 1 : -1;
+            placed.push(new THREE.Vector3(finalCenter[0], finalCenter[1], finalCenter[2] + zSign * k * stepZ));
+          }
+
+          const nuts: SceneNode[] = placed.slice(0, count).map((p, k) =>
+            makeSilentBallastNut(working.id, k + 1, szNut, [
+              +p.x.toFixed(6),
+              +p.y.toFixed(6),
+              +p.z.toFixed(6),
+            ]),
+          );
           working.children = [...(working.children ?? []), ...nuts];
           ballastNutSize = szNut;
           ballastNutCount = count;

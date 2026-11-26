@@ -215,21 +215,40 @@ function buildFlagInWindScene(): SceneGraph {
         pos: [0, 0, 1.365],
         csg: 'difference',
       },
-      // Taut Ø6 mm stainless halyard stay (z = 0.70..2.54 m, L/D = 307 -> crisp coastal Strouhal hum)
+      // Taut Ø6 mm stainless halyard stay on -X side (z = 0.705..2.562 m, L/D = 309 -> crisp coastal Strouhal hum)
+      // Terminates cleanly at the mast truck sheave arm above and the belay cleat below,
+      // with 2.5 mm clearance from shackle_brass_clew at t = 0.
       {
         name: 'halyard_stay',
         type: 'capsule',
-        fromto: [0, -0.036, 0.70, 0, -0.034, 2.54],
+        fromto: [-0.049, 0, 0.705, -0.049, 0, 2.562],
         size: [0.003],
         rgba: [0.86, 0.88, 0.91, 1],
       },
-      // Masthead brass truck, spun brass finial ball, horn cleat & halyard hardware
+      // Masthead brass truck, sheave bracket, spun brass finial ball, horn cleat & halyard hardware
       {
         name: 'mast_truck',
         type: 'cylinder',
         size: [0.033, 0.012],
         pos: [0, 0, 2.562],
         rgba: [0.85, 0.68, 0.24, 1],
+        role: 'visual',
+      },
+      {
+        name: 'mast_truck_sheave_arm',
+        type: 'capsule',
+        fromto: [-0.052, 0, 2.562, 0.036, 0, 2.562],
+        size: [0.006],
+        rgba: [0.85, 0.68, 0.24, 1],
+        role: 'visual',
+      },
+      {
+        name: 'mast_truck_sheave',
+        type: 'cylinder',
+        size: [0.010, 0.004],
+        pos: [-0.045, 0, 2.562],
+        euler: [90, 0, 0],
+        rgba: [0.76, 0.60, 0.20, 1],
         role: 'visual',
       },
       {
@@ -240,10 +259,36 @@ function buildFlagInWindScene(): SceneGraph {
         rgba: [0.94, 0.79, 0.30, 1],
         role: 'visual',
       },
+      // Upper halyard line & brass swivel connecting mast truck sheave down to halyard_shackle pivot
+      {
+        name: 'halyard_shackle_line',
+        type: 'capsule',
+        fromto: [-0.039, 0, 1.18, -0.039, 0, 2.562],
+        size: [0.002],
+        rgba: [0.88, 0.89, 0.92, 1],
+        role: 'visual',
+      },
+      {
+        name: 'halyard_shackle_swivel',
+        type: 'sphere',
+        size: [0.0045],
+        pos: [-0.039, 0, 1.18],
+        rgba: [0.90, 0.74, 0.26, 1],
+        role: 'visual',
+      },
+      // Brass cleat mounting standoff solidly into mast_main + horn cleat on -X
+      {
+        name: 'halyard_cleat_standoff',
+        type: 'capsule',
+        fromto: [-0.024, 0, 0.705, -0.049, 0, 0.705],
+        size: [0.006],
+        rgba: [0.85, 0.68, 0.24, 1],
+        role: 'visual',
+      },
       {
         name: 'halyard_belay_cleat',
         type: 'capsule',
-        fromto: [-0.036, 0, 0.65, -0.036, 0, 0.76],
+        fromto: [-0.044, 0, 0.65, -0.044, 0, 0.76],
         size: [0.0045],
         rgba: [0.85, 0.68, 0.24, 1],
         role: 'visual',
@@ -251,9 +296,17 @@ function buildFlagInWindScene(): SceneGraph {
       {
         name: 'hoist_halyard_line',
         type: 'capsule',
-        fromto: [0.032, 0, 0.72, 0.032, 0, 2.54],
+        fromto: [0.032, 0, 0.72, 0.032, 0, 2.562],
         size: [0.0018],
         rgba: [0.92, 0.90, 0.84, 1],
+        role: 'visual',
+      },
+      {
+        name: 'hoist_lower_fairlead',
+        type: 'capsule',
+        fromto: [0.024, 0, 0.72, 0.034, 0, 0.72],
+        size: [0.004],
+        rgba: [0.85, 0.68, 0.24, 1],
         role: 'visual',
       },
       ...[ensignTopZ, ensignMidZ, ensignBotZ, burgeeTopZ, burgeeBotZ].map((z, idx) => ({

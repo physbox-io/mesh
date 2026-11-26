@@ -54,7 +54,7 @@ function gather(nodes: SceneNode[]) {
         welds.push({ bodyName, bodyId: node.id, targetId: node.weldTargetId, ...(node.weldRigid ? { rigid: true } : {}) });
       }
       if (node.isComposite && node.weldLastToId) {
-        welds.push({ bodyName: (node.compositePrefix || `${bodyName}_`) + 'B_last', targetId: node.weldLastToId });
+        welds.push({ bodyName: (node.compositePrefix || `${bodyName}_`) + 'B_last', targetId: node.weldLastToId, ...(node.weldRigid ? { rigid: true } : {}) });
       }
       if (node.connectTargetId && node.connectAnchor && node.connectTargetId !== node.id && node.connectTargetId !== bodyName) {
         connects.push({ bodyId: node.id, bodyName, targetId: node.connectTargetId, anchor: node.connectAnchor });

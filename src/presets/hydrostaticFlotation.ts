@@ -43,8 +43,8 @@ export const hydrostaticFlotationPreset: SceneGraph = (() => {
       {
         name: `${id}_keel_skirt`,
         type: 'cylinder',
-        size: [0.026, 0.018],
-        pos: [0, 0, -0.048],
+        size: [0.038, 0.020],
+        pos: [0, 0, -0.050],
         density: 380,
         rgba: [0.22, 0.25, 0.30, 1],
       },

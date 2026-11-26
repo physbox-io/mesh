@@ -1533,7 +1533,8 @@ export const windmillPreset: SceneGraph = {
             { name: 'yaw_hinge', type: 'hinge', axis: [0, 0, 1], damping: 5.0 }
           ],
           geoms: [
-            { name: 'nacelle_body', type: 'box', size: [0.08, 0.04, 0.04], rgba: [0.9, 0.9, 0.9, 1], contype: 0, conaffinity: 0 }
+            { name: 'nacelle_body', type: 'box', size: [0.08, 0.04, 0.04], rgba: [0.9, 0.9, 0.9, 1], contype: 0, conaffinity: 0 },
+            { name: 'tail_boom', type: 'capsule', fromto: [-0.075, 0, 0, -0.16, 0, 0], size: [0.008], rgba: [0.7, 0.7, 0.72, 1], mass: 0.02, contype: 0, conaffinity: 0 }
           ],
           children: [
             {
@@ -1553,11 +1554,12 @@ export const windmillPreset: SceneGraph = {
               id: 'rotor',
               name: 'rotor',
               type: 'body',
-              pos: [0.1, 0, 0],
+              pos: [0.14, 0, 0],
               joints: [
                 { name: 'rotor_hinge', type: 'hinge', axis: [1, 0, 0], damping: 0.05 }
               ],
               geoms: [
+                { name: 'rotor_axle', type: 'capsule', fromto: [-0.06, 0, 0, 0, 0, 0], size: [0.012], rgba: [0.55, 0.55, 0.6, 1], mass: 0.02, contype: 0, conaffinity: 0 },
                 { name: 'rotor_hub', type: 'sphere', size: [0.04], rgba: [0.85, 0.25, 0.25, 1], contype: 0, conaffinity: 0 }
               ],
               children: [
@@ -1634,7 +1636,8 @@ export const physicsOnlyWindmillPreset: SceneGraph = {
             { name: 'yaw_hinge', type: 'hinge', axis: [0, 0, 1], damping: 5.0 }
           ],
           geoms: [
-            { name: 'nacelle_body', type: 'box', size: [0.08, 0.04, 0.04], rgba: [0.9, 0.9, 0.9, 1], contype: 0, conaffinity: 0 }
+            { name: 'nacelle_body', type: 'box', size: [0.08, 0.04, 0.04], rgba: [0.9, 0.9, 0.9, 1], contype: 0, conaffinity: 0 },
+            { name: 'tail_boom', type: 'capsule', fromto: [-0.075, 0, 0, -0.16, 0, 0], size: [0.008], rgba: [0.7, 0.7, 0.72, 1], mass: 0.02, contype: 0, conaffinity: 0 }
           ],
           children: [
             {
@@ -1653,7 +1656,7 @@ export const physicsOnlyWindmillPreset: SceneGraph = {
               id: 'rotor',
               name: 'rotor',
               type: 'body',
-              pos: [0.1, 0, 0],
+              pos: [0.14, 0, 0],
               // A fixed shaft torque stands in for the aerodynamic version's
               // lift. The rotor previously had no script, no actuator and no
               // aerodynamic geoms, so nothing drove it and the turbine just
@@ -1668,6 +1671,7 @@ export const physicsOnlyWindmillPreset: SceneGraph = {
                 { name: 'rotor_hinge', type: 'hinge', axis: [1, 0, 0], damping: 0.05 }
               ],
               geoms: [
+                { name: 'rotor_axle', type: 'capsule', fromto: [-0.06, 0, 0, 0, 0, 0], size: [0.012], rgba: [0.55, 0.55, 0.6, 1], mass: 0.02, contype: 0, conaffinity: 0 },
                 { name: 'rotor_hub', type: 'sphere', size: [0.04], rgba: [0.85, 0.25, 0.25, 1], contype: 0, conaffinity: 0 }
               ],
               children: [
@@ -1719,219 +1723,115 @@ export const physicsOnlyWindmillPreset: SceneGraph = {
   ]
 };
 
-export const dronePreset: SceneGraph = {
-  nodes: [
-    {
-      id: 'tower',
-      name: 'tower',
+export const dronePreset: SceneGraph = (() => {
+  // Quadcopter geometry with real physical rotor disc clearance:
+  // - Motor pods sit at (±ARM, ±ARM) with ARM = 0.14 m → 280 mm adjacent pod spacing
+  //   and 198 mm diagonal radius from the center mast (radius 8 mm).
+  // - Blade tip radius is 0.070 + 0.055 = 0.125 m (250 mm diameter):
+  //   30 mm clearance between adjacent rotor discs, 65 mm clearance from tower_mast.
+  // - Spinning 250 mm props at ±270 rad/s (~2580 RPM) with 12° pitch preserves
+  //   the original liftoff thrust and aeroacoustic rotor loading.
+  const ARM = 0.14;
+  const OMEGA = 270.0;
+  const PITCH = 12;
+
+  const makeDroneGeoms = (prefix: string, fuselageRgba: [number, number, number, number]): SceneGeom[] => [
+    { name: `${prefix}fuselage`, type: 'box', size: [0.05, 0.05, 0.025], rgba: fuselageRgba, mass: 0.2 },
+    { name: `${prefix}arm1`, type: 'cylinder', fromto: [0, 0, 0, ARM, ARM, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+    { name: `${prefix}arm2`, type: 'cylinder', fromto: [0, 0, 0, ARM, -ARM, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+    { name: `${prefix}arm3`, type: 'cylinder', fromto: [0, 0, 0, -ARM, ARM, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+    { name: `${prefix}arm4`, type: 'cylinder', fromto: [0, 0, 0, -ARM, -ARM, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+    { name: `${prefix}pod1`, type: 'cylinder', size: [0.012, 0.02], pos: [ARM, ARM, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 },
+    { name: `${prefix}pod2`, type: 'cylinder', size: [0.012, 0.02], pos: [ARM, -ARM, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 },
+    { name: `${prefix}pod3`, type: 'cylinder', size: [0.012, 0.02], pos: [-ARM, ARM, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 },
+    { name: `${prefix}pod4`, type: 'cylinder', size: [0.012, 0.02], pos: [-ARM, -ARM, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 },
+  ];
+
+  const makeRotors = (prefix: string): SceneNode[] => {
+    const specs: Array<{ idx: number; pos: [number, number, number]; dir: 1 | -1; rgba: [number, number, number, number] }> = [
+      { idx: 1, pos: [ARM, ARM, 0.03], dir: 1, rgba: [0.85, 0.25, 0.25, 1] },
+      { idx: 2, pos: [ARM, -ARM, 0.03], dir: -1, rgba: [0.25, 0.85, 0.25, 1] },
+      { idx: 3, pos: [-ARM, ARM, 0.03], dir: -1, rgba: [0.25, 0.85, 0.25, 1] },
+      { idx: 4, pos: [-ARM, -ARM, 0.03], dir: 1, rgba: [0.85, 0.25, 0.25, 1] },
+    ];
+    return specs.map(({ idx, pos, dir, rgba }) => ({
+      id: `${prefix}rotor${idx}`,
+      name: `${prefix}rotor${idx}`,
       type: 'body',
-      pos: [0, 0, 0],
-      joints: [],
+      pos,
+      joints: [
+        { name: `${prefix}rotor${idx}_joint`, type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: dir * OMEGA } },
+      ],
       geoms: [
-        { name: 'tower_base', type: 'cylinder', size: [0.1, 0.02], pos: [0, 0, 0.02], rgba: [0.7, 0.7, 0.7, 1] },
-        { name: 'tower_mast', type: 'cylinder', size: [0.008, 0.45], pos: [0, 0, 0.45], rgba: [0.9, 0.9, 0.9, 1], contype: 0, conaffinity: 0 }
+        { name: `${prefix}hub${idx}`, type: 'sphere', size: [0.01], rgba, mass: 0.02, contype: 0, conaffinity: 0 },
       ],
       children: [
         {
-          id: 'drone_body',
-          name: 'drone_body',
+          id: `${prefix}r${idx}_b1`,
+          name: `${prefix}r${idx}_b1`,
           type: 'body',
-          pos: [0, 0, 0.15],
-          joints: [
-            { name: 'drone_slide', type: 'slide', axis: [0, 0, 1], damping: 1.5, limited: true, range: [0.02, 0.8] },
-            { name: 'drone_yaw', type: 'hinge', axis: [0, 0, 1], damping: 0.5 }
-          ],
+          pos: [0, 0, 0],
+          euler: [0, dir * PITCH, 0],
+          isAerodynamic: true,
+          joints: [],
           geoms: [
-            { name: 'fuselage', type: 'box', size: [0.05, 0.05, 0.025], rgba: [0.2, 0.5, 0.8, 1], mass: 0.2 },
-            { name: 'arm1', type: 'cylinder', fromto: [0, 0, 0, 0.1, 0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-            { name: 'arm2', type: 'cylinder', fromto: [0, 0, 0, 0.1, -0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-            { name: 'arm3', type: 'cylinder', fromto: [0, 0, 0, -0.1, 0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-            { name: 'arm4', type: 'cylinder', fromto: [0, 0, 0, -0.1, -0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-            { name: 'pod1', type: 'cylinder', size: [0.012, 0.02], pos: [0.1, 0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 },
-            { name: 'pod2', type: 'cylinder', size: [0.012, 0.02], pos: [0.1, -0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 },
-            { name: 'pod3', type: 'cylinder', size: [0.012, 0.02], pos: [-0.1, 0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 },
-            { name: 'pod4', type: 'cylinder', size: [0.012, 0.02], pos: [-0.1, -0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 }
+            { name: `${prefix}r${idx}_b1_sail`, type: 'box', size: [0.025, 0.055, 0.001], pos: [0, 0.07, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+            { name: `${prefix}r${idx}_b1_shaft`, type: 'capsule', fromto: [0, 0, 0, 0, 0.022, 0], size: [0.0035], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 },
           ],
-          children: [
-            {
-              id: 'rotor1',
-              name: 'rotor1',
-              type: 'body',
-              pos: [0.1, 0.1, 0.03],
-              joints: [
-                { name: 'rotor1_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: 90.0 } }
-              ],
-              geoms: [
-                { name: 'hub1', type: 'sphere', size: [0.01], rgba: [0.85, 0.25, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
-              ],
-              children: [
-                {
-                  id: 'r1_b1',
-                  name: 'r1_b1',
-                  type: 'body',
-                  pos: [0, 0, 0],
-                  euler: [0, 10, 0],
-                  isAerodynamic: true,
-                  joints: [],
-                  geoms: [
-                    { name: 'r1_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                    { name: 'r1_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-                  ],
-                  children: []
-                },
-                {
-                  id: 'r1_b2',
-                  name: 'r1_b2',
-                  type: 'body',
-                  pos: [0, 0, 0],
-                  euler: [0, -10, 180],
-                  isAerodynamic: true,
-                  joints: [],
-                  geoms: [
-                    { name: 'r1_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                    { name: 'r1_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-                  ],
-                  children: []
-                }
-              ]
-            },
-            {
-              id: 'rotor2',
-              name: 'rotor2',
-              type: 'body',
-              pos: [0.1, -0.1, 0.03],
-              joints: [
-                { name: 'rotor2_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: -90.0 } }
-              ],
-              geoms: [
-                { name: 'hub2', type: 'sphere', size: [0.01], rgba: [0.25, 0.85, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
-              ],
-              children: [
-                {
-                  id: 'r2_b1',
-                  name: 'r2_b1',
-                  type: 'body',
-                  pos: [0, 0, 0],
-                  euler: [0, -10, 0],
-                  isAerodynamic: true,
-                  joints: [],
-                  geoms: [
-                    { name: 'r2_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                    { name: 'r2_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-                  ],
-                  children: []
-                },
-                {
-                  id: 'r2_b2',
-                  name: 'r2_b2',
-                  type: 'body',
-                  pos: [0, 0, 0],
-                  euler: [0, 10, 180],
-                  isAerodynamic: true,
-                  joints: [],
-                  geoms: [
-                    { name: 'r2_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                    { name: 'r2_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-                  ],
-                  children: []
-                }
-              ]
-            },
-            {
-              id: 'rotor3',
-              name: 'rotor3',
-              type: 'body',
-              pos: [-0.1, 0.1, 0.03],
-              joints: [
-                { name: 'rotor3_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: -90.0 } }
-              ],
-              geoms: [
-                { name: 'hub3', type: 'sphere', size: [0.01], rgba: [0.25, 0.85, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
-              ],
-              children: [
-                {
-                  id: 'r3_b1',
-                  name: 'r3_b1',
-                  type: 'body',
-                  pos: [0, 0, 0],
-                  euler: [0, -10, 0],
-                  isAerodynamic: true,
-                  joints: [],
-                  geoms: [
-                    { name: 'r3_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                    { name: 'r3_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-                  ],
-                  children: []
-                },
-                {
-                  id: 'r3_b2',
-                  name: 'r3_b2',
-                  type: 'body',
-                  pos: [0, 0, 0],
-                  euler: [0, 10, 180],
-                  isAerodynamic: true,
-                  joints: [],
-                  geoms: [
-                    { name: 'r3_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                    { name: 'r3_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-                  ],
-                  children: []
-                }
-              ]
-            },
-            {
-              id: 'rotor4',
-              name: 'rotor4',
-              type: 'body',
-              pos: [-0.1, -0.1, 0.03],
-              joints: [
-                { name: 'rotor4_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: 90.0 } }
-              ],
-              geoms: [
-                { name: 'hub4', type: 'sphere', size: [0.01], rgba: [0.85, 0.25, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
-              ],
-              children: [
-                {
-                  id: 'r4_b1',
-                  name: 'r4_b1',
-                  type: 'body',
-                  pos: [0, 0, 0],
-                  euler: [0, 10, 0],
-                  isAerodynamic: true,
-                  joints: [],
-                  geoms: [
-                    { name: 'r4_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                    { name: 'r4_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-                  ],
-                  children: []
-                },
-                {
-                  id: 'r4_b2',
-                  name: 'r4_b2',
-                  type: 'body',
-                  pos: [0, 0, 0],
-                  euler: [0, -10, 180],
-                  isAerodynamic: true,
-                  joints: [],
-                  geoms: [
-                    { name: 'r4_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                    { name: 'r4_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-                  ],
-                  children: []
-                }
-              ]
-            }
-          ]
-        }
-      ]
-    },
-    {
-      id: 'free_drone_body',
-      name: 'free_drone_body',
-      type: 'body',
-      pos: [0.35, 0, 0.08],
-      euler: [10, 10, 0],
-      script: `
+          children: [],
+        },
+        {
+          id: `${prefix}r${idx}_b2`,
+          name: `${prefix}r${idx}_b2`,
+          type: 'body',
+          pos: [0, 0, 0],
+          euler: [0, -dir * PITCH, 180],
+          isAerodynamic: true,
+          joints: [],
+          geoms: [
+            { name: `${prefix}r${idx}_b2_sail`, type: 'box', size: [0.025, 0.055, 0.001], pos: [0, 0.07, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+            { name: `${prefix}r${idx}_b2_shaft`, type: 'capsule', fromto: [0, 0, 0, 0, 0.022, 0], size: [0.0035], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 },
+          ],
+          children: [],
+        },
+      ],
+    }));
+  };
+
+  return {
+    nodes: [
+      {
+        id: 'tower',
+        name: 'tower',
+        type: 'body',
+        pos: [0, 0, 0],
+        joints: [],
+        geoms: [
+          { name: 'tower_base', type: 'cylinder', size: [0.1, 0.02], pos: [0, 0, 0.02], rgba: [0.7, 0.7, 0.7, 1] },
+          { name: 'tower_mast', type: 'cylinder', size: [0.008, 0.45], pos: [0, 0, 0.45], rgba: [0.9, 0.9, 0.9, 1], contype: 0, conaffinity: 0 },
+        ],
+        children: [
+          {
+            id: 'drone_body',
+            name: 'drone_body',
+            type: 'body',
+            pos: [0, 0, 0.15],
+            joints: [
+              { name: 'drone_slide', type: 'slide', axis: [0, 0, 1], damping: 1.5, limited: true, range: [-0.08, 0.7] },
+              { name: 'drone_yaw', type: 'hinge', axis: [0, 0, 1], damping: 0.5 },
+            ],
+            geoms: makeDroneGeoms('', [0.2, 0.5, 0.8, 1]),
+            children: makeRotors(''),
+          },
+        ],
+      },
+      {
+        id: 'free_drone_body',
+        name: 'free_drone_body',
+        type: 'body',
+        pos: [0.62, 0, 0.08],
+        euler: [10, 10, 0],
+        script: `
 const R = api.getOrientation();
 const angvel = api.getAngularVelocity();
 const Kp = 12.0;
@@ -1940,385 +1840,28 @@ const tx = Kp * R[5] - Kd * angvel[0];
 const ty = -Kp * R[2] - Kd * angvel[1];
 const tz = -0.5 * angvel[2];
 api.applyTorque([tx, ty, tz]);
-      `.trim(),
-      joints: [
-        { name: 'free_drone_free', type: 'free', damping: 0.5 }
-      ],
-      geoms: [
-        { name: 'free_fuselage', type: 'box', size: [0.05, 0.05, 0.025], rgba: [0.8, 0.2, 0.5, 1], mass: 0.2 },
-        { name: 'free_arm1', type: 'cylinder', fromto: [0, 0, 0, 0.1, 0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-        { name: 'free_arm2', type: 'cylinder', fromto: [0, 0, 0, 0.1, -0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-        { name: 'free_arm3', type: 'cylinder', fromto: [0, 0, 0, -0.1, 0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-        { name: 'free_arm4', type: 'cylinder', fromto: [0, 0, 0, -0.1, -0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-        { name: 'free_pod1', type: 'cylinder', size: [0.012, 0.02], pos: [0.1, 0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 },
-        { name: 'free_pod2', type: 'cylinder', size: [0.012, 0.02], pos: [0.1, -0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 },
-        { name: 'free_pod3', type: 'cylinder', size: [0.012, 0.02], pos: [-0.1, 0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 },
-        { name: 'free_pod4', type: 'cylinder', size: [0.012, 0.02], pos: [-0.1, -0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 }
-      ],
-      children: [
-        {
-          id: 'free_rotor1',
-          name: 'free_rotor1',
-          type: 'body',
-          pos: [0.1, 0.1, 0.03],
-          joints: [
-            { name: 'free_rotor1_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: 90.0 } }
-          ],
-          geoms: [
-            { name: 'free_hub1', type: 'sphere', size: [0.01], rgba: [0.85, 0.25, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
-          ],
-          children: [
-            {
-              id: 'free_r1_b1',
-              name: 'free_r1_b1',
-              type: 'body',
-              pos: [0, 0, 0],
-              euler: [0, 10, 0],
-              isAerodynamic: true,
-              joints: [],
-              geoms: [
-                { name: 'free_r1_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                { name: 'free_r1_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-              ],
-              children: []
-            },
-            {
-              id: 'free_r1_b2',
-              name: 'free_r1_b2',
-              type: 'body',
-              pos: [0, 0, 0],
-              euler: [0, -10, 180],
-              isAerodynamic: true,
-              joints: [],
-              geoms: [
-                { name: 'free_r1_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                { name: 'free_r1_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-              ],
-              children: []
-            }
-          ]
-        },
-        {
-          id: 'free_rotor2',
-          name: 'free_rotor2',
-          type: 'body',
-          pos: [0.1, -0.1, 0.03],
-          joints: [
-            { name: 'free_rotor2_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: -90.0 } }
-          ],
-          geoms: [
-            { name: 'free_hub2', type: 'sphere', size: [0.01], rgba: [0.25, 0.85, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
-          ],
-          children: [
-            {
-              id: 'free_r2_b1',
-              name: 'free_r2_b1',
-              type: 'body',
-              pos: [0, 0, 0],
-              euler: [0, -10, 0],
-              isAerodynamic: true,
-              joints: [],
-              geoms: [
-                { name: 'free_r2_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                { name: 'free_r2_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-              ],
-              children: []
-            },
-            {
-              id: 'free_r2_b2',
-              name: 'free_r2_b2',
-              type: 'body',
-              pos: [0, 0, 0],
-              euler: [0, 10, 180],
-              isAerodynamic: true,
-              joints: [],
-              geoms: [
-                { name: 'free_r2_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                { name: 'free_r2_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-              ],
-              children: []
-            }
-          ]
-        },
-        {
-          id: 'free_rotor3',
-          name: 'free_rotor3',
-          type: 'body',
-          pos: [-0.1, 0.1, 0.03],
-          joints: [
-            { name: 'free_rotor3_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: -90.0 } }
-          ],
-          geoms: [
-            { name: 'free_hub3', type: 'sphere', size: [0.01], rgba: [0.25, 0.85, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
-          ],
-          children: [
-            {
-              id: 'free_r3_b1',
-              name: 'free_r3_b1',
-              type: 'body',
-              pos: [0, 0, 0],
-              euler: [0, -10, 0],
-              isAerodynamic: true,
-              joints: [],
-              geoms: [
-                { name: 'free_r3_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                { name: 'free_r3_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-              ],
-              children: []
-            },
-            {
-              id: 'free_r3_b2',
-              name: 'free_r3_b2',
-              type: 'body',
-              pos: [0, 0, 0],
-              euler: [0, 10, 180],
-              isAerodynamic: true,
-              joints: [],
-              geoms: [
-                { name: 'free_r3_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                { name: 'free_r3_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-              ],
-              children: []
-            }
-          ]
-        },
-        {
-          id: 'free_rotor4',
-          name: 'free_rotor4',
-          type: 'body',
-          pos: [-0.1, -0.1, 0.03],
-          joints: [
-            { name: 'free_rotor4_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: 90.0 } }
-          ],
-          geoms: [
-            { name: 'free_hub4', type: 'sphere', size: [0.01], rgba: [0.85, 0.25, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
-          ],
-          children: [
-            {
-              id: 'free_r4_b1',
-              name: 'free_r4_b1',
-              type: 'body',
-              pos: [0, 0, 0],
-              euler: [0, 10, 0],
-              isAerodynamic: true,
-              joints: [],
-              geoms: [
-                { name: 'free_r4_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                { name: 'free_r4_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-              ],
-              children: []
-            },
-            {
-              id: 'free_r4_b2',
-              name: 'free_r4_b2',
-              type: 'body',
-              pos: [0, 0, 0],
-              euler: [0, -10, 180],
-              isAerodynamic: true,
-              joints: [],
-              geoms: [
-                { name: 'free_r4_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                { name: 'free_r4_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-              ],
-              children: []
-            }
-          ]
-        }
-      ]
-    },
-    {
-      id: 'unstable_drone_body',
-      name: 'unstable_drone_body',
-      type: 'body',
-      pos: [-0.35, 0, 0.08],
-      euler: [10, 10, 0],
-      joints: [
-        { name: 'unstable_drone_free', type: 'free', damping: 0.5 }
-      ],
-      geoms: [
-        { name: 'unstable_fuselage', type: 'box', size: [0.05, 0.05, 0.025], rgba: [0.95, 0.85, 0.15, 1], mass: 0.2 },
-        { name: 'unstable_arm1', type: 'cylinder', fromto: [0, 0, 0, 0.1, 0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-        { name: 'unstable_arm2', type: 'cylinder', fromto: [0, 0, 0, 0.1, -0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-        { name: 'unstable_arm3', type: 'cylinder', fromto: [0, 0, 0, -0.1, 0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-        { name: 'unstable_arm4', type: 'cylinder', fromto: [0, 0, 0, -0.1, -0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-        { name: 'unstable_pod1', type: 'cylinder', size: [0.012, 0.02], pos: [0.1, 0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 },
-        { name: 'unstable_pod2', type: 'cylinder', size: [0.012, 0.02], pos: [0.1, -0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 },
-        { name: 'unstable_pod3', type: 'cylinder', size: [0.012, 0.02], pos: [-0.1, 0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 },
-        { name: 'unstable_pod4', type: 'cylinder', size: [0.012, 0.02], pos: [-0.1, -0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 }
-      ],
-      children: [
-        {
-          id: 'unstable_rotor1',
-          name: 'unstable_rotor1',
-          type: 'body',
-          pos: [0.1, 0.1, 0.03],
-          joints: [
-            { name: 'unstable_rotor1_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: 90.0 } }
-          ],
-          geoms: [
-            { name: 'unstable_hub1', type: 'sphere', size: [0.01], rgba: [0.85, 0.25, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
-          ],
-          children: [
-            {
-              id: 'unstable_r1_b1',
-              name: 'unstable_r1_b1',
-              type: 'body',
-              pos: [0, 0, 0],
-              euler: [0, 10, 0],
-              isAerodynamic: true,
-              joints: [],
-              geoms: [
-                { name: 'unstable_r1_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                { name: 'unstable_r1_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-              ],
-              children: []
-            },
-            {
-              id: 'unstable_r1_b2',
-              name: 'unstable_r1_b2',
-              type: 'body',
-              pos: [0, 0, 0],
-              euler: [0, -10, 180],
-              isAerodynamic: true,
-              joints: [],
-              geoms: [
-                { name: 'unstable_r1_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                { name: 'unstable_r1_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-              ],
-              children: []
-            }
-          ]
-        },
-        {
-          id: 'unstable_rotor2',
-          name: 'unstable_rotor2',
-          type: 'body',
-          pos: [0.1, -0.1, 0.03],
-          joints: [
-            { name: 'unstable_rotor2_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: -90.0 } }
-          ],
-          geoms: [
-            { name: 'unstable_hub2', type: 'sphere', size: [0.01], rgba: [0.25, 0.85, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
-          ],
-          children: [
-            {
-              id: 'unstable_r2_b1',
-              name: 'unstable_r2_b1',
-              type: 'body',
-              pos: [0, 0, 0],
-              euler: [0, -10, 0],
-              isAerodynamic: true,
-              joints: [],
-              geoms: [
-                { name: 'unstable_r2_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                { name: 'unstable_r2_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-              ],
-              children: []
-            },
-            {
-              id: 'unstable_r2_b2',
-              name: 'unstable_r2_b2',
-              type: 'body',
-              pos: [0, 0, 0],
-              euler: [0, 10, 180],
-              isAerodynamic: true,
-              joints: [],
-              geoms: [
-                { name: 'unstable_r2_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                { name: 'unstable_r2_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-              ],
-              children: []
-            }
-          ]
-        },
-        {
-          id: 'unstable_rotor3',
-          name: 'unstable_rotor3',
-          type: 'body',
-          pos: [-0.1, 0.1, 0.03],
-          joints: [
-            { name: 'unstable_rotor3_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: -90.0 } }
-          ],
-          geoms: [
-            { name: 'unstable_hub3', type: 'sphere', size: [0.01], rgba: [0.25, 0.85, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
-          ],
-          children: [
-            {
-              id: 'unstable_r3_b1',
-              name: 'unstable_r3_b1',
-              type: 'body',
-              pos: [0, 0, 0],
-              euler: [0, -10, 0],
-              isAerodynamic: true,
-              joints: [],
-              geoms: [
-                { name: 'unstable_r3_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                { name: 'unstable_r3_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-              ],
-              children: []
-            },
-            {
-              id: 'unstable_r3_b2',
-              name: 'unstable_r3_b2',
-              type: 'body',
-              pos: [0, 0, 0],
-              euler: [0, 10, 180],
-              isAerodynamic: true,
-              joints: [],
-              geoms: [
-                { name: 'unstable_r3_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                { name: 'unstable_r3_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-              ],
-              children: []
-            }
-          ]
-        },
-        {
-          id: 'unstable_rotor4',
-          name: 'unstable_rotor4',
-          type: 'body',
-          pos: [-0.1, -0.1, 0.03],
-          joints: [
-            { name: 'unstable_rotor4_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: 90.0 } }
-          ],
-          geoms: [
-            { name: 'unstable_hub4', type: 'sphere', size: [0.01], rgba: [0.85, 0.25, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
-          ],
-          children: [
-            {
-              id: 'unstable_r4_b1',
-              name: 'unstable_r4_b1',
-              type: 'body',
-              pos: [0, 0, 0],
-              euler: [0, 10, 0],
-              isAerodynamic: true,
-              joints: [],
-              geoms: [
-                { name: 'unstable_r4_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                { name: 'unstable_r4_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-              ],
-              children: []
-            },
-            {
-              id: 'unstable_r4_b2',
-              name: 'unstable_r4_b2',
-              type: 'body',
-              pos: [0, 0, 0],
-              euler: [0, -10, 180],
-              isAerodynamic: true,
-              joints: [],
-              geoms: [
-                { name: 'unstable_r4_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
-                { name: 'unstable_r4_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
-              ],
-              children: []
-            }
-          ]
-        }
-      ]
-    }
-  ]
-};
+        `.trim(),
+        joints: [
+          { name: 'free_drone_free', type: 'free', damping: 0.5 },
+        ],
+        geoms: makeDroneGeoms('free_', [0.8, 0.2, 0.5, 1]),
+        children: makeRotors('free_'),
+      },
+      {
+        id: 'unstable_drone_body',
+        name: 'unstable_drone_body',
+        type: 'body',
+        pos: [-0.62, 0, 0.08],
+        euler: [10, 10, 0],
+        joints: [
+          { name: 'unstable_drone_free', type: 'free', damping: 0.5 },
+        ],
+        geoms: makeDroneGeoms('unstable_', [0.95, 0.85, 0.15, 1]),
+        children: makeRotors('unstable_'),
+      },
+    ],
+  };
+})();
 
 export const emptyPreset: SceneGraph = {
   nodes: []
@@ -2373,7 +1916,7 @@ export const traditionalWindmillPreset: SceneGraph = {
       pos: [0, 0, 0],
       joints: [],
       geoms: [
-        { name: 'base_box', type: 'box', size: [0.1, 0.1, 0.03], pos: [0, 0, 0.015], rgba: [0.65, 0.45, 0.25, 1], contype: 0, conaffinity: 0 },
+        { name: 'base_box', type: 'box', size: [0.1, 0.1, 0.03], pos: [0, 0, 0.03], rgba: [0.65, 0.45, 0.25, 1], contype: 0, conaffinity: 0 },
         { name: 'tower_post', type: 'cylinder', size: [0.03, 0.35], pos: [0, 0, 0.35], rgba: [0.7, 0.5, 0.3, 1], contype: 0, conaffinity: 0 }
       ],
       children: [
@@ -2384,7 +1927,8 @@ export const traditionalWindmillPreset: SceneGraph = {
           pos: [0, 0, 0.7],
           joints: [{ name: 'yaw_hinge', type: 'hinge', axis: [0, 0, 1], damping: 2 }],
           geoms: [
-            { name: 'nacelle_body', type: 'box', size: [0.06, 0.03, 0.03], rgba: [0.7, 0.5, 0.3, 1], contype: 0, conaffinity: 0 }
+            { name: 'nacelle_body', type: 'box', size: [0.06, 0.03, 0.03], rgba: [0.7, 0.5, 0.3, 1], contype: 0, conaffinity: 0 },
+            { name: 'tail_boom', type: 'capsule', fromto: [-0.055, 0, 0, -0.15, 0, 0], size: [0.007], rgba: [0.55, 0.38, 0.22, 1], mass: 0.02, contype: 0, conaffinity: 0 }
           ],
           script: yawScript,
           children: [
@@ -2404,9 +1948,10 @@ export const traditionalWindmillPreset: SceneGraph = {
               id: 'rotor',
               name: 'rotor',
               type: 'body',
-              pos: [0.09, 0, 0],
+              pos: [0.115, 0, 0],
               joints: [{ name: 'rotor_hinge', type: 'hinge', axis: [1, 0, 0], damping: 0.05 }],
               geoms: [
+                { name: 'rotor_axle', type: 'capsule', fromto: [-0.055, 0, 0, 0, 0, 0], size: [0.01], rgba: [0.55, 0.38, 0.22, 1], mass: 0.02, contype: 0, conaffinity: 0 },
                 { name: 'rotor_hub', type: 'sphere', size: [0.035], rgba: [0.6, 0.4, 0.2, 1], contype: 0, conaffinity: 0 }
               ],
               script: rotorBEMScript4Blade,
@@ -2623,14 +2168,32 @@ export const ropeBridgePreset: SceneGraph = {
       type: 'body',
       pos: [-0.35, 0, 0.3],
       joints: [],
-      geoms: [{ name: 'left_anchor_geom', type: 'box', size: [0.03, 0.03, 0.03], rgba: [0.4, 0.4, 0.4, 1] }],
+      // Note: mjcfBody.ts uses geoms[0] as the cable segment geom template when isComposite=true,
+      // so the grounded left support pillar lives on the child body `left_abutment` below.
+      geoms: [{ name: 'left_anchor_geom', type: 'capsule', size: [0.012], rgba: [0.76, 0.56, 0.34, 1] }],
       isComposite: true,
       compositeType: 'cable',
       compositeCount: '25 1 1',
       compositeSize: '0.7',
       compositePrefix: 'rope_',
       weldLastToId: 'rope_right_anchor',
-      children: []
+      weldRigid: true,
+      children: [
+        {
+          id: 'left_abutment',
+          name: 'left_abutment',
+          type: 'body',
+          pos: [0, 0, 0],
+          joints: [],
+          geoms: [
+            { name: 'left_anchor_block', type: 'box', size: [0.03, 0.035, 0.03], pos: [-0.045, 0, 0], rgba: [0.42, 0.42, 0.45, 1] },
+            { name: 'left_clevis', type: 'capsule', fromto: [-0.045, 0, 0, 0, 0, 0], size: [0.008], rgba: [0.58, 0.58, 0.62, 1], contype: 0, conaffinity: 0 },
+            { name: 'left_pillar', type: 'box', size: [0.032, 0.042, 0.135], pos: [-0.045, 0, -0.165], rgba: [0.48, 0.48, 0.5, 1] },
+            { name: 'left_footing', type: 'box', size: [0.055, 0.065, 0.015], pos: [-0.045, 0, -0.285], rgba: [0.38, 0.38, 0.4, 1] }
+          ],
+          children: []
+        }
+      ]
     },
     {
       id: 'rope_right_anchor',
@@ -2638,16 +2201,21 @@ export const ropeBridgePreset: SceneGraph = {
       type: 'body',
       pos: [0.35, 0, 0.3],
       joints: [],
-      geoms: [{ name: 'right_anchor_geom', type: 'box', size: [0.03, 0.03, 0.03], rgba: [0.4, 0.4, 0.4, 1] }],
+      geoms: [
+        { name: 'right_anchor_geom', type: 'box', size: [0.03, 0.035, 0.03], pos: [0.045, 0, 0], rgba: [0.42, 0.42, 0.45, 1] },
+        { name: 'right_clevis', type: 'capsule', fromto: [0.045, 0, 0, 0, 0, 0], size: [0.008], rgba: [0.58, 0.58, 0.62, 1], contype: 0, conaffinity: 0 },
+        { name: 'right_pillar', type: 'box', size: [0.032, 0.042, 0.135], pos: [0.045, 0, -0.165], rgba: [0.48, 0.48, 0.5, 1] },
+        { name: 'right_footing', type: 'box', size: [0.055, 0.065, 0.015], pos: [0.045, 0, -0.285], rgba: [0.38, 0.38, 0.4, 1] }
+      ],
       children: []
     },
     {
       id: 'heavy_ball',
       name: 'heavy_ball',
       type: 'body',
-      pos: [0, 0, 0.5],
+      pos: [0, 0, 0.39],
       joints: [{ name: 'ball_free', type: 'free', initialVelocity: [0, 0, 0, 0, 0, 0] }],
-      geoms: [{ name: 'ball_geom', type: 'sphere', size: [0.05], rgba: [0.9, 0.2, 0.2, 1], mass: 1.5 }],
+      geoms: [{ name: 'ball_geom', type: 'sphere', size: [0.05], rgba: [0.9, 0.2, 0.2, 1], mass: 0.45 }],
       children: []
     }
   ]

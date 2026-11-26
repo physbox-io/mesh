@@ -446,15 +446,53 @@ function shadeSail(): SceneGraph {
   const corners: UV[] = [[-c, -c], [c, -c], [c, c], [-c, c]];
   const ids = ['south', 'east', 'north', 'west'];
   const edges = ids.map((id, i) => catenaryEdge(id, corners[i], corners[(i + 1) % 4], 0.06));
-  const postNodes: SceneNode[] = posts.map(([x, y, h], i) => ({
-    id: `post${i + 1}`, name: `post${i + 1}`, pos: [x, y, h / 2],
-    geoms: [{ name: `post${i + 1}_pipe`, type: 'cylinder', size: [0.045, h / 2], rgba: [0.55, 0.57, 0.6, 1] }],
-    joints: [],
-  } as unknown as SceneNode));
+
+  // Initial t=0 ruled hyperbolic-paraboloid shape matching the alternating LOW/HIGH
+  // post heights (SW=LOW, SE=HIGH, NE=LOW, NW=HIGH) so the sail starts cleanly aligned
+  // with all four tie anchors without posts poking through it; rest lengths stay flat.
+  const dz = (HIGH - LOW) / 2;
+  const hyparStations = Array.from({ length: 9 }, (_, k) => {
+    const s = -1 + (2 * k) / 8;
+    return {
+      p: [s * c, 0, 0],
+      across: [0, 1, (-dz * s) / c],
+    };
+  });
+
+  const postNodes: SceneNode[] = posts.map(([x, y, h], i) => {
+    const inX = -Math.sign(x);
+    const inY = -Math.sign(y);
+    const topZ = h / 2;
+    const anchorZ = topZ + 0.03;
+    return {
+      id: `post${i + 1}`,
+      name: `post${i + 1}`,
+      pos: [x, y, h / 2],
+      geoms: [
+        { name: `post${i + 1}_pipe`, type: 'cylinder', size: [0.045, h / 2], rgba: [0.55, 0.57, 0.6, 1] },
+        { name: `post${i + 1}_base_plate`, type: 'cylinder', size: [0.11, 0.012], pos: [0, 0, -topZ + 0.012], rgba: [0.38, 0.4, 0.44, 1], role: 'visual' },
+        { name: `post${i + 1}_cap`, type: 'cylinder', size: [0.052, 0.012], pos: [0, 0, topZ], rgba: [0.42, 0.44, 0.48, 1], role: 'visual' },
+        { name: `post${i + 1}_eye_stem`, type: 'capsule', fromto: [0, 0, topZ, 0, 0, anchorZ + 0.004], size: [0.008], rgba: [0.82, 0.85, 0.89, 1], role: 'visual' },
+        { name: `post${i + 1}_eye_ring`, type: 'sphere', size: [0.016], pos: [0, 0, anchorZ], rgba: [0.85, 0.88, 0.92, 1], role: 'visual' },
+        { name: `post${i + 1}_turnbuckle`, type: 'capsule', fromto: [0, 0, anchorZ, inX * 0.09, inY * 0.09, anchorZ], size: [0.0065], rgba: [0.78, 0.81, 0.86, 1], role: 'visual' },
+      ],
+      joints: [],
+    } as unknown as SceneNode;
+  });
+
   const sail = {
-    id: 'sail', name: 'sail', pos: [0, 0, (LOW + HIGH) / 2],
+    id: 'sail',
+    name: 'sail',
+    pos: [0, 0, (LOW + HIGH) / 2 + 0.03],
     cloth: {
-      pieces: [{ name: 'sheet', edges, rgba: [0.93, 0.62, 0.2, 1] }],
+      pieces: [
+        {
+          name: 'sheet',
+          edges,
+          rgba: [0.93, 0.62, 0.2, 1],
+          start: { kind: 'path', along: 'u', stations: hyparStations },
+        },
+      ],
       material: 'shadeCloth',
       spacing: 0.16,
       // Each corner shackled to the top of its post, wound in to tension it.

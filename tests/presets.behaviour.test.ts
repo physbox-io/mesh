@@ -193,9 +193,10 @@ describe('quadcopter drone', () => {
     // integrator's stability limit and the whole model went unstable.
     // Thrust itself comes from the app's aerodynamics, which the harness does
     // not implement, so this checks the actuators only.
-    expect(sim.jointVel('rotor1_joint')).toBeCloseTo(89.1, 0);
-    expect(sim.jointVel('free_rotor1_joint')).toBeCloseTo(89.1, 0);
-    expect(sim.jointVel('free_rotor2_joint')).toBeCloseTo(-89.1, 0);
+    // Terminal velocity = kv / (kv + damping) * ctrlValue = 2 / 2.02 * 270 ≈ 267.3 rad/s.
+    expect(sim.jointVel('rotor1_joint')).toBeCloseTo(267.3, 0);
+    expect(sim.jointVel('free_rotor1_joint')).toBeCloseTo(267.3, 0);
+    expect(sim.jointVel('free_rotor2_joint')).toBeCloseTo(-267.3, 0);
   });
   afterAll(() => sim.dispose());
 });
