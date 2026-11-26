@@ -711,8 +711,12 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, dragBodyNam
         const mdl = st.model;
         if (mdl && mdl.body_dofnum && mdl.body_parentid) {
           let bId = -1;
-          if (dragBodyName && geomId >= 0 && mdl.geom_bodyid) {
-            bId = mdl.geom_bodyid[geomId] ?? -1;
+          if (dragBodyName) {
+            if (geomId >= 0 && mdl.geom_bodyid) {
+              bId = mdl.geom_bodyid[geomId] ?? -1;
+            } else if (st.mujoco) {
+              bId = st.mujoco.mj_name2id(mdl, st.mujoco.mjtObj.mjOBJ_BODY.value, dragBodyName);
+            }
           } else if (nodeId) {
             const findNode = (nodes: SceneNode[]): SceneNode | null => {
               for (const n of nodes) {
@@ -1924,6 +1928,23 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
             if (bId > 0) {
               const bName = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY.value, bId);
               if (bName) dragBodyName = bName;
+            } else {
+              // Fallback when geom_bodyid isn't mirrored (e.g. before a worker reload):
+              // MuJoCo cable composites name geoms `<prefix>G<n>` on `<prefix>B_<n>` / `B_first` / `B_last`.
+              const suffix = name.slice(match.prefix.length);
+              const m = /^G(\d+)$/.exec(suffix);
+              if (m) {
+                const idx = Number(m[1]);
+                const candidates = idx === 0
+                  ? [`${match.prefix}B_first`, `${match.prefix}B_0`]
+                  : [`${match.prefix}B_${idx}`, `${match.prefix}B_last`];
+                for (const cand of candidates) {
+                  if (mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, cand) > 0) {
+                    dragBodyName = cand;
+                    break;
+                  }
+                }
+              }
             }
           }
         }
