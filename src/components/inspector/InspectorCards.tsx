@@ -15,6 +15,7 @@ import { FlexureCard } from './FlexureCard';
 import { MoldCard } from './MoldCard';
 import { GarmentCard } from './GarmentCard';
 import { ClothCard } from './ClothCard';
+import { CompositeCard } from './CompositeCard';
 import { GarmentDraftCard } from './GarmentDraftCard';
 import { BodyFormCard } from './BodyFormCard';
 import { GeomListingCard } from './GeomListingCard';
@@ -113,6 +114,7 @@ export function InspectorCards({ node, threeSceneRef }: { node: SceneNode; three
           <BodyFormCard node={node} />
           <GarmentDraftCard node={node} />
           <ClothCard node={node} />
+          <CompositeCard node={node} />
           <GarmentCard node={node} />
           <JoinCard node={node} />
           <HardwarePartCard node={node} />

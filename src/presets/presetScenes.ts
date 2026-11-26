@@ -2168,29 +2168,27 @@ export const ropeBridgePreset: SceneGraph = {
       type: 'body',
       pos: [-0.35, 0, 0.3],
       joints: [],
-      // Note: mjcfBody.ts uses geoms[0] as the cable segment geom template when isComposite=true,
-      // so the grounded left support pillar lives on the child body `left_abutment` below.
-      geoms: [{ name: 'left_anchor_geom', type: 'capsule', size: [0.012], rgba: [0.76, 0.56, 0.34, 1] }],
-      isComposite: true,
-      compositeType: 'cable',
-      compositeCount: '25 1 1',
-      compositeSize: '0.7',
-      compositePrefix: 'rope_',
-      weldLastToId: 'rope_right_anchor',
-      weldRigid: true,
+      geoms: [
+        { name: 'left_anchor_block', type: 'box', size: [0.03, 0.035, 0.03], pos: [-0.045, 0, 0], rgba: [0.42, 0.42, 0.45, 1] },
+        { name: 'left_clevis', type: 'capsule', fromto: [-0.045, 0, 0, 0, 0, 0], size: [0.008], rgba: [0.58, 0.58, 0.62, 1], contype: 0, conaffinity: 0 },
+        { name: 'left_pillar', type: 'box', size: [0.032, 0.042, 0.135], pos: [-0.045, 0, -0.165], rgba: [0.48, 0.48, 0.5, 1] },
+        { name: 'left_footing', type: 'box', size: [0.055, 0.065, 0.015], pos: [-0.045, 0, -0.285], rgba: [0.38, 0.38, 0.4, 1] }
+      ],
       children: [
         {
-          id: 'left_abutment',
-          name: 'left_abutment',
+          id: 'rope',
+          name: 'rope',
           type: 'body',
           pos: [0, 0, 0],
           joints: [],
-          geoms: [
-            { name: 'left_anchor_block', type: 'box', size: [0.03, 0.035, 0.03], pos: [-0.045, 0, 0], rgba: [0.42, 0.42, 0.45, 1] },
-            { name: 'left_clevis', type: 'capsule', fromto: [-0.045, 0, 0, 0, 0, 0], size: [0.008], rgba: [0.58, 0.58, 0.62, 1], contype: 0, conaffinity: 0 },
-            { name: 'left_pillar', type: 'box', size: [0.032, 0.042, 0.135], pos: [-0.045, 0, -0.165], rgba: [0.48, 0.48, 0.5, 1] },
-            { name: 'left_footing', type: 'box', size: [0.055, 0.065, 0.015], pos: [-0.045, 0, -0.285], rgba: [0.38, 0.38, 0.4, 1] }
-          ],
+          geoms: [{ name: 'rope_segment_geom', type: 'capsule', size: [0.012], rgba: [0.76, 0.56, 0.34, 1] }],
+          isComposite: true,
+          compositeType: 'cable',
+          compositeCount: '25 1 1',
+          compositeSize: '0.7',
+          compositePrefix: 'rope_',
+          weldLastToId: 'rope_right_anchor',
+          weldRigid: true,
           children: []
         }
       ]
