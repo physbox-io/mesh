@@ -386,6 +386,8 @@ export interface SceneGeom {
     quarter?: number;
     /** Diametral clearance on the fitting diameter, metres. */
     fit?: number;
+    /** Counterbore only: deepened and widened for an ISO 7089 washer under the cap screw head. */
+    washer?: boolean;
   };
   /**
    * This is the geom the body's lattice cage owns — the one `applyLattice`

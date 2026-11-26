@@ -65,6 +65,12 @@ export function screwLengthAtMost(mm: number): number {
   return best;
 }
 
+/** The shortest standard length that is at least `mm`, or the longest there is. */
+export function screwLengthAtLeast(mm: number): number {
+  for (const l of SCREW_LENGTHS) if (l >= mm - 1e-6) return l;
+  return SCREW_LENGTHS[SCREW_LENGTHS.length - 1];
+}
+
 /** From `from` to `to` in steps of `step`. */
 const span = (from: number, to: number, step: number) => Array.from({ length: Math.floor((to - from) / step) + 1 }, (_, i) => from + i * step);
 

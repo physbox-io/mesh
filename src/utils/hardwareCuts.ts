@@ -19,7 +19,7 @@
 import * as THREE from 'three';
 import type { HardwareBore, HardwareCutKind, SceneGeom, SceneNode, SealType } from '../types/scene';
 import { metricThread } from './metricThreads';
-import { BOLTS, HEX_NUTS, CLEARANCE_HOLES, COUNTERBORES, INSERTS, BEARINGS, O_RINGS, SEAL_CORDS } from './hardwareSizes';
+import { BOLTS, HEX_NUTS, CLEARANCE_HOLES, COUNTERBORES, INSERTS, BEARINGS, O_RINGS, SEAL_CORDS, WASHERS } from './hardwareSizes';
 import { planSealGroove, sealGrooveProblem } from './sealGrooves';
 import { LM_UU, MGN } from './linearParts';
 import { probeRay, surfaceUnder } from './csg';
@@ -288,6 +288,8 @@ export interface HardwareCutSpec {
   /** A nut slot's: which way it runs, quarter turns about the normal. Left out, the nearest side. */
   quarter?: number;
   fitMm?: number;
+  /** Counterbore only: deepened and widened to recess an ISO 7089 washer under the screw head. */
+  washer?: boolean;
 }
 
 /** How much material a nut slot leaves between the face and the nut, mm. */
@@ -436,8 +438,16 @@ export function hardwareCutGeoms(spec: HardwareCutSpec, nodeId: string, host?: S
     }
     case 'counterbore': {
       const [diameter, depth] = COUNTERBORES[size];
+      const washer = spec.washer ? WASHERS[size] : undefined;
+      const headDia = washer ? Math.max(diameter, washer[1]) : diameter;
+      const headDepth = washer ? depth + washer[2] : depth;
+      const head = cut('head', (headDia + fit) / 2, headDepth);
       const shank = bore === 'tapped' ? cut('shank', 0, 0, tapped(size)) : clearance('shank');
-      return [cut('head', (diameter + fit) / 2, depth), shank];
+      if (washer) {
+        head.hardware = { ...head.hardware!, washer: true };
+        shank.hardware = { ...shank.hardware!, washer: true };
+      }
+      return [head, shank];
     }
     case 'insert': {
       const [hole, depth] = INSERTS[size];
@@ -549,6 +559,7 @@ export function hardwareSpecOf(geoms: SceneGeom[], group: string): HardwareCutSp
     ...(h.length ? { lengthMm: +(h.length * 1000).toFixed(3) } : {}),
     ...(h.turned ? { turned: true } : {}),
     ...(h.quarter !== undefined ? { quarter: h.quarter } : {}),
+    ...(h.washer ? { washer: true } : {}),
     fitMm: h.fit ? +(h.fit * 1000).toFixed(4) : 0,
   };
 }

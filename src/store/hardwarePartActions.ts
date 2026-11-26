@@ -229,15 +229,24 @@ export function hardwarePartActions({ set, get, clone }: Deps): HardwarePartActi
       }
       // The cut is what decides it: resize the cut, and the part follows it
       // (writeHardwareGroup re-seats whatever sits in a group it rewrites).
-      // A rail's length is its seat's length in the same way.
+      // A rail's length is its seat's length, and a counterbore deepens and
+      // widens when its screw takes a washer so the head + washer stay recessed.
+      const cutKind = inCut
+        ? (host!.geoms || []).find((g) => g.hardware?.group === group && !g.csgDerived)?.hardware?.kind
+        : undefined;
+      const syncWasherToCut = cutKind === 'counterbore' && spec.kind === 'screw'
+        && changes.washer !== undefined && Boolean(changes.washer) !== Boolean(spec.washer);
       const toCut = {
         ...(inCut && changes.size && changes.size !== spec.size ? { size: changes.size } : {}),
         ...(inCut && spec.kind === 'mgn_rail' && changes.lengthMm && changes.lengthMm !== spec.lengthMm ? { lengthMm: changes.lengthMm } : {}),
+        ...(syncWasherToCut ? { washer: Boolean(changes.washer) } : {}),
       };
       if (Object.keys(toCut).length) {
         get().setHardwareCut(host!.id, group!, toCut);
         const { size: _s, ...rest } = changes;
-        changes = spec.kind === 'mgn_rail' ? (({ lengthMm: _l, ...r }) => r)(rest) : rest;
+        let next = spec.kind === 'mgn_rail' ? (({ lengthMm: _l, ...r }) => r)(rest) : rest;
+        if (syncWasherToCut) next = (({ washer: _w, ...r }) => r)(next);
+        changes = next;
       }
       if (Object.keys(changes).length === 0) return;
       get().recordInteraction('hardware-part');

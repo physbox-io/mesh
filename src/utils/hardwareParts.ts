@@ -42,7 +42,7 @@ import { hardwareSpecOf } from './hardwareCuts';
 import { getNodeWorldTransform } from './laserCutExporter';
 import {
   BEARINGS, BOLTS, BUTT_HINGES, CAP_SCREW_HEADS, CLEARANCE_HOLES, HANDLES, HASP_LATCHES, HEX_NUTS, O_RINGS,
-  SCREW_LENGTHS, SEAL_CORDS, SHAFTS, WASHERS, WOOD_SCREW_LENGTHS, WOOD_SCREWS, screwLengthAtMost,
+  SCREW_LENGTHS, SEAL_CORDS, SHAFTS, WASHERS, WOOD_SCREW_LENGTHS, WOOD_SCREWS, screwLengthAtLeast, screwLengthAtMost,
 } from './hardwareSizes';
 import { loopLengthMm, rimCentreline } from './sealGrooves';
 import { metricThread } from './metricThreads';
@@ -653,7 +653,12 @@ export function seatFor(host: SceneNode, group: string, kind?: AllHardwarePartKi
         // Bearing on the counterbore's floor, through the rest of the part.
         const floor = entry.clone().addScaledVector(n, -reach);
         const through = surfaceUnder(host, spec.at, spec.normal)?.thickness ?? reach;
-        return { pos: at(floor), quat, part: { kind: 'screw', size: spec.size, lengthMm: 0 }, gripM: Math.max(0, through - reach) };
+        return {
+          pos: at(floor),
+          quat,
+          part: { kind: 'screw', size: spec.size, lengthMm: 0, ...(spec.washer ? { washer: true } : {}) },
+          gripM: Math.max(0, through - reach),
+        };
       }
       // Into an insert, from outside: bearing on the surface, as deep as the insert.
       return { pos: at(entry), quat, part: { kind: 'screw', size: spec.size, lengthMm: screwLengthAtMost(reach * 1000) }, gripM: 0 };
@@ -719,7 +724,7 @@ export function seatPart(node: SceneNode, host: SceneNode, group: string, length
   if (!seat) return false;
   const part: HardwarePart = { ...node.hardwarePart!, ...seat.part, seat: group };
   if (kind === 'screw' || kind === 'wood_screw') {
-    if (kind === 'screw') part.washer = false; // a washer does not fit in a counterbore, nor between an insert and its screw
+    if (kind === 'screw') part.washer = Boolean(seat.part.washer);
     part.lengthMm = lengthMm ?? (seat.part.lengthMm || node.hardwarePart?.lengthMm || HARDWARE_PARTS[kind].defaultLengthMm!);
   }
   node.pos = seat.pos;
@@ -755,8 +760,16 @@ export function reseatHardware(host: SceneNode): void {
     const samePath = !path || JSON.stringify(path) === JSON.stringify(child.hardwarePart!.path);
     const length = child.hardwarePart!.kind === 'mgn_rail' ? seat.part.lengthMm : undefined;
     const sameLength = length === undefined || length === child.hardwarePart!.lengthMm;
-    if (size !== child.hardwarePart!.size || !samePath || !sameLength) {
-      rebuildPart(child, { ...child.hardwarePart!, size, ...(path ? { path } : {}), ...(length !== undefined ? { lengthMm: length } : {}) });
+    const washer = isHardwareCut && child.hardwarePart!.kind === 'screw' ? Boolean(seat.part.washer) : undefined;
+    const sameWasher = washer === undefined || washer === Boolean(child.hardwarePart!.washer);
+    if (size !== child.hardwarePart!.size || !samePath || !sameLength || !sameWasher) {
+      rebuildPart(child, {
+        ...child.hardwarePart!,
+        size,
+        ...(path ? { path } : {}),
+        ...(length !== undefined ? { lengthMm: length } : {}),
+        ...(washer !== undefined ? { washer } : {}),
+      });
     }
   }
 }
@@ -836,6 +849,13 @@ export interface FastenTarget {
   node: SceneNode;
   /** How far along the screw, from where it bears, its thread can reach into this body, m. */
   reachM: number;
+  /**
+   * When fastening into a mating `nut_trap` or `nut_slot`, the distance from
+   * where the screw bears to the far side of the nut, m. The auto-selected
+   * standard screw length must be at least this long so it passes through the
+   * nut rather than stopping short of it.
+   */
+  minReachM?: number;
 }
 
 /**
@@ -858,6 +878,34 @@ export function fastenTargetFor(scene: SceneGraph, host: SceneNode, screw: Scene
   const mark = (n: SceneNode) => { skip.add(n.id); (n.children || []).forEach(mark); };
   mark(host);
   for (const n of findPath(scene.nodes, host.id) ?? []) skip.add(n.id);
+
+  const nutReachM = (n: SceneNode, world: THREE.Matrix4, offset: number[], g: SceneGeom): number | undefined => {
+    const hw = g.hardware;
+    if (!hw || (hw.kind !== 'nut_trap' && hw.kind !== 'nut_slot')) return undefined;
+    const nutH = (HEX_NUTS[hw.size]?.[1] ?? 0) / 1000;
+    if (nutH <= 0) return undefined;
+    const geoms = csgSourceGeoms(n);
+    const offsetVec = new THREE.Vector3(offset[0] ?? 0, offset[1] ?? 0, offset[2] ?? 0);
+    if (hw.kind === 'nut_trap') {
+      const pocket = geoms.find((x) => x.hardware?.group === hw.group && x.hardware.part === 'pocket');
+      if (!pocket?.pos || !pocket.size) return undefined;
+      const pNLocal = new THREE.Vector3(...((pocket.cutNormal ?? [0, 0, 1]) as [number, number, number])).normalize();
+      const pReach = pocket.cutDepth ?? 0;
+      const pHalf = pocket.size[1] ?? 0;
+      const pEntryLocal = new THREE.Vector3(...(pocket.pos as [number, number, number])).addScaledVector(pNLocal, pReach - pHalf);
+      const pFloorLocal = pEntryLocal.clone().addScaledVector(pNLocal, -pReach);
+      const pTopLocal = pFloorLocal.clone().addScaledVector(pNLocal, nutH);
+      const pFloorW = pFloorLocal.sub(offsetVec).applyMatrix4(world);
+      const pTopW = pTopLocal.sub(offsetVec).applyMatrix4(world);
+      const farEnd = Math.max(pFloorW.sub(S).dot(down), pTopW.sub(S).dot(down));
+      return farEnd > gripM ? farEnd : undefined;
+    }
+    const slot = geoms.find((x) => x.hardware?.group === hw.group && x.hardware.part === 'slot');
+    if (!slot?.pos) return undefined;
+    const slotW = new THREE.Vector3(...(slot.pos as [number, number, number])).sub(offsetVec).applyMatrix4(world);
+    const farEnd = slotW.sub(S).dot(down) + nutH / 2;
+    return farEnd > gripM ? farEnd : undefined;
+  };
 
   let best: FastenTarget | null = null;
   let bestStart = Infinity;
@@ -883,7 +931,11 @@ export function fastenTargetFor(scene: SceneGraph, host: SceneNode, screw: Scene
         if (end < gripM + 0.0005 || start > gripM + 3 * d + 0.03) continue;
         if (start < bestStart) {
           bestStart = start;
-          best = { node: n, reachM: Math.min(end, Math.max(start, gripM) + 2.5 * d) };
+          const minReachM = nutReachM(n, world!, offset, g);
+          const reachM = minReachM !== undefined
+            ? Math.max(minReachM, Math.min(end, Math.max(start, gripM) + 2.5 * d))
+            : Math.min(end, Math.max(start, gripM) + 2.5 * d);
+          best = { node: n, reachM, ...(minReachM !== undefined ? { minReachM } : {}) };
         }
       }
     }
@@ -903,6 +955,9 @@ export function screwFit(scene: SceneGraph, host: SceneNode, screw: SceneNode, g
   const wood = WOOD_SCREWS[screw.hardwarePart!.size];
   const d = (thread ? thread[1] : wood ? wood[0] : 3) / 1000;
   const target = fastenTargetFor(scene, host, screw, gripM);
+  if (target?.minReachM !== undefined) {
+    return { lengthMm: screwLengthAtLeast(target.minReachM * 1000), target: target.node };
+  }
   const reach = target ? target.reachM : gripM + 1.5 * d;
   return { lengthMm: screwLengthAtMost(reach * 1000), target: target?.node ?? null };
 }
