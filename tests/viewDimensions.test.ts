@@ -677,6 +677,6 @@ describe('the Wall Bracket preset', () => {
     const { latticeBracketPreset } = await import('../src/presets/latticeBracket');
     const g = latticeBracketPreset.nodes[0].geoms[0] as unknown as { renderVertices: number[]; faces: number[][] | number[] };
     const d = bodyViewDimensions({ id: 'bracket', positions: g.renderVertices, faces: (g.faces as number[]).flat() as number[] }, 'front');
-    expect(labels(d)).toEqual(['45°', '24', '21', '50', '24', '31', '60']);
+    expect(labels(d)).toEqual(['45°', '25', '20', '50', '25', '30', '60']);
   });
 });

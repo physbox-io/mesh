@@ -1976,11 +1976,13 @@ export function decomposeSolidIntoPlanks(
       hull.delete();
       const thickMm = obb.dimsMm[2];
       const isSingleSlab = inputPieces.length === 1;
+      const normalAxis = obb.axes[2];
+      const isTilted = Math.max(Math.abs(normalAxis[0]), Math.abs(normalAxis[1]), Math.abs(normalAxis[2])) < 0.99;
       const boardLike =
         thickMm >= 3 &&
         thickMm <= maxBoardThickMm &&
         solidity >= 0.72 &&
-        (!isSingleSlab || (obb.dimsMm[0] >= thickMm * 2 && obb.dimsMm[1] >= thickMm * 2));
+        (!isSingleSlab || (isTilted && obb.dimsMm[0] >= thickMm * 2 && obb.dimsMm[1] >= thickMm * 2));
       if (boardLike) {
         boardLikeCount++;
         boardLikeVol += mesh.volumeMm3;

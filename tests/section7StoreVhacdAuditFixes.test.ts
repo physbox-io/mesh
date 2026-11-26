@@ -682,19 +682,26 @@ describe('Section 7 Store & V-HACD Audit Fixes', () => {
         return m as unknown as Manifold;
       };
 
+      // Non-convex dented cube so convexChunkHull does not short-circuit before calling the throwing vhacd callback
+      const dentedVerts = [...UNIT_CUBE_ZUP, 0, 0, 0.05];
+      const dentedFaces = [
+        ...UNIT_CUBE_FACES.slice(0, 6), // bottom (2 tris)
+        ...UNIT_CUBE_FACES.slice(12),   // 4 sides (8 tris)
+        4, 5, 8, 5, 6, 8, 6, 7, 8, 7, 4, 8, // top dented inward to vertex 8
+      ];
       const mockWasm = {
         Mesh: class { constructor(public cfg: unknown) {} },
         Manifold: class {
-          constructor() { return makeMockManifold(); }
-          static compose() { return makeMockManifold(); }
+          constructor() { return makeMockManifold({ verts: dentedVerts.map((v) => v * 1000), faces: dentedFaces }); }
+          static compose() { return makeMockManifold({ verts: dentedVerts.map((v) => v * 1000), faces: dentedFaces }); }
         },
       } as unknown as ManifoldToplevel;
 
       await expect(
         decomposeInChunks(
           mockWasm,
-          UNIT_CUBE_ZUP,
-          UNIT_CUBE_FACES,
+          dentedVerts,
+          dentedFaces,
           async () => { throw new Error('vhacd boom'); },
           () => ({}),
         ),

@@ -81,10 +81,10 @@ describe('rack and pinion proximity coupling', () => {
     expect(Object.keys(ratios(compileToMJCF({ nodes }, 0, 1, 0, 0, 0)))).toEqual(['lower_slide']);
   });
 
-  it("the rack and pinion preset keeps its one explicit coupling and no warning", () => {
+  it("the rack and pinion preset uses real tooth contact with no redundant coupling and no warning", () => {
     const sceneGraph = PRESETS.rack_pinion.scene;
     const xml = compileToMJCF(sceneGraph, -9.81, 1, 0, 0, 0);
-    expect(xml.match(/<fixed name="[^"]*coupling[^"]*"/g)).toEqual(['<fixed name="explicit_coupling_1"']);
+    expect(xml.match(/<fixed name="[^"]*coupling[^"]*"/g)).toBeNull();
     expect(couplingWarnings(sceneGraph.nodes)).toEqual([]);
   });
 });
