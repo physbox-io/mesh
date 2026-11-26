@@ -22,6 +22,7 @@ function nodeEmoji(node: SceneNode): string {
   if (node.id.includes('ellipsoid')) return '🥚';
   if (node.id.includes('pulley_wheel')) return '🛞';
   if (node.isPulleyRope) return '🧵';
+  if (node.isComposite) return '🪢';
   if (node.isCurve || node.id.includes('curve')) return '🎢';
   if (node.csgEnabled || node.id.includes('ring')) return '💠';
   return '📦';

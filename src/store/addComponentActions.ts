@@ -50,7 +50,7 @@ export interface AddComponentActions {
    * rather than each under the last. Without one it goes at the top level and
    * is selected.
    */
-  addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve' | 'ring' | 'sculpt' | 'lattice' | 'blob', position: number[], parentId?: string | null, opts?: AddPlacement) => string;
+  addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'cable' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve' | 'ring' | 'sculpt' | 'lattice' | 'blob', position: number[], parentId?: string | null, opts?: AddPlacement) => string;
   /** Adds a body; it is selected once built unless `select` is false. */
   addHardwareComponentNode: (hardwareNode: SceneNode, opts?: { select?: boolean }) => void;
 }
@@ -113,6 +113,10 @@ export function addComponentActions({ set, get }: SliceDeps): AddComponentAction
       } else if (type === 'pulley_rope') {
         geoms = [];
         joints = [];
+      } else if (type === 'cable') {
+        geoms = [{ name: `${id}_seg`, type: 'capsule', size: [0.012], rgba: [0.76, 0.56, 0.34, 1] }];
+        joints = [];
+        localPos = [localPos[0], localPos[1], parentId ? 0 : Math.max(localPos[2] ?? 0, 0.3)];
       } else if (type === 'curve') {
         // Rigid curved track: spline through control points, decomposed into
         // convex box segments so collision follows the real curve.
@@ -421,6 +425,14 @@ export function addComponentActions({ set, get }: SliceDeps): AddComponentAction
           pulleyWheelId: '',
           leftTargetId: '',
           rightTargetId: ''
+        } : {}),
+        ...(type === 'cable' ? {
+          isComposite: true,
+          compositeType: 'cable' as const,
+          compositeCount: '15 1 1',
+          compositeSize: '0.6',
+          compositeCurve: 's 0 0',
+          compositePrefix: `${id}_`,
         } : {}),
         ...(type === 'openscad' ? {
           scad: `// Example OpenSCAD Code\ndifference() {\n  cube([0.1, 0.1, 0.1], center=true);\n  sphere(d=0.12, $fn=16);\n}`

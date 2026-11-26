@@ -70,7 +70,8 @@ const PART_TILES: PartTile[] = [
   // A boolean body: an ellipsoid minus a piercing ellipsoid.
   { type: 'ring', label: 'Ring', title: 'Ring (an ellipsoid with a second ellipsoid subtracted; a boolean body you can reshape)', color: 'rose', spin: 'group-hover:-rotate-6', Icon: RingIcon },
   { type: 'pulley_wheel', label: 'Pulley', title: 'Pulley Stand system disk', color: 'cyan', spin: 'group-hover:rotate-45', slow: true, Icon: PulleyIcon },
-  { type: 'pulley_rope', label: 'Rope', title: 'Coupler Rope', color: 'emerald', spin: 'group-hover:-rotate-6', Icon: RopeIcon },
+  { type: 'pulley_rope', label: 'Rope', title: 'Coupler Rope (taut pulley tendon between two bodies)', color: 'emerald', spin: 'group-hover:-rotate-6', Icon: RopeIcon },
+  { type: 'cable', label: 'Cable', title: 'Physical Cable / Rope (articulated chain of segments that sags and collides)', color: 'amber', spin: 'group-hover:rotate-6', Icon: RopeIcon },
   { type: 'blob', label: 'Putty', title: 'Joint (putty, glue or marshmallow): anything that reaches into it is stuck to it, as strongly as its material and size allow', color: 'sky', spin: 'group-hover:rotate-6', Icon: PuttyIcon },
 ];
 

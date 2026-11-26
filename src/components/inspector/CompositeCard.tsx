@@ -17,18 +17,21 @@ export function CompositeCard({ node }: { node: SceneNode }) {
   const updateNodeComposite = useStore((s) => s.updateNodeComposite);
   const sceneGraph = useStore((s) => s.sceneGraph);
 
-  const otherBodies = useMemo(() => {
+  const { otherBodies, parentNode } = useMemo(() => {
     const list: SceneNode[] = [];
-    const walk = (nodes: SceneNode[]) => {
+    let foundParent: SceneNode | null = null;
+    const walk = (nodes: SceneNode[], parent: SceneNode | null) => {
       for (const n of nodes || []) {
-        if (n.id !== node.id && !n.isPulleyRope && !n.cloth) {
+        if (n.id === node.id) {
+          foundParent = parent;
+        } else if (!n.isPulleyRope && !n.cloth) {
           list.push(n);
         }
-        walk(n.children);
+        walk(n.children, n);
       }
     };
-    walk(sceneGraph.nodes);
-    return list;
+    walk(sceneGraph.nodes, null);
+    return { otherBodies: list, parentNode: foundParent as SceneNode | null };
   }, [sceneGraph, node.id]);
 
   if (!node.isComposite) return null;
@@ -189,6 +192,13 @@ export function CompositeCard({ node }: { node: SceneNode }) {
           onChange={(v) => updateCableJoint({ stiffness: Math.max(0, v) })}
           className="w-full accent-blue-500 cursor-pointer"
         />
+      </div>
+
+      <div className="flex flex-col gap-0.5 pt-1 border-t border-slate-100 dark:border-slate-800">
+        <span className="text-xs font-medium text-slate-500 dark:text-slate-400">Start Anchored To</span>
+        <span className="text-xs text-slate-700 dark:text-slate-200 px-2 py-1 rounded bg-slate-50 dark:bg-slate-950 border border-slate-200/80 dark:border-slate-800">
+          {parentNode ? `${parentNode.name || parentNode.id} (parent body)` : 'World (fixed at position)'}
+        </span>
       </div>
 
       <div className="flex flex-col gap-1">
