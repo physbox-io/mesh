@@ -2989,9 +2989,17 @@ export function resolveCsgGeoms(node: SceneNode, target: 'physics' | 'render', o
   // role is meaningful with or without CSG: a collision-only geom is never
   // drawn, and a visual-only one is still emitted (mjcf.ts zeroes its contact).
   if (!node.csgEnabled) {
-    const colliders = solid.filter(g => g.csgDerived === 'collider');
+    // MuJoCo <hfield> geoms carry zero mass/inertia and are only valid on static
+    // bodies. If a static relief just gained a joint (e.g. switched to Free in
+    // the inspector) before async collider recomputation finishes, drop any
+    // stale hfield collider immediately so the source mesh supplies mass and
+    // MuJoCo never errors with "mass and inertia ... larger than mjMINVAL".
+    const hasJoints = (node.joints?.length ?? 0) > 0;
+    const colliders = solid.filter(g => g.csgDerived === 'collider' && !(target === 'physics' && hasJoints && g.type === 'hfield'));
     if (colliders.length === 0) {
-      return target === 'render' ? solid.filter(g => g.role !== 'collision') : solid;
+      return target === 'render'
+        ? solid.filter(g => g.role !== 'collision')
+        : solid.filter(g => !(hasJoints && g.csgDerived === 'collider' && g.type === 'hfield'));
     }
     // A decomposed body: the convex pieces collide, the mesh they came from is
     // only drawn. Colliders already carry role 'collision', so the render filter

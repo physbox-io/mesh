@@ -704,7 +704,7 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, Aero
           let localWindX = envWindX || 0;
           let localWindY = envWindY || 0;
           let localWindZ = 0;
-          if (localWindX !== 0 || localWindY !== 0) {
+          if (envWindGusting && (localWindX !== 0 || localWindY !== 0)) {
             [localWindX, localWindY, localWindZ] = evaluateGustWind(
               localWindX,
               localWindY,
@@ -1133,6 +1133,7 @@ const buildHistoryEntry = (aeroDiagnostics: Record<string, AeroDiagnostic>, opts
 
 let envWindX = 0;
 let envWindY = 0;
+let envWindGusting = false;
 let envDensity = 0;
 let envWaterLevel: number | null = null;
 let envWaterBasins: WaterBasinWorld[] = [];
@@ -3172,7 +3173,7 @@ const applyCompositeAeroForces = () => {
       let wx = envWindX || 0;
       let wy = envWindY || 0;
       let wz = 0;
-      if (hasWind) {
+      if (envWindGusting && hasWind) {
         [wx, wy, wz] = evaluateGustWind(wx, wy, px, py, pz, data.time);
       }
       const rvx = wx - vx;
@@ -3483,15 +3484,17 @@ const flushAeroAudio = () => {
       if (bId <= 0 || bId >= model.nbody) continue;
       if (meta.isAeolian) {
         if (envWindMag < 2.5) continue;
-        // Sample live gust speed at the mast's world position so Aeolian pitch & gain glide with gusts!
-        const [gx, gy, gz] = evaluateGustWind(
-          envWindX || 0,
-          envWindY || 0,
-          xpos[bId * 3],
-          xpos[bId * 3 + 1],
-          xpos[bId * 3 + 2] + 1.0,
-          data.time,
-        );
+        // Sample live gust speed at the mast's world position when wind gusting is enabled
+        const [gx, gy, gz] = envWindGusting
+          ? evaluateGustWind(
+              envWindX || 0,
+              envWindY || 0,
+              xpos[bId * 3],
+              xpos[bId * 3 + 1],
+              xpos[bId * 3 + 2] + 1.0,
+              data.time,
+            )
+          : [envWindX || 0, envWindY || 0, 0];
         const uPerp = Math.hypot(gx, gy, gz * 0.25);
         if (uPerp < 2.5) continue;
         const fDrag = 0.5 * rho * 1.1 * meta.areaM2 * uPerp * uPerp;
@@ -3527,7 +3530,7 @@ const flushAeroAudio = () => {
       let locWx = envWindX || 0;
       let locWy = envWindY || 0;
       let locWz = 0;
-      if (envWindMag >= 0.5) {
+      if (envWindGusting && envWindMag >= 0.5) {
         [locWx, locWy, locWz] = evaluateGustWind(locWx, locWy, px, py, pz, data.time);
       }
       const linRel = Math.hypot(vx - locWx, vy - locWy, vz - locWz);
@@ -3588,7 +3591,7 @@ const stepCloth = (dt: number) => {
     gravity: [g[0], g[1], g[2]],
     wind: [wx, wy, 0],
     airDensity: envDensity < 0 ? 0 : envDensity > 0 ? envDensity : 1.225,
-    gustAt: wx !== 0 || wy !== 0 ? evaluateGustWind : undefined,
+    gustAt: envWindGusting && (wx !== 0 || wy !== 0) ? evaluateGustWind : undefined,
   });
 };
 
@@ -4653,6 +4656,7 @@ const doBuild = (
     timestep: newModel.opt.timestep,
     geom_size: Array.from(newModel.geom_size as ArrayLike<number>),
     geom_type: Array.from(newModel.geom_type as ArrayLike<number>),
+    geom_bodyid: Array.from(newModel.geom_bodyid as ArrayLike<number>),
     geom_rgba: Array.from(newModel.geom_rgba as ArrayLike<number>),
     body_mass: Array.from(newModel.body_mass as ArrayLike<number>),
     body_inertia: Array.from(newModel.body_inertia as ArrayLike<number>),
@@ -5148,6 +5152,7 @@ const handleMessage = async (evt: MessageEvent) => {
       case 'SET_ENV': {
         envWindX = msg.windX ?? envWindX;
         envWindY = msg.windY ?? envWindY;
+        if (typeof msg.windGusting === 'boolean') envWindGusting = msg.windGusting;
         envDensity = msg.density ?? envDensity;
         if ('waterBasins' in msg) {
           envWaterBasins = msg.waterBasins ?? [];

@@ -447,6 +447,37 @@ describe('Real MuJoCo physics: ball drops into concave valley', () => {
     expect(finalZ).toBeGreaterThan(-0.002);
     expect(finalZ).toBeLessThan(0.005);
   });
+
+  it('switching a static hfield body (california_relief) to a free joint drops stale hfield and builds cleanly in MuJoCo', async () => {
+    const caNode = californiaReliefPreset.nodes[0];
+    const result = await decomposeNodeColliders(caNode);
+    expect(result!.verdict.strategy).toBe('hfield');
+    const hf = result!.geoms[0];
+
+    // Simulate user switching joint type from static to Free before async collider recomputation finishes
+    const dynamicCa: SceneNode = {
+      ...caNode,
+      geoms: [...caNode.geoms, hf],
+      joints: [{ name: 'california_free', type: 'free' }],
+      collisionHash: result!.hash,
+      collisionDecomposed: true,
+    };
+    const ledger = new MeshFileLedger();
+    const xml = compileToMJCF({ nodes: [dynamicCa] }, -9.81, 1.0, 0, 0, 0, 0, { meshFiles: ledger });
+    expect(xml).not.toContain('<hfield ');
+    expect(xml).not.toContain('type="hfield"');
+
+    const { add } = ledger.take();
+    const vfs = new mj.MjVFS();
+    for (const f of add) vfs.addBuffer(f.name, f.bytes);
+    const m = mj.MjModel.from_xml_string(xml, vfs);
+    const d = new mj.MjData(m);
+    mj.mj_step(m, d);
+    expect(m.body_mass[1]).toBeGreaterThan(0);
+    m.delete();
+    d.delete();
+    vfs.delete();
+  });
 });
 
 // Keep hfieldToColliderGeom imported/verified directly

@@ -30,6 +30,7 @@ export interface UndoRedoState {
   gravityZ: number;
   windX: number;
   windY: number;
+  windGusting: boolean;
   density: number;
   floorFriction: number;
   floorBounce: number;
@@ -102,6 +103,7 @@ export function historyActions({ set, get }: SliceDeps): HistoryActions {
           gravityZ: s.gravityZ,
           windX: s.windX,
           windY: s.windY,
+          windGusting: s.windGusting,
           density: s.density,
           floorFriction: s.floorFriction,
           floorBounce: s.floorBounce,
@@ -133,6 +135,7 @@ export function historyActions({ set, get }: SliceDeps): HistoryActions {
           tempUndoState.gravityZ !== current.gravityZ ||
           tempUndoState.windX !== current.windX ||
           tempUndoState.windY !== current.windY ||
+          tempUndoState.windGusting !== current.windGusting ||
           tempUndoState.density !== current.density ||
           tempUndoState.floorFriction !== current.floorFriction ||
           tempUndoState.floorBounce !== current.floorBounce ||
@@ -184,12 +187,13 @@ export function historyActions({ set, get }: SliceDeps): HistoryActions {
     prepareForDiscreteChange: () => {
       markUserEdit();
       get().flushPendingUndo();
-      const { sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, background, waterLevel, selectedNodeId, latticeNodeId } = get();
+      const { sceneGraph, gravityZ, windX, windY, windGusting, density, floorFriction, floorBounce, background, waterLevel, selectedNodeId, latticeNodeId } = get();
       const snapshot: UndoRedoState = {
         sceneGraph: cloneSceneGraph(sceneGraph),
         gravityZ,
         windX,
         windY,
+        windGusting,
         density,
         floorFriction,
         floorBounce,
@@ -209,7 +213,7 @@ export function historyActions({ set, get }: SliceDeps): HistoryActions {
       if (get().castPrepBusy) return;
       withCastPrepBypass(() => {
         get().flushPendingUndo();
-        const { undoStack, redoStack, sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, background, waterLevel, selectedNodeId, latticeNodeId } = get();
+        const { undoStack, redoStack, sceneGraph, gravityZ, windX, windY, windGusting, density, floorFriction, floorBounce, background, waterLevel, selectedNodeId, latticeNodeId } = get();
         if (undoStack.length === 0) return;
 
         const previousState = undoStack[undoStack.length - 1];
@@ -220,6 +224,7 @@ export function historyActions({ set, get }: SliceDeps): HistoryActions {
           gravityZ,
           windX,
           windY,
+          windGusting,
           density,
           floorFriction,
           floorBounce,
@@ -239,6 +244,7 @@ export function historyActions({ set, get }: SliceDeps): HistoryActions {
           gravityZ: previousState.gravityZ,
           windX: previousState.windX,
           windY: previousState.windY,
+          windGusting: previousState.windGusting,
           density: previousState.density,
           floorFriction: previousState.floorFriction,
           floorBounce: previousState.floorBounce,
@@ -270,7 +276,7 @@ export function historyActions({ set, get }: SliceDeps): HistoryActions {
       if (get().castPrepBusy) return;
       withCastPrepBypass(() => {
         get().flushPendingUndo();
-        const { undoStack, redoStack, sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, background, waterLevel, selectedNodeId, latticeNodeId } = get();
+        const { undoStack, redoStack, sceneGraph, gravityZ, windX, windY, windGusting, density, floorFriction, floorBounce, background, waterLevel, selectedNodeId, latticeNodeId } = get();
         if (redoStack.length === 0) return;
 
         const nextState = redoStack[redoStack.length - 1];
@@ -281,6 +287,7 @@ export function historyActions({ set, get }: SliceDeps): HistoryActions {
           gravityZ,
           windX,
           windY,
+          windGusting,
           density,
           floorFriction,
           floorBounce,
@@ -300,6 +307,7 @@ export function historyActions({ set, get }: SliceDeps): HistoryActions {
           gravityZ: nextState.gravityZ,
           windX: nextState.windX,
           windY: nextState.windY,
+          windGusting: nextState.windGusting,
           density: nextState.density,
           floorFriction: nextState.floorFriction,
           floorBounce: nextState.floorBounce,

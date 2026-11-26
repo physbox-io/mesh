@@ -34,6 +34,7 @@ export const DEFAULT_ENVIRONMENT: SceneEnvironment = {
   gravityZ: -9.81,
   windX: 0,
   windY: 0,
+  windGusting: false,
   density: 0,
   floorFriction: 1.0,
   floorBounce: 0.0,
@@ -49,6 +50,7 @@ export function readEnvironment(state: SceneEnvironment): SceneEnvironment {
     gravityZ: state.gravityZ,
     windX: state.windX,
     windY: state.windY,
+    windGusting: !!state.windGusting,
     density: state.density,
     floorFriction: state.floorFriction,
     floorBounce: state.floorBounce,
@@ -72,6 +74,9 @@ export function environmentOf(saved: Partial<SceneEnvironment> | null | undefine
   for (const k of NUMERIC_KEYS) {
     const v = saved?.[k];
     if (typeof v === 'number' && Number.isFinite(v)) env[k] = v;
+  }
+  if (typeof saved?.windGusting === 'boolean') {
+    env.windGusting = saved.windGusting;
   }
   if (isBackgroundId(saved?.background)) {
     env.background = saved.background;

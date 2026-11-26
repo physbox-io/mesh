@@ -698,8 +698,8 @@ export const sceneCommands: McpCommands = {
     return withRenamedIds(withScriptWarnings(result, liveNodes), renamed);
   },
   SET_ENVIRONMENT: async (msg, { store }) => {
-    const { name, gravityZ, windX, windY, density, floorFriction, floorBounce, background, waterLevel, fidelity, stockWidthMm, stockDepthMm, stockThicknessMm, sound, reverb } =
-      msg as Msg<{ name?: unknown; sound?: unknown; reverb?: unknown; gravityZ?: unknown; windX?: unknown; windY?: unknown; density?: unknown; floorFriction?: unknown; floorBounce?: unknown; background?: unknown; waterLevel?: unknown; fidelity?: unknown; stockWidthMm?: unknown; stockDepthMm?: unknown; stockThicknessMm?: unknown }>;
+    const { name, gravityZ, windX, windY, windGusting, density, floorFriction, floorBounce, background, waterLevel, fidelity, stockWidthMm, stockDepthMm, stockThicknessMm, sound, reverb } =
+      msg as Msg<{ name?: unknown; sound?: unknown; reverb?: unknown; gravityZ?: unknown; windX?: unknown; windY?: unknown; windGusting?: unknown; density?: unknown; floorFriction?: unknown; floorBounce?: unknown; background?: unknown; waterLevel?: unknown; fidelity?: unknown; stockWidthMm?: unknown; stockDepthMm?: unknown; stockThicknessMm?: unknown }>;
 
     // Validate EVERY field before mutating any store state so a rejected call
     // never leaves partial stock/fidelity/environment edits behind.
@@ -732,6 +732,9 @@ export const sceneCommands: McpCommands = {
     }
     if (windY !== undefined && !isFiniteNumber(windY)) {
       return { ok: false, error: 'windY must be a finite number.' };
+    }
+    if (windGusting !== undefined && typeof windGusting !== 'boolean') {
+      return { ok: false, error: 'windGusting must be a boolean.' };
     }
     if (density !== undefined && (!isFiniteNumber(density) || density < 0)) {
       return { ok: false, error: 'density must be a non-negative finite number.' };
@@ -779,6 +782,7 @@ export const sceneCommands: McpCommands = {
     if (gravityZ !== undefined) env.gravityZ = gravityZ;
     if (windX !== undefined) env.windX = windX;
     if (windY !== undefined) env.windY = windY;
+    if (windGusting !== undefined) env.windGusting = windGusting;
     if (density !== undefined) env.density = density;
     if (floorFriction !== undefined) env.floorFriction = floorFriction;
     if (floorBounce !== undefined) env.floorBounce = floorBounce;

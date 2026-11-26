@@ -442,6 +442,8 @@ function publishCutSpot(nodeId: string, event: ThreeEvent<MouseEvent>) {
 interface DynamicGeomProps {
   /** The owning body. Absent for a geom the model has but the scene graph does not. */
   nodeId?: string;
+  /** Explicit MuJoCo body name to pull during Play-mode drag (e.g. a composite rope segment `rope_B12`). */
+  dragBodyName?: string;
   name: string;
   type: GeomType;
   color?: number[];
@@ -478,7 +480,7 @@ function zupToYup(v: ArrayLike<number>): Float32Array {
  * so a scene of G geoms and N nodes did G tree walks per write — per pointer
  * move while dragging. Now the parent indexes the graph once per change.
  */
-export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type, color, mujoco, model, data, node = null, isSelected, setSelectedNodeId, vertices, faces, dynamic: isDynamic, providedGeomId, staticBody }: DynamicGeomProps) {
+export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, dragBodyName, name, type, color, mujoco, model, data, node = null, isSelected, setSelectedNodeId, vertices, faces, dynamic: isDynamic, providedGeomId, staticBody }: DynamicGeomProps) {
   const meshRef = useRef<THREE.Group>(null);
   // Which geom of its body this group draws: SelectionOutline outlines just
   // the picked one when a geom, not the body, was chosen in the hierarchy.
@@ -663,9 +665,11 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
    * passed that absence straight through rather than ignoring the click. Kept
    * exactly so; the assertions below only say it out loud.
    */
+  const dragTargetId = dragBodyName ?? nodeId;
   const dragHandlers = useMemo(() => ({
     onClick: (e: ThreeEvent<MouseEvent>) => {
       e.stopPropagation();
+      if (!nodeId) return;
       // A paint dab is not a selection: swapping the properties panel out from
       // under every body you colour would make a colouring pass unusable.
       if (useStore.getState().paintMode) return;
@@ -699,32 +703,38 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     },
     onPointerDown: (e: ThreeEvent<PointerEvent>) => {
       if (useStore.getState().isPlaying) {
+        if (!dragTargetId) return;
         // Static bodies (0 DOFs along their ancestor chain) cannot be pulled
         // by a drag spring; let orbit/camera drag work instead of drawing a
         // dead spring line to the body's origin.
         const st = useStore.getState();
         const mdl = st.model;
-        if (mdl && mdl.body_dofnum && mdl.body_parentid && nodeId) {
-          const findNode = (nodes: SceneNode[]): SceneNode | null => {
-            for (const n of nodes) {
-              if (n.id === nodeId) return n;
-              const hit = findNode(n.children || []);
-              if (hit) return hit;
-            }
-            return null;
-          };
-          const node = findNode(st.sceneGraph.nodes || []);
-          const bId = node ? (
-            st.mujoco
-              ? (() => {
-                  for (let b = 0; b < mdl.nbody; b++) {
-                    const nm = st.mujoco!.mj_id2name(mdl, st.mujoco!.mjtObj.mjOBJ_BODY.value, b);
-                    if (nm === node.name || nm === node.id) return b;
-                  }
-                  return -1;
-                })()
-              : -1
-          ) : -1;
+        if (mdl && mdl.body_dofnum && mdl.body_parentid) {
+          let bId = -1;
+          if (dragBodyName && geomId >= 0 && mdl.geom_bodyid) {
+            bId = mdl.geom_bodyid[geomId] ?? -1;
+          } else if (nodeId) {
+            const findNode = (nodes: SceneNode[]): SceneNode | null => {
+              for (const n of nodes) {
+                if (n.id === nodeId) return n;
+                const hit = findNode(n.children || []);
+                if (hit) return hit;
+              }
+              return null;
+            };
+            const targetNode = findNode(st.sceneGraph.nodes || []);
+            bId = targetNode ? (
+              st.mujoco
+                ? (() => {
+                    for (let b = 0; b < mdl.nbody; b++) {
+                      const nm = st.mujoco!.mj_id2name(mdl, st.mujoco!.mjtObj.mjOBJ_BODY.value, b);
+                      if (nm === targetNode.name || nm === targetNode.id) return b;
+                    }
+                    return -1;
+                  })()
+                : -1
+            ) : -1;
+          }
           if (bId > 0) {
             let cur = bId;
             let hasDof = false;
@@ -737,7 +747,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
         }
         e.stopPropagation();
         setOrbitEnabled(false);
-        st.setDraggedNodeId(nodeId!);
+        st.setDraggedNodeId(dragTargetId);
         st.setDragDistance(e.distance);
         
         const pt = e.point;
@@ -752,7 +762,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
       }
     },
     onPointerUp: (e: ThreeEvent<PointerEvent>) => {
-      if (useStore.getState().draggedNodeId === nodeId) {
+      if (dragTargetId && useStore.getState().draggedNodeId === dragTargetId) {
         e.stopPropagation();
         const canvasEl = e.nativeEvent?.target as HTMLElement;
         if (canvasEl && typeof canvasEl.releasePointerCapture === 'function') {
@@ -766,7 +776,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
       }
     },
     onPointerCancel: (e: ThreeEvent<PointerEvent>) => {
-      if (useStore.getState().draggedNodeId === nodeId) {
+      if (dragTargetId && useStore.getState().draggedNodeId === dragTargetId) {
         e.stopPropagation();
         const canvasEl = e.nativeEvent?.target as HTMLElement;
         if (canvasEl && typeof canvasEl.releasePointerCapture === 'function') {
@@ -779,7 +789,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
         setOrbitEnabled(true);
       }
     }
-  }), [nodeId, setSelectedNodeId, setOrbitEnabled]);
+  }), [nodeId, dragBodyName, dragTargetId, geomId, setSelectedNodeId, setOrbitEnabled]);
 
   // For dynamic meshes, use body xpos/xmat so renderVertices (centroid-local) align correctly.
   const bodyId = useMemo(() => {
@@ -1743,8 +1753,10 @@ interface ImplicitGeom {
   name: string;
   type: GeomType;
   rgba: number[];
-  /** The body it is part of, when the compiler made it from one: a member's far half. */
+  /** The body it is part of, when the compiler made it from one: a member's far half or a composite cable/rope. */
   nodeId?: string;
+  /** MuJoCo body name for Play-mode spring dragging on composite segments (e.g. `rope_B12`). */
+  dragBodyName?: string;
 }
 
 /** What a geom is drawn in when it names no colour of its own. */
@@ -1857,6 +1869,22 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
   const focusedDrawn = !!focusedGeomName
     && geoms.some((g) => g.nodeId === selectedNodeId && g.name === focusedGeomName);
 
+  const compositePrefixes = useMemo(() => {
+    const prefixes: Array<{ prefix: string; nodeId: string }> = [];
+    const walk = (nodes: SceneNode[]) => {
+      for (const node of nodes || []) {
+        if (node.isComposite) {
+          const prefix = node.compositePrefix || `${node.name}_`;
+          if (prefix) prefixes.push({ prefix, nodeId: node.id });
+        }
+        walk(node.children);
+      }
+    };
+    walk(sceneGraph?.nodes || []);
+    prefixes.sort((a, b) => b.prefix.length - a.prefix.length);
+    return prefixes;
+  }, [sceneGraph]);
+
   const implicitGeoms = useMemo(() => {
     if (!model || !mujoco || !model.geom_type) return [];
     const list: ImplicitGeom[] = [];
@@ -1882,8 +1910,23 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
         // A member that breaks under load is compiled as two halves, and the
         // far one, `<geom>~2`, is in the model only (utils/breakModel.ts). It
         // belongs to the member: picking it picks the member, and hiding the
-        // member hides it.
-        const nodeId = name.endsWith('~2') ? knownGeomNames.get(name.slice(0, -2)) : undefined;
+        // member hides it. Likewise, MuJoCo `<composite>` cables/ropes emit
+        // `<prefix>G0..N` geoms on `<prefix>B_first..B_last` bodies: map them
+        // back to the composite node for selection/visibility and expose the
+        // segment's own MuJoCo body name so Play-mode drag pulls that segment.
+        let nodeId = name.endsWith('~2') ? knownGeomNames.get(name.slice(0, -2)) : undefined;
+        let dragBodyName: string | undefined;
+        if (!nodeId && compositePrefixes.length > 0) {
+          const match = compositePrefixes.find((p) => name.startsWith(p.prefix));
+          if (match) {
+            nodeId = match.nodeId;
+            const bId = model.geom_bodyid ? model.geom_bodyid[i] : -1;
+            if (bId > 0) {
+              const bName = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY.value, bId);
+              if (bName) dragBodyName = bName;
+            }
+          }
+        }
         if (nodeId && hiddenNodeIds.includes(nodeId)) continue;
         list.push({
           providedGeomId: i,
@@ -1891,11 +1934,12 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
           type: typeStr,
           rgba: color,
           nodeId,
+          dragBodyName,
         });
       }
     }
     return list;
-  }, [model, mujoco, knownGeomNames, hiddenNodeIds]);
+  }, [model, mujoco, knownGeomNames, compositePrefixes, hiddenNodeIds]);
 
   // Derived once per input rather than on every render: StaticBoxInstances
   // rewrites every instance matrix whenever its list is a new array, and a list
@@ -1958,6 +2002,7 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
             key={g.name}
             providedGeomId={g.providedGeomId}
             nodeId={g.nodeId}
+            dragBodyName={g.dragBodyName}
             name={g.name}
             type={g.type}
             color={g.rgba}

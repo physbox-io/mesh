@@ -161,7 +161,7 @@ export interface BuiltResult extends Partial<SimBuffers> {
   /** Centre of mass and principal-axes frame, in the body frame (3 and 4 per body). */
   body_ipos?: number[]; body_iquat?: number[];
   body_dofnum?: number[]; body_parentid?: number[];
-  geom_type?: number[]; geom_rgba?: number[];
+  geom_type?: number[]; geom_bodyid?: number[]; geom_rgba?: number[];
   jnt_qposadr?: number[]; jnt_dofadr?: number[];
   idMaps?: IdMaps;
   flexes?: FlexInfo[];
@@ -310,6 +310,7 @@ export type MainToWorkerMessage =
       type: 'SET_ENV';
       windX?: number;
       windY?: number;
+      windGusting?: boolean;
       density?: number;
       waterLevel?: number | null;
       gravityZ?: number;

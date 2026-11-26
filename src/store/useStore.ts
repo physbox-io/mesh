@@ -227,6 +227,7 @@ export interface PhysicsState extends HardwarePartActions, ExtrusionActions, Cli
   gravityZ: number;
   windX: number;
   windY: number;
+  windGusting: boolean;
   density: number;
   floorFriction: number;
   floorBounce: number;
@@ -624,7 +625,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       'floorBounce' in env;
     if (physicsChanged) {
       get().recompile(get().sceneGraph);
-    } else if ('waterLevel' in env) {
+    } else if ('waterLevel' in env || 'windGusting' in env) {
       const s = get();
       peekPhysicsWorkerClient()?.setEnv(
         s.windX,
@@ -632,6 +633,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         s.density,
         s.waterLevel,
         liveModelGraph(s).graph,
+        s.windGusting,
       );
     }
   },

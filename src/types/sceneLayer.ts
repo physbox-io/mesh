@@ -30,6 +30,7 @@ export interface ModelMirror {
   opt: { timestep?: number };
   geom_size: ArrayLike<number>;
   geom_type?: ArrayLike<number>;
+  geom_bodyid?: ArrayLike<number>;
   geom_rgba?: number[];
   body_mass?: ArrayLike<number>;
   body_inertia?: ArrayLike<number>;

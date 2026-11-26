@@ -3638,7 +3638,7 @@ export const PRESETS = {
     name: 'Coastal Flagpole in the Wind',
     emoji: '🚩',
     scene: flagInWindPreset,
-    environment: { windX: 8.8, windY: 0.6 },
+    environment: { windX: 8.8, windY: 0.6, windGusting: true },
     camera: { position: [1.45, -3.15, 2.05], target: [0.38, 0, 1.65] } satisfies PresetCamera,
   },
 };

@@ -531,6 +531,7 @@ export class PhysicsWorkerClient {
     density?: number,
     waterLevel?: number | null,
     sceneGraphForHydro?: SceneGraph,
+    windGusting?: boolean,
   ) {
     const waterBasins = sceneGraphForHydro ? collectWaterBasins(sceneGraphForHydro.nodes) : undefined;
     const hasWater =
@@ -543,6 +544,7 @@ export class PhysicsWorkerClient {
       type: 'SET_ENV',
       windX,
       windY,
+      ...(windGusting !== undefined ? { windGusting } : {}),
       density,
       ...(waterLevel !== undefined ? { waterLevel } : {}),
       ...(hydroModels ? { hydroModels } : {}),

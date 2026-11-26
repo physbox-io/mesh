@@ -315,6 +315,7 @@ export const buildModelMirror = (built: BuiltResult): ModelMirror => ({
   opt: { timestep: built.timestep },
   geom_size: built.geom_size!,
   geom_type: built.geom_type,
+  geom_bodyid: built.geom_bodyid,
   geom_rgba: built.geom_rgba,
   body_mass: built.body_mass,
   body_inertia: built.body_inertia,

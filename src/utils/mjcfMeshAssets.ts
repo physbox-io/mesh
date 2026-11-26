@@ -122,20 +122,21 @@ const meshAsset = (g: SceneGeom, sink: MeshFileSink | undefined): string => {
 /** Every heightfield geom in scene order: the ones that need an `<hfield>` asset. */
 export function collectHfieldAssets(nodes: SceneNode[]): SceneGeom[] {
   const out: SceneGeom[] = [];
-  const walk = (list: SceneNode[]) => {
+  const walk = (list: SceneNode[], ancestorJointed: boolean) => {
     if (!list) return;
     for (const node of list) {
-      if (!node.isPulleyRope && !node.cloth && !node.isComposite) {
+      const jointed = ancestorJointed || (node.joints?.length ?? 0) > 0;
+      if (!jointed && !node.isPulleyRope && !node.cloth && !node.isComposite) {
         for (const g of node.geoms || []) {
           if (g.type === 'hfield' && g.hfield && g.hfield.nrow >= 2 && g.hfield.ncol >= 2 && g.hfield.data.length >= g.hfield.nrow * g.hfield.ncol) {
             out.push(g);
           }
         }
       }
-      walk(node.children);
+      walk(node.children, jointed);
     }
   };
-  walk(nodes);
+  walk(nodes, false);
   return out;
 }
 

@@ -38,10 +38,10 @@ function SettingsPopoverBody({ llm }: { llm: ReturnType<typeof useLlmSettings> }
   const highFidelity = simFidelity === 'print';
   const {
     setSettingsOpen,
-    gravityZ, windX, windY, density, floorFriction, floorBounce, background, setEnvironment,
+    gravityZ, windX, windY, windGusting, density, floorFriction, floorBounce, background, setEnvironment,
   } = useStore(useShallow((s) => ({
     setSettingsOpen: s.setSettingsOpen,
-    gravityZ: s.gravityZ, windX: s.windX, windY: s.windY, density: s.density, floorFriction: s.floorFriction, floorBounce: s.floorBounce, background: s.background, setEnvironment: s.setEnvironment,
+    gravityZ: s.gravityZ, windX: s.windX, windY: s.windY, windGusting: s.windGusting, density: s.density, floorFriction: s.floorFriction, floorBounce: s.floorBounce, background: s.background, setEnvironment: s.setEnvironment,
   })));
   return (
     /* Anchored to the settings button on a desktop. Below `lg` there is
@@ -143,6 +143,20 @@ function SettingsPopoverBody({ llm }: { llm: ReturnType<typeof useLlmSettings> }
         <div className="flex flex-col gap-1">
           <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Wind Y <SliderValue value={windY} onChange={(v) => setEnvironment({windY: v})} decimals={1} unit="m/s" min={-10} max={10} /></label>
           <RangeInput min="-10" max="10" step="0.1" value={windY} onChange={(v) => setEnvironment({windY: v})} className="w-full accent-blue-500 cursor-pointer" />
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <span id="windGustingLabel" className="text-xs font-medium text-slate-500 dark:text-slate-400" title="Vary wind speed and crosswind with turbulent gusts instead of a steady constant breeze.">Wind Gusting</span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={windGusting}
+            aria-labelledby="windGustingLabel"
+            title="Vary wind speed and crosswind with turbulent gusts instead of a steady constant breeze."
+            onClick={() => setEnvironment({ windGusting: !windGusting })}
+            className={`relative inline-flex h-4 w-7 shrink-0 cursor-pointer items-center rounded-full transition-colors ${windGusting ? 'bg-blue-500' : 'bg-slate-300 dark:bg-slate-700'}`}
+          >
+            <span className={`inline-block h-3 w-3 rounded-full bg-white shadow transition-transform ${windGusting ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
+          </button>
         </div>
         <div className="flex flex-col gap-1">
           <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Air Density (Drag) <SliderValue value={density} onChange={(v) => setEnvironment({density: v})} decimals={2} unit="kg/m³" min={0} max={5} /></label>

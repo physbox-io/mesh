@@ -1369,6 +1369,8 @@ export interface SceneEnvironment {
   gravityZ: number;
   windX: number;
   windY: number;
+  /** Whether wind applies turbulent gusts and crosswind variation (false = steady constant wind). */
+  windGusting: boolean;
   density: number;
   floorFriction: number;
   floorBounce: number;

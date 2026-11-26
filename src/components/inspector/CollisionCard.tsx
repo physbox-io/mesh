@@ -30,6 +30,7 @@ export function CollisionCard({ node }: { node: SceneNode }) {
   if (meshes.length === 0) return null;
   const detail = detailOf(node, levels);
 
+  const hasJoints = (node.joints?.length ?? 0) > 0;
   const mode = collisionModeOf(node);
   const colliders = (node.geoms || []).filter((g) => g.csgDerived === 'collider');
   const hfieldCollider = colliders.find((g) => g.type === 'hfield' && g.hfield);
@@ -50,7 +51,9 @@ export function CollisionCard({ node }: { node: SceneNode }) {
       >
         <option value="auto">Auto</option>
         <option value="decompose">Convex pieces</option>
-        <option value="hfield">Heightfield</option>
+        <option value="hfield" disabled={hasJoints}>
+          {hasJoints ? 'Heightfield (static bodies only)' : 'Heightfield'}
+        </option>
         <option value="hull">Convex hull</option>
       </select>
       {mode !== 'hull' && mode !== 'hfield' && !hfieldCollider && (
