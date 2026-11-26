@@ -148,8 +148,21 @@ export const dfmCommands: McpCommands = {
       : mcpMoldSubject(sceneGraph, msg.masterId, resolveNode, 'check');
     if ('error' in subject) return { ok: false, error: subject.error };
 
+    // When a caller explicitly names a bought-in hardware body via master_id,
+    // allow DFM to inspect that requested body directly instead of skipping it.
+    const subjectScene = named.length > 0
+      ? {
+        ...subject.scene,
+        nodes: subject.scene.nodes.map((n) => (
+          n.hardwarePart || n.acousticString
+            ? { ...n, hardwarePart: undefined, acousticString: undefined }
+            : n
+        )),
+      }
+      : subject.scene;
+
     const effectiveBed = bedOverride ?? state.printBed;
-    const report = await dfmReportFor(subject.scene, process, {
+    const report = await dfmReportFor(subjectScene, process, {
       material: state.material,
       filament: state.filament,
       stock: state.stock,

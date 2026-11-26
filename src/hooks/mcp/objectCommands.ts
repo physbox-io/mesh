@@ -682,13 +682,17 @@ export const objectCommands: McpCommands = {
   },
   BODY_CUT: async (msg, { store }) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { targetId, cuts } = msg as Msg<{ targetId: string; cuts?: Record<string, any>[] }>;
+    const { targetId, cuts, frame } = msg as Msg<{ targetId: string; cuts?: Record<string, any>[]; frame?: unknown }>;
     const node = findNodeInScene(store.sceneGraph.nodes, targetId);
     if (!node) return { ok: false, error: `No object with id '${targetId}'` };
     if (cuts !== undefined && (!Array.isArray(cuts) || cuts.length === 0)) {
       return { ok: false, error: 'cuts must be a non-empty array of cut specifications' };
     }
-    const specs = Array.isArray(cuts) && cuts.length > 0 ? cuts : [msg];
+    const specs = Array.isArray(cuts) && cuts.length > 0
+      ? cuts.map((spec) => (frame !== undefined && spec && typeof spec === 'object' && !Array.isArray(spec) && spec.frame === undefined
+        ? { ...spec, frame }
+        : spec))
+      : [msg];
     const beforeScene = useStore.getState().sceneGraph;
     const results = [];
     for (const spec of specs) {

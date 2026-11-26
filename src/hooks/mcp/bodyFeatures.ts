@@ -65,9 +65,15 @@ const ROUND_MODES = new Set(['round', 'fillet', 'bevel', 'chamfer']);
 export function applySingleCutToBody(targetId: string, spec: Record<string, any>): Record<string, any> {
   if (!isPlainObject(spec)) return { ok: false, error: 'Cut specification must be a plain object' };
   const store = useStore.getState();
-  const { shape, at, normal, diameterMm, widthMm, lengthMm, depthMm, threadPitchMm, threadLeft, threadFitMm, size, bore, fitMm, seal, turned, facing } = spec;
+  const { shape, at, normal, frame, diameterMm, widthMm, lengthMm, depthMm, threadPitchMm, threadLeft, threadFitMm, size, bore, fitMm, seal, turned, facing } = spec;
   const node = findNodeInScene(store.sceneGraph.nodes, targetId);
   if (!node) return { ok: false, error: `No object with id '${targetId}'` };
+  if (frame !== undefined && frame !== 'body' && frame !== 'cage') {
+    return { ok: false, error: "frame must be 'body' or 'cage'" };
+  }
+  if (frame === 'cage' && !node.isLattice) {
+    return { ok: false, error: `frame 'cage' is only valid on lattice bodies ('${targetId}' is not a lattice body)` };
+  }
   if (at !== undefined && !isFiniteVec3(at)) {
     return { ok: false, error: 'at must be [x, y, z] of finite numbers in millimetres' };
   }
@@ -75,9 +81,10 @@ export function applySingleCutToBody(targetId: string, spec: Record<string, any>
     if (!isFiniteVec3(normal)) return { ok: false, error: 'normal must be [x, y, z] of finite numbers' };
     if (Math.hypot(normal[0], normal[1], normal[2]) < 1e-9) return { ok: false, error: 'normal must not be [0, 0, 0]' };
   }
+  const cageOrigin = frame === 'cage' ? (node.latticeOrigin ?? [0, 0, 0]) : [0, 0, 0];
   const spotIn = at !== undefined
     ? {
-      at: [at[0] / 1000, at[1] / 1000, at[2] / 1000],
+      at: [at[0] / 1000 - cageOrigin[0], at[1] / 1000 - cageOrigin[1], at[2] / 1000 - cageOrigin[2]],
       normal: normal !== undefined ? [...normal] : [0, 0, 1],
     }
     : undefined;

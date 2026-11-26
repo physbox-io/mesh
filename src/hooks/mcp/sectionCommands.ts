@@ -8,12 +8,45 @@
 // each piece of the cut: outline, area, holes, thickest and where it pinches.
 // On the export worker: building the solid of a dense part takes seconds.
 
+import * as THREE from 'three';
+import { isBoughtIn } from '../../utils/boughtIn';
 import { ExportWorkerClient } from '../../utils/exportWorkerClient';
 import { runExportJob } from '../../utils/exportJobs';
+import { getNodeWorldTransform } from '../../utils/laserCutExporter';
 import { mcpMoldSubject } from '../../utils/moldSubject';
+import { isNodeRotationBaked } from '../../utils/sceneTree';
 import type { SectionAxis, SectionResult } from '../../utils/sectionQuery';
+import type { SceneNode } from '../../types/scene';
 import { findNodeInScene } from './bridgeUtils';
 import type { McpCommands } from './types';
+
+function liftForExplicitSection(nodes: SceneNode[], wantedIds: string[]): SceneNode[] {
+  const wanted = new Set(wantedIds);
+  const byId = new Map<string, SceneNode>();
+  const walk = (list: SceneNode[], parent?: THREE.Matrix4) => {
+    for (const n of list) {
+      const world = getNodeWorldTransform(n, parent);
+      if (wanted.has(n.id)) {
+        const cleaned = { ...n, simulation: undefined, pourBox: undefined, hardwarePart: undefined, acousticString: undefined };
+        if (!parent) {
+          byId.set(n.id, cleaned);
+        } else {
+          const pos = new THREE.Vector3();
+          const q = new THREE.Quaternion();
+          world.decompose(pos, q, new THREE.Vector3());
+          const { euler: _euler, ...rest } = cleaned;
+          const geoms = isNodeRotationBaked(n)
+            ? n.geoms.map(({ baseVertices: _bv, baseRenderVertices: _brv, ...g }) => g)
+            : n.geoms;
+          byId.set(n.id, { ...rest, geoms, pos: [pos.x, pos.y, pos.z], quat: [q.w, q.x, q.y, q.z] });
+        }
+      }
+      if (n.children?.length) walk(n.children, world);
+    }
+  };
+  walk(nodes);
+  return wantedIds.map((id) => byId.get(id)).filter((n): n is SceneNode => Boolean(n));
+}
 
 export const sectionCommands: McpCommands = {
   SECTION: async (msg, { store, toId }) => {
@@ -33,13 +66,15 @@ export const sectionCommands: McpCommands = {
     const resolvedNodes = rawIds
       .map((id) => findNodeInScene(store.sceneGraph.nodes, (toId ? toId(id) : id) as string))
       .filter((n): n is NonNullable<typeof n> => Boolean(n));
-    if (rawIds.length > 0 && resolvedNodes.length === rawIds.length && resolvedNodes.some((n) => Boolean(n.simulation || n.pourBox))) {
-      // Explicit body_id targeting a simulation or pour box (e.g. inspecting a
-      // generated mold's wall thickness or cavity clearance): allow slicing it.
+    if (rawIds.length > 0 && resolvedNodes.length === rawIds.length && resolvedNodes.some((n) => Boolean(n.simulation || n.pourBox || isBoughtIn(n)))) {
+      // Explicit body_id targeting a simulation, pour box, or bought hardware
+      // (e.g. inspecting a generated mold's wall thickness or a fastener):
+      // lift to world pose and strip exclusion tags so it can be sliced.
+      const lifted = liftForExplicitSection(store.sceneGraph.nodes, resolvedNodes.map((n) => n.id));
       subject = {
-        scene: { ...store.sceneGraph, nodes: resolvedNodes.map((n) => ({ ...n, simulation: undefined, pourBox: undefined })) },
-        label: resolvedNodes.length === 1 ? resolvedNodes[0].name : `${resolvedNodes[0].name} and ${resolvedNodes.length - 1} more`,
-        ids: resolvedNodes.map((n) => n.id),
+        scene: { ...store.sceneGraph, nodes: lifted },
+        label: lifted.length === 1 ? lifted[0].name : `${lifted[0].name} and ${lifted.length - 1} more`,
+        ids: lifted.map((n) => n.id),
       };
     } else {
       const checked = mcpMoldSubject(store.sceneGraph, msg.bodyId, (id) => findNodeInScene(store.sceneGraph.nodes, (toId ? toId(id) : id) as string), 'cut', 'body_id');

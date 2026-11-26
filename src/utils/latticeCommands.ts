@@ -210,7 +210,10 @@ export function extrudeMm(
   const partner = mirror ? findMirrorFace(lattice, index, mirror) : -1;
   const result = extrudeFace(lattice, index, steps, axis);
   if (!result) throw new Error('That face could not be extruded');
-  if (partner !== -1) extrudeFace(lattice, partner, steps, axis);
+  // When an explicit axis equals the mirror plane's axis, the reflected face
+  // travels in the opposite signed direction along that axis to stay symmetric.
+  const partnerSteps = axis && mirror && axis === mirror ? -steps : steps;
+  if (partner !== -1) extrudeFace(lattice, partner, partnerSteps, axis);
 
   const capVerts = lattice.faces[result.cap] ?? [];
   return {
@@ -362,8 +365,14 @@ export function bevelFaceMm(lattice: Lattice, face: unknown, amountMm: number, m
   if (!bevelFace(lattice, index, steps)) {
     throw new Error('That face cannot be bevelled — its corners must belong to no other face, its edges must run along an axis or at 45 degrees, and the cut must be under half of every edge');
   }
+  // `bevelFace` appends the newly bevelled face to `lattice.faces`.
+  const newVerts = lattice.faces[lattice.faces.length - 1] ?? [];
+  const corners = newVerts.map((v) => mmFromCoord(coordOf(lattice, v), lattice.unit));
   if (partner !== -1) bevelFace(lattice, partner, steps);
-  return { amountMm: Math.round(steps * lattice.unit * 1000 * 10) / 10 };
+  return {
+    amountMm: Math.round(steps * lattice.unit * 1000 * 10) / 10,
+    corners,
+  };
 }
 
 /**
@@ -524,7 +533,7 @@ export function revolveMm(
   axis: Axis,
   degrees = 360,
   options: { throughMm?: number[]; segments?: number; closed?: boolean } = {},
-): { facesAdded: number; segments: number; degrees: number; closed: boolean } {
+): { facesAdded: number; segments: number; degrees: number; closed: boolean; ringEdges: number[][][] } {
   if (!Array.isArray(profile) || profile.length < 2 || !profile.every(validPoint)) {
     throw new Error('profile must be two or more points [x, y, z] in millimetres, in the order they run along the profile');
   }
@@ -555,6 +564,24 @@ export function revolveMm(
   if (!result) {
     throw new Error('That profile could not be swept — it needs at least two distinct points, and at least one of them off the axis');
   }
+  // One representative circumferential edge [c1, c2] (mm) per non-pole profile
+  // ring so callers can chain physics_lattice_sharpen(edges=..., loop=true)
+  // without fetching the full face dump.
+  const ringEdges: number[][][] = [];
+  if (result.rings.length >= 2) {
+    const r0 = result.rings[0];
+    const r1 = result.rings[1];
+    for (let j = 0; j < points.length; j++) {
+      const a = r0[j];
+      const b = r1[j];
+      if (a !== undefined && b !== undefined && a !== b) {
+        ringEdges.push([
+          mmFromCoord(coordOf(lattice, a), lattice.unit),
+          mmFromCoord(coordOf(lattice, b), lattice.unit),
+        ]);
+      }
+    }
+  }
   return {
     // `facesAdded`, not `faces`: the bridge spreads a whole-cage summary over
     // this reply and that summary already has a `faces` in it. The one that
@@ -563,6 +590,7 @@ export function revolveMm(
     segments: result.rings.length,
     degrees: spin,
     closed,
+    ringEdges,
   };
 }
 
@@ -708,6 +736,64 @@ export function dimensionSelectionMm(
     changed: dimensionMm(lattice, vertices, axis, mode, valueMm),
     corners: vertices.map(v => mmFromCoord(coordOf(lattice, v), lattice.unit)),
     missing,
+  };
+}
+
+export interface DimensionSpec {
+  axis: Axis;
+  mode: 'size' | 'position';
+  valueMm: number;
+}
+
+/**
+ * Applies multiple dimension edits in sequence to the same corner selection.
+ * Resolving corners to vertex indices up front means later axes still target
+ * the same vertices even after earlier axes move or scale them.
+ */
+export function dimensionSelectionBatchMm(
+  lattice: Lattice,
+  selection: unknown,
+  specs: DimensionSpec[],
+): { changed: boolean; corners: number[][]; missing: number[][]; applied: number } {
+  if (!Array.isArray(specs) || specs.length === 0) {
+    throw new Error('dimensions must be a non-empty list of { axis, mode?, valueMm } entries');
+  }
+  for (const spec of specs) {
+    if (typeof spec.valueMm !== 'number' || !Number.isFinite(spec.valueMm)) {
+      throw new Error('Every dimension valueMm must be a finite number of millimetres');
+    }
+  }
+  if (!Array.isArray(selection) || selection.length === 0) {
+    throw new Error('Give the corners to measure, as [x, y, z] points in millimetres — read them back with physics_get_lattice');
+  }
+  const vertices: number[] = [];
+  const missing: number[][] = [];
+  for (const point of selection) {
+    if (!validPoint(point)) {
+      throw new Error('Every corner must be an [x, y, z] point in millimetres');
+    }
+    const coord = coordFromMm(point, lattice.unit);
+    const found = findVertex(lattice, coord[0], coord[1], coord[2]);
+    if (found === -1) missing.push(mmFromCoord(coord, lattice.unit));
+    else vertices.push(found);
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `No corner of this shape is at ${missing.map(p => `[${p.join(', ')}]`).join(' or ')} — `
+      + 'read the shape back with physics_get_lattice and use the corners it reports',
+    );
+  }
+  let changed = false;
+  for (const spec of specs) {
+    if (dimensionMm(lattice, vertices, spec.axis, spec.mode, spec.valueMm)) {
+      changed = true;
+    }
+  }
+  return {
+    changed,
+    corners: vertices.map(v => mmFromCoord(coordOf(lattice, v), lattice.unit)),
+    missing,
+    applied: specs.length,
   };
 }
 
