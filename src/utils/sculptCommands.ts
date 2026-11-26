@@ -37,7 +37,7 @@ import {
 } from './sculptMesh';
 import { checkMeshInertia } from './meshInertiaCheck';
 
-export const BRUSH_TYPES: BrushType[] = ['draw', 'inflate', 'smooth', 'flatten', 'pinch', 'grab'];
+export const BRUSH_TYPES: BrushType[] = ['draw', 'clay', 'crease', 'inflate', 'smooth', 'flatten', 'pinch', 'grab'];
 
 export interface SculptStrokeRequest {
   /** Brush to use. Defaults to 'draw'. */
@@ -109,23 +109,11 @@ export interface SculptStrokeResult {
    */
   moved: number;
   /**
-   * Null when the brush retopologised, because then there is nothing honest to
-   * measure against.
-   *
-   * A stroke that only moves vertices keeps an undo record of exactly which
-   * ones and where they were, so the furthest travelled is a real number. A
-   * stroke that ADDS vertices — which is what dynamicTopology does, and it is
-   * on by default — keeps a whole-mesh snapshot instead, and the decimation
-   * pass renumbers what survives, so old index i and new index i are not the
-   * same vertex and comparing them would invent a figure.
-   *
-   * It used to return 0 in that case, which is the one answer that is actively
-   * misleading: 0 is also what a stroke that missed entirely returns, so an
-   * inflate that moved five hundred vertices and a dab that landed in thin air
-   * were indistinguishable. Null says "not measured"; `moved` and the vertex
-   * count say whether anything happened.
+   * Maximum Euclidean displacement of any vertex moved during the stroke, in
+   * metres. Always a finite number (tracked across dynamic-topology edge
+   * splits and decimation passes as well as pure vertex moves).
    */
-  maxDisplacement: number | null;
+  maxDisplacement: number;
   /** Whether the brush added or removed vertices rather than only moving them. */
   topologyChanged: boolean;
   /** Present when the surface now passes through itself; see solidityWarning. */
@@ -389,7 +377,7 @@ export function applySculptStroke(
   const undo = endStroke(session);
   if (sink) sink.undo = undo;
   let moved = 0;
-  let maxDisplacement: number | null = 0;
+  let maxDisplacement = 0;
   let topologyChanged = false;
   if (undo?.indices && undo.positions) {
     for (let i = 0; i < undo.indices.length; i++) {
@@ -403,11 +391,11 @@ export function applySculptStroke(
       if (distance > maxDisplacement) maxDisplacement = distance;
     }
   } else if (undo?.mesh) {
-    // The brush changed the topology, so there is no index-to-index mapping to
-    // measure against. Vertex count is the honest answer available, and the
-    // distance is reported as unmeasured rather than as nought.
+    // The brush changed the topology (refined/decimated). Use the displacement
+    // tracked per moved vertex during the brush passes so callers still get an
+    // honest numeric maxDisplacement instead of null.
     moved = Math.abs(mesh.vertexCount - undo.mesh.vertexCount);
-    maxDisplacement = null;
+    maxDisplacement = session.maxDisplacement;
     topologyChanged = true;
   }
 

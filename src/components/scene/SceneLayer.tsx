@@ -34,7 +34,11 @@ import { PrintAnalysisOverlay } from '../PrintAnalysisOverlay';
 import { DfmHeatmap } from './DfmHeatmap';
 import { useCoarsePointer } from '../../hooks/useCoarsePointer';
 import { useVertexPaint } from '../../hooks/useVertexPaint';
-import { buildMeshPaintGeometry, buildPaintGeometry, colorsForCopy, isPaintable, paintArgsFromSize, paintMeshResolution, paintResolution, type PaintLayer } from '../../utils/vertexPaint';
+import {
+  buildMeshPaintGeometry, buildPaintGeometry, colorsForCopy, compositePaintLayers,
+  isPaintable, paintArgsFromSize, paintMeshResolution, paintResolution,
+  paintSurfacePositionsZup, transferPaintLayer, type PaintLayer,
+} from '../../utils/vertexPaint';
 import { sampleCatmullRom } from '../../utils/geom';
 import { resolveCsgGeoms } from '../../utils/csg';
 import { facesWatertight } from '../../utils/sculptMesh';
@@ -560,15 +564,43 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     () => (geomEntry && hasTextures ? cachedTexturedSurface(geomEntry, geomHalfLen(geomEntry)) ?? built : null),
     [geomEntry, hasTextures, built],
   );
+  // The argument list buildPaintGeometry needs, taken from the geom's own
+  // half-extents rather than from geometryArgs — the same rule the MCP bridge
+  // paints by, so an agent's dab and a user's stroke land on the same surface.
+  const paintArgs = useMemo(() => {
+    if (geomId === -1 || !model?.geom_size) return [];
+    return paintArgsFromSize(type, [
+      model.geom_size[geomId * 3],
+      model.geom_size[geomId * 3 + 1],
+      model.geom_size[geomId * 3 + 2],
+    ]);
+  }, [geomId, model, type]);
+
   const patterned = textured && textured.regions.some((r) => r.applied) ? textured : null;
   // Paint is keyed to the authored mesh's vertices, which the patterned one
-  // does not have.
+  // does not have — so when both pattern and paint are present we transfer the
+  // paint onto the patterned vertices and composite any pattern colour on top.
   const paintLayer = (patterned ? undefined : geomEntry?.paint) as PaintLayer | undefined;
   const showPaint = !patterned && !!nodeId && isPaintable(type, !!node?.isWedge) && (paintMode || !!paintLayer);
-  // A pattern's own colour (its palette, or the colour chosen for it), on the
-  // patterned mesh's vertices. Drawn per vertex, which is also what puts it in
-  // the 3MF: the exporter reads the colour attribute of a vertex-coloured mesh.
-  const patternPaint = patterned?.paint;
+  // A pattern's own colour (its palette, or the colour chosen for it), plus
+  // any existing `physics_paint` transferred onto the patterned mesh's vertices.
+  const patternPaint = useMemo(() => {
+    if (!patterned) return undefined;
+    const basePaint = geomEntry?.paint as PaintLayer | undefined;
+    if (!basePaint || !basePaint.idx.length) return patterned.paint;
+    const srcPos = paintSurfacePositionsZup({
+      type,
+      paint: basePaint,
+      vertices: geomEntry?.vertices ?? vertices,
+      renderVertices: geomEntry?.renderVertices,
+      faces: geomEntry?.faces ?? faces,
+      dynamic: geomEntry?.dynamic ?? isDynamic,
+      paintArgs,
+    });
+    if (!srcPos) return patterned.paint;
+    const transferred = transferPaintLayer(srcPos, basePaint, patterned.vertices);
+    return compositePaintLayers(transferred, patterned.paint, patterned.vertices.length / 3);
+  }, [patterned, geomEntry?.paint, geomEntry?.vertices, geomEntry?.renderVertices, geomEntry?.faces, geomEntry?.dynamic, type, vertices, faces, isDynamic, paintArgs]);
   const vertexColored = showPaint || !!patternPaint;
   const [baseR, baseG, baseB] = color ?? [0.8, 0.8, 0.8];
   // A mesh is drawn with crease-aware normals (shadedGeometry below), not the
@@ -952,18 +984,6 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
   // boolean and dent would otherwise strand a set of GPU buffers.
   useEffect(() => () => { meshBufferGeometry?.dispose(); }, [meshBufferGeometry]);
 
-  // The argument list buildPaintGeometry needs, taken from the geom's own
-  // half-extents rather than from geometryArgs — the same rule the MCP bridge
-  // paints by, so an agent's dab and a user's stroke land on the same surface.
-  const paintArgs = useMemo(() => {
-    if (geomId === -1 || !model?.geom_size) return [];
-    return paintArgsFromSize(type, [
-      model.geom_size[geomId * 3],
-      model.geom_size[geomId * 3 + 1],
-      model.geom_size[geomId * 3 + 2],
-    ]);
-  }, [geomId, model, type]);
-
   // The stored tessellation wins over a freshly computed one. Resizing a
   // painted die rebuilds the box at the new size with the same subdivisions, so
   // vertex N is still the same point on the same face and the pips scale with
@@ -1011,11 +1031,11 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
     geo.setIndex(new THREE.BufferAttribute(index, 1));
-    if (patterned.paint) {
-      geo.setAttribute('color', new THREE.BufferAttribute(colorsForCopy([baseR, baseG, baseB], patterned.paint, patterned.faces, index, positions.length / 3), 3));
+    if (patternPaint) {
+      geo.setAttribute('color', new THREE.BufferAttribute(colorsForCopy([baseR, baseG, baseB], patternPaint, patterned.faces, index, positions.length / 3), 3));
     }
     return geo;
-  }, [type, patterned, baseR, baseG, baseB]);
+  }, [type, patterned, patternPaint, baseR, baseG, baseB]);
   useEffect(() => () => { patternedGeometry?.dispose(); }, [patternedGeometry]);
 
   const { handlers: paintHandlers, cursorRef } = useVertexPaint({

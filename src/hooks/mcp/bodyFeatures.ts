@@ -590,13 +590,27 @@ export async function applySinglePatternToBody(targetId: string, m: Record<strin
   else if (Array.isArray(m.color) && (m.color.length === 3 || m.color.length === 4) && m.color.slice(0, 3).every((v: unknown) => isFiniteNumber(v) && v >= 0 && v <= 1)) {
     color = m.color.slice(0, 3) as number[];
   } else if (m.color !== undefined) return { ok: false, error: "color is [r, g, b] each a finite number in 0..1, or '#rrggbb', or 'none'." };
+  const cellField = spec.fields.find((f) => f.key === 'cellMm') as { min?: number } | undefined;
+  const rawOptions = (m.options as SurfaceTexture['options']) ?? {};
+  const propagateCellToOption =
+    !!cellField &&
+    m.cellMm !== undefined &&
+    rawOptions.cellMm === undefined &&
+    m.cellMm >= (cellField.min ?? 2);
   const texture: SurfaceTexture = {
     pattern: spec.id,
-    options: { ...spec.defaults, ...(prev?.pattern === spec.id ? prev.options : {}), ...((m.options as SurfaceTexture['options']) ?? {}) },
+    options: {
+      ...spec.defaults,
+      ...(prev?.pattern === spec.id ? prev.options : {}),
+      ...rawOptions,
+      ...(propagateCellToOption ? { cellMm: m.cellMm } : {}),
+    },
     depthM: ((emboss ? 1 : -1) * depthMm) / 1000,
     borderM: m.borderMm !== undefined ? Math.max(0, m.borderMm) / 1000 : prev?.borderM ?? DEFAULT_TEXTURE_BORDER_M,
     // Lettering's strokes want finer triangles than a texture does.
-    cellM: m.cellMm !== undefined ? Math.max(0.05, m.cellMm) / 1000 : prev?.cellM ?? (spec.figure || spec.wraps ? 0.00025 : DEFAULT_TEXTURE_CELL_M),
+    cellM: !propagateCellToOption && m.cellMm !== undefined
+      ? Math.max(0.05, m.cellMm) / 1000
+      : prev?.cellM ?? (spec.figure || spec.wraps ? 0.00025 : DEFAULT_TEXTURE_CELL_M),
     seedAt: prev?.seedAt ?? pick.seedAt,
     seedNormal: prev?.seedNormal ?? pick.seedNormal,
     maxTiltDeg: m.stopAtDeg ?? prev?.maxTiltDeg,
@@ -675,7 +689,7 @@ export async function applySinglePatternToBody(targetId: string, m: Record<strin
 export function applyPaintStrokeToBody(targetId: string, m: Record<string, any>): Record<string, any> {
   if (!isPlainObject(m)) throw new Error('Paint stroke must be a plain object');
   const store = useStore.getState();
-  const { geomName, at, radius, rgba, flow, erase, line, hardness } = m;
+  const { geomName, at, atMm, radius, radiusMm, rgba, flow, erase, line, hardness, symmetry } = m;
   const node = findNodeInScene(store.sceneGraph.nodes, targetId);
   if (!node) throw new Error(`No object with id '${targetId}'`);
 
@@ -692,12 +706,20 @@ export function applyPaintStrokeToBody(targetId: string, m: Record<string, any>)
   const normColor = normalizeRgba(rgba);
   if (!normColor) throw new Error('rgba must be [r, g, b] or [r, g, b, a], each a finite number in 0..1');
 
-  const points: number[][] = pointList(at);
+  const rawPoints: number[][] = at !== undefined
+    ? pointList(at)
+    : atMm !== undefined
+      ? pointList(atMm).map((p) => (isFiniteVec3(p) ? [p[0] / 1000, p[1] / 1000, p[2] / 1000] : p))
+      : [];
+  const points: number[][] = rawPoints;
   if (!points.length || points.some((p: unknown) => !isFiniteVec3(p))) {
-    throw new Error("at must be [x, y, z] or a list of them, with finite numbers in the geom's own frame (metres)");
+    throw new Error("at must be [x, y, z] or a list of them, with finite numbers in the geom's own frame in metres (or pass atMm in millimetres)");
   }
   if (radius !== undefined && (!isFiniteNumber(radius) || radius <= 0)) {
-    throw new Error('radius must be a positive finite number');
+    throw new Error('radius must be a positive finite number in metres');
+  }
+  if (radiusMm !== undefined && (!isFiniteNumber(radiusMm) || radiusMm <= 0)) {
+    throw new Error('radiusMm must be a positive finite number in millimetres');
   }
   if (flow !== undefined && (!isFiniteNumber(flow) || flow < 0 || flow > 1)) {
     throw new Error('flow must be a finite number in 0..1');
@@ -705,7 +727,14 @@ export function applyPaintStrokeToBody(targetId: string, m: Record<string, any>)
   if (hardness !== undefined && (!isFiniteNumber(hardness) || hardness < 0 || hardness > 1)) {
     throw new Error('hardness must be a finite number in 0..1');
   }
-  const brush = typeof radius === 'number' ? radius : 0.008;
+  if (symmetry !== undefined && symmetry !== 'x' && symmetry !== 'y' && symmetry !== 'z') {
+    throw new Error("symmetry must be 'x', 'y' or 'z'");
+  }
+  const brush = typeof radius === 'number'
+    ? radius
+    : typeof radiusMm === 'number'
+      ? radiusMm / 1000
+      : 0.008;
 
   const isDynamicMesh = geom.type === 'mesh' && (geom.dynamic !== false || !geom.vertices?.length);
   const rawMeshPositions = geom.type === 'mesh'
@@ -731,12 +760,24 @@ export function applyPaintStrokeToBody(targetId: string, m: Record<string, any>)
   if (!positions?.length) throw new Error('That geom has no surface to paint');
 
   const canvas = canvasFromLayer(geom.paint, positions.length / 3, res);
-  const local = points.map((p) => toGeometrySpace(geom.type, p, isDynamicMesh));
+  const pointRuns: number[][][] = [points];
+  if (symmetry) {
+    const axis = symmetry === 'x' ? 0 : symmetry === 'y' ? 1 : 2;
+    pointRuns.push(points.map((p) => {
+      const q = [p[0], p[1], p[2]];
+      q[axis] = -q[axis];
+      return q;
+    }));
+  }
   // A line is its points joined: dabs a third of a radius apart along each
   // step, each pulled onto the surface so a long step across a curved body
   // does not sink under it. Without it each point is a dab of its own (the
   // pips of a die), and a stripe drawn as points came out dotted.
-  const dabs = line === true ? alongSurface(local, positions, brush / 3) : local;
+  const dabs: number[][] = [];
+  for (const run of pointRuns) {
+    const local = run.map((p) => toGeometrySpace(geom.type, p, isDynamicMesh));
+    dabs.push(...(line === true ? alongSurface(local, positions, brush / 3) : local));
+  }
   let landed = 0;
   for (const [x, y, z] of dabs) {
     if (applyDab(canvas, positions, {
@@ -753,7 +794,7 @@ export function applyPaintStrokeToBody(targetId: string, m: Record<string, any>)
   if (!landed) {
     return {
       ok: false, geomName: geom.name, dabsLanded: 0, dabsRequested: dabs.length,
-      error: `No vertices within ${brush} m of any of those points — the point has to be on the surface, in the geom's own frame`,
+      error: `No vertices within ${brush} m of any of those points — 'at' must be on the surface in the geom's own frame in METRES (or pass 'atMm' in millimetres)`,
     };
   }
   useStore.getState().setGeomPaint(targetId, geom.name, layerFromCanvas(canvas));

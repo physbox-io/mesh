@@ -925,3 +925,210 @@ export function sampleColor(
     mix(canvas.data[bestV * 4 + 2], base[2] ?? 0.8),
   ];
 }
+
+/**
+ * Transfers a sparse `PaintLayer` from `sourcePositions` onto a new mesh's
+ * `targetPositions` (both xyz flat arrays in the same coordinate space) by
+ * nearest-vertex lookup using a uniform spatial grid.
+ *
+ * Used both when a surface pattern re-meshes a painted geom (so vertex paint
+ * stays visible in the viewport alongside the pattern) and when mesh repair
+ * welds/compacts vertices (so existing vertex paint is remapped instead of
+ * scrambled across shifted vertex indices).
+ */
+export function transferPaintLayer(
+  sourcePositions: ArrayLike<number>,
+  sourceLayer: PaintLayer | undefined,
+  targetPositions: ArrayLike<number>,
+  targetRes: number[] = [],
+): PaintLayer | undefined {
+  if (!sourceLayer || !sourceLayer.idx.length) return undefined;
+  const srcCount = Math.floor(sourcePositions.length / 3);
+  const tgtCount = Math.floor(targetPositions.length / 3);
+  if (srcCount === 0 || tgtCount === 0) return undefined;
+
+  const srcCanvas = canvasFromLayer(sourceLayer, srcCount, sourceLayer.res);
+  const tgtCanvas: PaintCanvas = { res: targetRes, count: tgtCount, data: new Float32Array(tgtCount * 4) };
+
+  // Bounding box of source vertices to choose a balanced grid cell size.
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < srcCount; i++) {
+    const x = sourcePositions[i * 3];
+    const y = sourcePositions[i * 3 + 1];
+    const z = sourcePositions[i * 3 + 2];
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+    if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+  }
+  const diag = Math.hypot(maxX - minX, maxY - minY, maxZ - minZ);
+  const divs = Math.max(12, Math.min(64, Math.ceil(Math.cbrt(srcCount) * 1.5)));
+  const cell = Math.max(diag / divs, 1e-5);
+  const invCell = 1 / cell;
+
+  const grid = new Map<string, number[]>();
+  for (let i = 0; i < srcCount; i++) {
+    const gx = Math.floor((sourcePositions[i * 3] - minX) * invCell);
+    const gy = Math.floor((sourcePositions[i * 3 + 1] - minY) * invCell);
+    const gz = Math.floor((sourcePositions[i * 3 + 2] - minZ) * invCell);
+    const key = `${gx},${gy},${gz}`;
+    let bucket = grid.get(key);
+    if (!bucket) {
+      bucket = [];
+      grid.set(key, bucket);
+    }
+    bucket.push(i);
+  }
+
+  const maxRing = Math.max(divs, 32);
+  for (let v = 0; v < tgtCount; v++) {
+    const x = targetPositions[v * 3];
+    const y = targetPositions[v * 3 + 1];
+    const z = targetPositions[v * 3 + 2];
+    const gx = Math.floor((x - minX) * invCell);
+    const gy = Math.floor((y - minY) * invCell);
+    const gz = Math.floor((z - minZ) * invCell);
+
+    let best = -1;
+    let bestD2 = Infinity;
+    for (let r = 0; r <= maxRing; r++) {
+      for (let dx = -r; dx <= r; dx++) {
+        for (let dy = -r; dy <= r; dy++) {
+          for (let dz = -r; dz <= r; dz++) {
+            if (Math.max(Math.abs(dx), Math.abs(dy), Math.abs(dz)) !== r) continue;
+            const bucket = grid.get(`${gx + dx},${gy + dy},${gz + dz}`);
+            if (!bucket) continue;
+            for (let b = 0; b < bucket.length; b++) {
+              const p = bucket[b];
+              const ox = sourcePositions[p * 3] - x;
+              const oy = sourcePositions[p * 3 + 1] - y;
+              const oz = sourcePositions[p * 3 + 2] - z;
+              const d2 = ox * ox + oy * oy + oz * oz;
+              if (d2 < bestD2) {
+                bestD2 = d2;
+                best = p;
+              }
+            }
+          }
+        }
+      }
+      if (best >= 0 && bestD2 <= (r * cell) * (r * cell)) break;
+    }
+    if (best < 0) {
+      for (let p = 0; p < srcCount; p++) {
+        const ox = sourcePositions[p * 3] - x;
+        const oy = sourcePositions[p * 3 + 1] - y;
+        const oz = sourcePositions[p * 3 + 2] - z;
+        const d2 = ox * ox + oy * oy + oz * oz;
+        if (d2 < bestD2) {
+          bestD2 = d2;
+          best = p;
+        }
+      }
+    }
+    if (best >= 0) {
+      const a = srcCanvas.data[best * 4 + 3];
+      if (a > 0) {
+        tgtCanvas.data[v * 4] = srcCanvas.data[best * 4];
+        tgtCanvas.data[v * 4 + 1] = srcCanvas.data[best * 4 + 1];
+        tgtCanvas.data[v * 4 + 2] = srcCanvas.data[best * 4 + 2];
+        tgtCanvas.data[v * 4 + 3] = a;
+      }
+    }
+  }
+
+  return layerFromCanvas(tgtCanvas);
+}
+
+/**
+ * Alpha-over composites two `PaintLayer`s keyed to the same `vertexCount`
+ * vertices (`over` drawn on top of `under`). Used when a surface pattern has
+ * its own accent colour on top of existing `physics_paint` vertex colours.
+ */
+export function compositePaintLayers(
+  under: PaintLayer | undefined,
+  over: PaintLayer | undefined,
+  vertexCount: number,
+): PaintLayer | undefined {
+  if (!under || !under.idx.length) return over;
+  if (!over || !over.idx.length) return under;
+  if (vertexCount <= 0) return undefined;
+
+  const canvas = canvasFromLayer(under, vertexCount, over.res.length ? over.res : under.res);
+  for (let i = 0; i < over.idx.length; i++) {
+    const v = over.idx[i];
+    if (v < 0 || v >= vertexCount) continue;
+    const o4 = i * 4;
+    const aOver = (over.rgba[o4 + 3] ?? 0) / 255;
+    if (aOver <= 0) continue;
+    const rOver = (over.rgba[o4] ?? 0) / 255;
+    const gOver = (over.rgba[o4 + 1] ?? 0) / 255;
+    const bOver = (over.rgba[o4 + 2] ?? 0) / 255;
+    const c4 = v * 4;
+    const aUnder = canvas.data[c4 + 3];
+    const aOut = aOver + aUnder * (1 - aOver);
+    if (aOut > 0) {
+      canvas.data[c4] = (rOver * aOver + canvas.data[c4] * aUnder * (1 - aOver)) / aOut;
+      canvas.data[c4 + 1] = (gOver * aOver + canvas.data[c4 + 1] * aUnder * (1 - aOver)) / aOut;
+      canvas.data[c4 + 2] = (bOver * aOver + canvas.data[c4 + 2] * aUnder * (1 - aOver)) / aOut;
+      canvas.data[c4 + 3] = aOut;
+    }
+  }
+  return layerFromCanvas(canvas);
+}
+
+/**
+ * Reconstructs the xyz vertex positions (in MuJoCo Z-up geom space) that a
+ * geom's `PaintLayer` is keyed to, so paint can be transferred onto a
+ * patterned or repaired mesh in the same Z-up frame.
+ */
+export function paintSurfacePositionsZup(params: {
+  type: string;
+  paint: PaintLayer;
+  vertices?: ArrayLike<number>;
+  renderVertices?: ArrayLike<number>;
+  faces?: ArrayLike<number>;
+  dynamic?: boolean;
+  paintArgs?: number[];
+}): Float32Array | null {
+  const { type, paint, vertices, renderVertices, faces, dynamic, paintArgs } = params;
+  const yupToZupF32 = (src: ArrayLike<number>): Float32Array => {
+    const out = new Float32Array(src.length);
+    for (let i = 0; i < src.length; i += 3) {
+      out[i] = src[i];
+      out[i + 1] = -src[i + 2];
+      out[i + 2] = src[i + 1];
+    }
+    return out;
+  };
+
+  if (type === 'mesh') {
+    const isDynamic = dynamic !== false || !vertices?.length;
+    const raw = isDynamic ? (renderVertices ?? vertices) : vertices;
+    if (!raw?.length) return null;
+    const pos = paint.res.length && faces?.length
+      ? subdivideMeshForPaint(raw, faces, paint.res).positions
+      : new Float32Array(raw);
+    return isDynamic ? pos : yupToZupF32(pos);
+  }
+
+  if (!paintArgs?.length) return null;
+  const built = buildPaintGeometry(type, paintArgs, paint.res);
+  if (!built) return null;
+  const posAttr = built.getAttribute('position');
+  if (!posAttr || posAttr.count === 0) {
+    built.dispose();
+    return null;
+  }
+  let pos: Float32Array = new Float32Array(posAttr.array as ArrayLike<number>);
+  built.dispose();
+  if (type === 'ellipsoid') {
+    for (let i = 0; i < pos.length; i++) {
+      pos[i] *= paintArgs[i % 3] ?? 1;
+    }
+  }
+  if (type === 'cylinder' || type === 'capsule') {
+    pos = yupToZupF32(pos);
+  }
+  return pos;
+}
