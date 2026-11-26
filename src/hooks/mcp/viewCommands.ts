@@ -94,7 +94,7 @@ function pauseRendererDuringFlush(composer: unknown, gl: unknown): () => void {
     });
   };
   stub(composer);
-  if (!composer) stub(gl);
+  stub(gl);
   return () => {
     for (const restore of restores) restore();
   };
@@ -145,7 +145,61 @@ function suppressComposerOutlines(composer: unknown): () => void {
   };
 }
 
+/**
+ * Temporarily scales WebGLRenderer pixelRatio (and EffectComposer targets)
+ * when `scale < 1` so headless SwiftShader renders `scale^2` fewer fragments.
+ */
+function applyRenderScale(
+  gl: PhysicsWindow['_physics_gl'],
+  composer: PhysicsWindow['_physics_composer'],
+  scale: number,
+): { scaledRenderer: boolean; restore: () => void } {
+  if (scale >= 1 || !gl || typeof gl.getPixelRatio !== 'function' || typeof gl.setPixelRatio !== 'function') {
+    return { scaledRenderer: false, restore: () => {} };
+  }
+  const origDpr = gl.getPixelRatio();
+  const size = typeof gl.getSize === 'function' ? gl.getSize({ x: 0, y: 0 }) : null;
+  gl.setPixelRatio(origDpr * scale);
+  if (size && composer && typeof composer.setSize === 'function') {
+    composer.setSize(size.x, size.y, false);
+  }
+  return {
+    scaledRenderer: true,
+    restore: () => {
+      gl.setPixelRatio?.(origDpr);
+      if (size && composer && typeof composer.setSize === 'function') {
+        composer.setSize(size.x, size.y, false);
+      }
+    },
+  };
+}
+
+/** Downsamples a canvas in 2D when the renderer does not support pixelRatio scaling. */
+function downsampleCanvas(
+  src: HTMLCanvasElement,
+  scale: number,
+): { dataUrl: string; width: number; height: number } | null {
+  if (typeof document === 'undefined' || !src.width || !src.height) return null;
+  const width = Math.max(1, Math.round(src.width * scale));
+  const height = Math.max(1, Math.round(src.height * scale));
+  const out = document.createElement('canvas');
+  out.width = width;
+  out.height = height;
+  const ctx = out.getContext?.('2d');
+  if (!ctx) return null;
+  ctx.drawImage(src, 0, 0, width, height);
+  return { dataUrl: out.toDataURL('image/png'), width, height };
+}
+
 async function takeScreenshot(msg: Record<string, unknown>, waitedInQueue = false) {
+  let scale = 1.0;
+  if (msg.scale !== undefined && msg.scale !== null) {
+    if (typeof msg.scale !== 'number' || !Number.isFinite(msg.scale) || msg.scale < 0.25 || msg.scale > 1.0) {
+      return { ok: false, error: 'scale must be a finite number between 0.25 and 1.0.' };
+    }
+    scale = msg.scale;
+  }
+
   const win = getPhysicsWindow();
   const gl = win?._physics_gl;
   if (!gl || !gl.domElement) return { ok: false, error: 'Renderer not ready yet' };
@@ -179,7 +233,10 @@ async function takeScreenshot(msg: Record<string, unknown>, waitedInQueue = fals
   if (clean) useCapture.setState({ clean: true });
   let restoreOutlines: (() => void) | null = null;
   let restoreRenderer: (() => void) | null = null;
+  let restoreScale: (() => void) | null = null;
   let dataUrl: string;
+  let capturedWidth = gl.domElement.width;
+  let capturedHeight = gl.domElement.height;
   try {
     if (overridden || clean) {
       restoreRenderer = pauseRendererDuringFlush(win?._physics_composer, gl);
@@ -192,10 +249,28 @@ async function takeScreenshot(msg: Record<string, unknown>, waitedInQueue = fals
     restoreRenderer?.();
     restoreRenderer = null;
     if (clean) restoreOutlines = suppressComposerOutlines(win?._physics_composer);
+    const scaleState = applyRenderScale(gl, win?._physics_composer, scale);
+    restoreScale = scaleState.restore;
     // Through the composer when there is one; see renderViewportNow.
     renderViewportNow();
-    dataUrl = gl.domElement.toDataURL('image/png');
+    if (scale < 1 && !scaleState.scaledRenderer) {
+      const down = downsampleCanvas(gl.domElement, scale);
+      if (down) {
+        dataUrl = down.dataUrl;
+        capturedWidth = down.width;
+        capturedHeight = down.height;
+      } else {
+        dataUrl = gl.domElement.toDataURL('image/png');
+        capturedWidth = gl.domElement.width;
+        capturedHeight = gl.domElement.height;
+      }
+    } else {
+      dataUrl = gl.domElement.toDataURL('image/png');
+      capturedWidth = gl.domElement.width;
+      capturedHeight = gl.domElement.height;
+    }
   } finally {
+    restoreScale?.();
     restoreRenderer?.();
     restoreOutlines?.();
     if (overridden) apply(before);
@@ -216,12 +291,12 @@ async function takeScreenshot(msg: Record<string, unknown>, waitedInQueue = fals
   return {
     ok: true,
     dataUrl,
-    width: gl.domElement.width,
-    height: gl.domElement.height,
+    width: capturedWidth,
+    height: capturedHeight,
     // Says whether the frame was drawn to order or is whatever the
     // canvas happened to be holding.
     rendered: Boolean(win?._physics_scene && win?._physics_camera),
-    view: { ...wanted, clean },
+    view: { ...wanted, clean, ...(scale !== 1 ? { scale } : {}) },
     ...(notes.length ? { note: notes.join(' ') } : {}),
   };
 }

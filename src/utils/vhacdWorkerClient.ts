@@ -37,12 +37,14 @@ export const DECOMPOSE_TIMEOUT_MS = 20_000;
 
 /**
  * A whole part, chunked, decomposed and pulled in (solidDecomposition.ts): a
- * two-turn chute is about 21 s of it in Node, most parts a few.
+ * two-turn chute is about 21 s of it in Node, most parts a few; 90 s gives
+ * headroom under headless/SwiftShader CPU contention when several hollow parts
+ * are built back-to-back.
  */
-export const SOLID_TIMEOUT_MS = 60_000;
+export const SOLID_TIMEOUT_MS = 90_000;
 
-/** Measuring is a hull and an edge walk, well under a second. */
-export const ANALYSE_TIMEOUT_MS = 10_000;
+/** Measuring is a hull and an edge walk, well under a second; 20 s covers cold worker startup. */
+export const ANALYSE_TIMEOUT_MS = 20_000;
 
 /** What the client needs of a Worker; a test passes its own. */
 export interface WorkerLike {
@@ -56,6 +58,8 @@ type Job = {
   build: (id: number) => VhacdRequest & { verts: Float64Array; faces: Uint32Array };
   timeoutMs: number;
   timeoutMessage: string;
+  /** Higher priority runs sooner (fast ANALYSE jobs ahead of queued heavy decompositions). */
+  priority: number;
   resolve: (value: unknown) => void;
   reject: (e: Error) => void;
 };
@@ -173,9 +177,17 @@ function request<T>(
   timeoutMessage: string,
   timeoutMs: number,
   build: Job['build'],
+  priority = 0,
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    queue.push({ build, timeoutMs, timeoutMessage, resolve: resolve as (v: unknown) => void, reject });
+    const job: Job = { build, timeoutMs, timeoutMessage, priority, resolve: resolve as (v: unknown) => void, reject };
+    if (priority > 0) {
+      const idx = queue.findIndex((q) => q.priority < priority);
+      if (idx === -1) queue.push(job);
+      else queue.splice(idx, 0, job);
+    } else {
+      queue.push(job);
+    }
     pump();
   });
 }
@@ -248,7 +260,7 @@ export async function analyseMeshOffThread(verts: number[], faces: number[]): Pr
     type: 'ANALYSE', id,
     verts: Float64Array.from(verts),
     faces: Uint32Array.from(faces),
-  }));
+  }), 1);
 }
 
 /** A whole closed mesh to tightened convex pieces; see utils/solidDecomposition.ts. */

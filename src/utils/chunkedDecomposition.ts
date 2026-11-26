@@ -31,9 +31,10 @@
 // it inline for the tests and the preset exporter.
 
 import type { ManifoldToplevel, Manifold } from 'manifold-3d';
-import type { Hull } from './csg';
+import { convexHullOf, meshVolumeAndCentroid, type Hull } from './csg';
 import type { DecomposeParams } from './vhacd';
 import { findFilledCavities, wallThickness, type FilledCavity } from './filledCavities';
+import { depthInside, hullPlanes } from './hullDepth';
 
 /** Millimetres inside Manifold: its tolerances are relative, and every figure here is a millimetre one. */
 const MM = 1000;
@@ -114,6 +115,34 @@ export interface ChunkedResult {
 type Decompose = (verts: number[], faces: number[], params: Partial<DecomposeParams>) => Promise<Hull[]>;
 
 /**
+ * Returns the chunk's exact convex hull when the chunk is already convex
+ * (solidity >= 0.985 and no vertex buried inside its hull), avoiding pointless
+ * slenderness bisection and V-HACD voxelisation on flat/convex wall pieces.
+ */
+function convexChunkHull(chunk: Chunk, longest: number): Hull | null {
+  if (chunk.verts.length < 12 || chunk.faces.length < 12) return null;
+  const { volume } = meshVolumeAndCentroid(chunk.verts, chunk.faces);
+  if (!(volume > 0)) return null;
+  const pts: number[][] = [];
+  for (let i = 0; i < chunk.verts.length; i += 3) {
+    pts.push([chunk.verts[i], chunk.verts[i + 1], chunk.verts[i + 2]]);
+  }
+  const hull = convexHullOf(pts);
+  if (!hull) return null;
+  const hullVol = Math.abs(hull.volume);
+  if (!(hullVol > 0) || volume / hullVol < 0.985) return null;
+  const planes = hullPlanes(hull);
+  if (planes.length < 4) return null;
+  const depthLimit = Math.max(1e-4, longest * 0.005);
+  for (let i = 0; i < chunk.verts.length; i += 3) {
+    if (depthInside(planes, chunk.verts[i], chunk.verts[i + 1], chunk.verts[i + 2]) > depthLimit) {
+      return null;
+    }
+  }
+  return { ...hull, volume: hullVol };
+}
+
+/**
  * Decomposes a closed mesh chunk by chunk. `paramsFor` picks each chunk's
  * V-HACD budget from the chunk itself; `wall` is the whole part's wall
  * thickness, which a cut does not change.
@@ -144,6 +173,13 @@ export async function decomposeInChunks(
         const chunk = fromManifold(current);
         const { lo, hi } = bounds(chunk.verts);
         const longest = Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+        const alreadyConvex = convexChunkHull(chunk, longest);
+        if (alreadyConvex) {
+          current.delete();
+          current = null;
+          done.push({ hulls: [alreadyConvex], cavities: [] });
+          continue;
+        }
         const canCut = longest >= plan.minWalls * wall && chunks < plan.maxChunks;
         if (canCut && longest / wall >= plan.slender) {
           const halves = bisect(current);

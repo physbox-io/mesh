@@ -34,21 +34,23 @@ export const DEFAULT_STOCK: StockSize = { widthMm: 150, depthMm: 150, thicknessM
 
 /** Bounds a hobby machine can actually hold, and a field can sensibly step over. */
 export const MIN_STOCK_MM = 1;
+/** Thin sheet stock (paper, cardstock, shim stock, fabric) goes down to 0.1 mm. */
+export const MIN_STOCK_THICKNESS_MM = 0.1;
 export const MAX_STOCK_PLAN_MM = 3000;
 export const MAX_STOCK_THICKNESS_MM = 300;
 
-const clampAxis = (value: unknown, fallback: number, max: number): number => {
+const clampAxis = (value: unknown, fallback: number, max: number, min = MIN_STOCK_MM): number => {
   const n = typeof value === 'string' ? Number(value) : value;
   if (typeof n !== 'number' || !Number.isFinite(n)) return fallback;
-  return Math.min(max, Math.max(MIN_STOCK_MM, n));
+  return Math.min(max, Math.max(min, n));
 };
 
 /** Repairs a partial or garbage stock record into one every consumer can use. */
 export function clampStock(stock: Partial<StockSize> | null | undefined): StockSize {
   return {
-    widthMm: clampAxis(stock?.widthMm, DEFAULT_STOCK.widthMm, MAX_STOCK_PLAN_MM),
-    depthMm: clampAxis(stock?.depthMm, DEFAULT_STOCK.depthMm, MAX_STOCK_PLAN_MM),
-    thicknessMm: clampAxis(stock?.thicknessMm, DEFAULT_STOCK.thicknessMm, MAX_STOCK_THICKNESS_MM),
+    widthMm: clampAxis(stock?.widthMm, DEFAULT_STOCK.widthMm, MAX_STOCK_PLAN_MM, MIN_STOCK_MM),
+    depthMm: clampAxis(stock?.depthMm, DEFAULT_STOCK.depthMm, MAX_STOCK_PLAN_MM, MIN_STOCK_MM),
+    thicknessMm: clampAxis(stock?.thicknessMm, DEFAULT_STOCK.thicknessMm, MAX_STOCK_THICKNESS_MM, MIN_STOCK_THICKNESS_MM),
   };
 }
 

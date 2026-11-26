@@ -102,14 +102,18 @@ export function meshIntegrity(g: SceneGeom): Record<string, unknown> {
  * of their oak as stock, not as part of the design, and "the design is 5 mm
  * wider than your stock" is the sentence that saves the board.
  */
+/** Sheet stock at or below this thickness (mm) is cut/unfolded flat rather than machined as a solid billet. */
+const THIN_SHEET_MAX_MM = 3;
+
 export function stockReport(scene: SceneGraph, stock: { widthMm: number; depthMm: number; thicknessMm: number }) {
   const design = scene.nodes?.length ? measurePart(scene, '+z', 100) : null;
   if (!design) return { ...stock };
   const r = (v: number) => Math.round(v * 10) / 10;
+  const thinSheet = stock.thicknessMm <= THIN_SHEET_MAX_MM;
   const over: string[] = [];
   if (design.x > stock.widthMm + 0.5) over.push(`${r(design.x - stock.widthMm)} mm wider`);
   if (design.y > stock.depthMm + 0.5) over.push(`${r(design.y - stock.depthMm)} mm deeper`);
-  if (design.z > stock.thicknessMm + 0.05) over.push(`${r(design.z - stock.thicknessMm)} mm taller`);
+  if (!thinSheet && design.z > stock.thicknessMm + 0.05) over.push(`${r(design.z - stock.thicknessMm)} mm taller`);
   // A design of several parts is usually cut one part at a time, and the box
   // round the assembly says nothing about whether each fits. The machining
   // export does take the whole scene, so that figure stays; each part's comes
@@ -120,22 +124,31 @@ export function stockReport(scene: SceneGraph, stock: { widthMm: number; depthMm
         if (!m) return [];
         const fitsPlan = (m.x <= stock.widthMm + 0.5 && m.y <= stock.depthMm + 0.5)
           || (m.y <= stock.widthMm + 0.5 && m.x <= stock.depthMm + 0.5);
-        const fits = fitsPlan && m.z <= stock.thicknessMm + 0.05;
+        const fits = thinSheet ? fitsPlan : (fitsPlan && m.z <= stock.thicknessMm + 0.05);
         return [{ id: n.id, sizeMm: { width: r(m.x), depth: r(m.y), height: r(m.z) }, fits }];
       })
     : [];
   const misfits = parts.filter((p) => !p.fits).map((p) => p.id);
+  const note = thinSheet
+    ? (over.length
+      ? `Thin sheet stock (${r(stock.thicknessMm)} mm): the assembled footprint is ${over.join(', ')} than one sheet; physics_export_cut will lay parts across sheets.`
+      : undefined)
+    : (over.length ? `The design is ${over.join(', ')} than your stock.` : undefined);
+  const partsNote = parts.length
+    ? (thinSheet
+      ? (misfits.length
+        ? `Thin sheet stock (${r(stock.thicknessMm)} mm): ${misfits.join(', ')} ${misfits.length === 1 ? 'exceeds' : 'exceed'} one sheet footprint; physics_export_cut (unfold, panels, or contour) lays parts flat across sheets.`
+        : `Thin sheet stock (${r(stock.thicknessMm)} mm): each part's footprint fits one sheet for physics_export_cut (unfold, panels, or contour).`)
+      : (misfits.length
+        ? `On its own, ${misfits.join(', ')} ${misfits.length === 1 ? 'does' : 'do'} not fit the stock. designMm is the whole scene, which is what physics_export_machining cuts as one piece.`
+        : 'Each part fits the stock on its own. designMm is the whole scene, which is what physics_export_machining cuts as one piece.'))
+    : undefined;
   return {
     ...stock,
     designMm: { width: r(design.x), depth: r(design.y), height: r(design.z) },
     fits: over.length === 0,
-    ...(over.length ? { note: `The design is ${over.join(', ')} than your stock.` } : {}),
-    ...(parts.length ? {
-      parts,
-      partsNote: misfits.length
-        ? `On its own, ${misfits.join(', ')} ${misfits.length === 1 ? 'does' : 'do'} not fit the stock. designMm is the whole scene, which is what physics_export_machining cuts as one piece.`
-        : 'Each part fits the stock on its own. designMm is the whole scene, which is what physics_export_machining cuts as one piece.',
-    } : {}),
+    ...(note ? { note } : {}),
+    ...(parts.length ? { parts, ...(partsNote ? { partsNote } : {}) } : {}),
   };
 }
 
