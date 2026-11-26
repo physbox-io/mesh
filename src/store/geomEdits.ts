@@ -23,8 +23,9 @@ import type { PhysicsState } from './useStore';
  * The hash is left alone, so the edit still reads as stale and the
  * decomposer still runs. Returns whether there was anything to take off.
  */
-export function dropStaleColliders(node: SceneNode): boolean {
+export function dropStaleColliders(node: SceneNode, force = false): boolean {
   if (node.csgEnabled || !node.geoms?.some((g) => g.csgDerived === 'collider')) return false;
+  if (!force && !collidersAreStale(node)) return false;
   node.geoms = node.geoms.filter((g) => g.csgDerived !== 'collider');
   delete node.collisionDecomposed;
   return true;

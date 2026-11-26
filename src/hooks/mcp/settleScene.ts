@@ -30,14 +30,22 @@ export interface ScadFailure { id: string; name: string; error: string }
 export const scadFailureError = (failures: ScadFailure[]) =>
   `SCAD did not compile for ${failures.map((f) => `'${f.name}' (${f.error})`).join('; ')}. Those bodies have no geometry; fix the source and send it again.`;
 
+const hasCompiledScadMesh = (node: SceneNode): boolean =>
+  (node.geoms || []).some(
+    (g) => g.type === 'mesh' && !g.csgDerived && Array.isArray(g.vertices) && g.vertices.length > 0 && Array.isArray(g.faces) && g.faces.length > 0,
+  );
+
 /** Compiles every body's SCAD; answers with the bodies that did not compile. */
-export const autoCompileScad = async (nodes: SceneNode[]): Promise<ScadFailure[]> => {
+export const autoCompileScad = async (
+  nodes: SceneNode[],
+  opts: { skipCompiled?: boolean } = {},
+): Promise<ScadFailure[]> => {
   const failures: ScadFailure[] = [];
   const scadNodes: SceneNode[] = [];
   const collect = (nodesList: SceneNode[]) => {
     if (!nodesList) return;
     for (const node of nodesList) {
-      if (node.scad) scadNodes.push(node);
+      if (node.scad && !(opts.skipCompiled && hasCompiledScadMesh(node))) scadNodes.push(node);
       collect(node.children || []);
     }
   };
@@ -137,7 +145,7 @@ export const settleScene = async (
   store.updateScene(replacesScene ? { ...sceneFields, nodes } : { ...store.sceneGraph, ...sceneFields, nodes }, true);
   let scadErrors: ScadFailure[];
   try {
-    scadErrors = await autoCompileScad(nodes);
+    scadErrors = await autoCompileScad(nodes, { skipCompiled: !replacesScene });
     await applyDeclarativePreCsgFeatures(nodes, opsMap);
     // Boolean bodies compile through the same OpenSCAD pool, and just as
     // asynchronously — a caller that got ok:true before they finished would be

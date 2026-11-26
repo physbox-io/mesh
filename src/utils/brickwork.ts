@@ -130,6 +130,8 @@ export interface PlacedLintel {
   depthMm: number;
   /** Height of the lintel (one course height), mm. */
   heightMm: number;
+  /** True when placed inside a pre-cut lintel slot in the model (no bricks need trimming). */
+  slot?: boolean;
 }
 
 export interface BrickworkResult {
@@ -716,27 +718,76 @@ export function layBricks(scene: SceneGraph, opts: Partial<BrickworkOptions> = {
     const l = op.slot ? Math.round(op.span) : Math.round(Math.ceil((op.span + 2 * bearing) / stock) * stock);
     lintelMap.set(l, (lintelMap.get(l) ?? 0) + 1);
     const lintelCourse = op.slot ? op.course - 1 : op.course;
+    let placedLen = l;
+    let placedX = op.centre.x;
+    let placedY = op.centre.y;
+    if (!op.slot) {
+      const solidHere = solidAt.get(lintelCourse);
+      if (solidHere) {
+        const u = { x: Math.cos(op.angle), y: Math.sin(op.angle) };
+        const n = { x: -u.y, y: u.x };
+        const across = op.depth / 4;
+        const solidAlong = (t: number) => [-across, 0, across].some((w) =>
+          solidHere({ x: op.centre.x + u.x * t + n.x * w, y: op.centre.y + u.y * t + n.y * w }));
+        const halfL = l / 2;
+        const step = Math.max(1, j / 4);
+        const walkEdge = (dir: -1 | 1): number => {
+          let t = 0;
+          while (Math.abs(t) < halfL && solidAlong(t + dir * step)) {
+            t += dir * step;
+          }
+          if (Math.abs(t) >= halfL) return dir * halfL;
+          let inSide = t;
+          let outSide = t + dir * step;
+          for (let iter = 0; iter < 16 && Math.abs(outSide - inSide) > 0.1; iter++) {
+            const mid = (inSide + outSide) / 2;
+            if (solidAlong(mid)) inSide = mid;
+            else outSide = mid;
+          }
+          return inSide;
+        };
+        if (solidAlong(0)) {
+          const clampedLo = Math.max(-halfL, walkEdge(-1));
+          const clampedHi = Math.min(halfL, walkEdge(1));
+          if (clampedHi - clampedLo < l - 0.5 && clampedHi > clampedLo) {
+            placedLen = clampedHi - clampedLo;
+            const shiftU = (clampedLo + clampedHi) / 2;
+            placedX = op.centre.x + u.x * shiftU;
+            placedY = op.centre.y + u.y * shiftU;
+            const leftBearing = -op.span / 2 - clampedLo;
+            const rightBearing = clampedHi - op.span / 2;
+            const minBearing = Math.min(leftBearing, rightBearing);
+            if (minBearing < bearing - 0.5) {
+              warnings.push(
+                `Lintel over ${Math.round(op.span)} mm opening clamped to ${Math.round(placedLen)} mm wall span (minimum bearing ${Math.round(Math.max(0, minBearing))} mm, less than standard ${Math.round(bearing)} mm).`,
+              );
+            }
+          }
+        }
+      }
+    }
     placedLintels.push({
       course: lintelCourse,
-      x: op.centre.x,
-      y: op.centre.y,
+      x: placedX,
+      y: placedY,
       z: lo[2] + lintelCourse * gauge,
       angle: op.angle,
-      lengthMm: l,
+      lengthMm: placedLen,
       depthMm: op.depth,
       heightMm: H,
+      ...(op.slot ? { slot: true } : {}),
     });
   }
 
   // Replace/trim regular bricks in the lintel course that overlap a placed
   // non-slot lintel so the scene shows the concrete lintel beam instead of
   // floating/bridging bricks over the opening.
-  if (placedLintels.length > 0) {
+  if (placedLintels.some((ln) => !ln.slot)) {
     const kept: PlacedBrick[] = [];
     for (const b of bricks) {
       let current: PlacedBrick | null = b;
       for (const ln of placedLintels) {
-        if (!current || current.course !== ln.course) continue;
+        if (!current || ln.slot || current.course !== ln.course) continue;
         if (!bricksOverlap2D(current, ln, j * 0.5)) continue;
         const u = { x: Math.cos(ln.angle), y: Math.sin(ln.angle) };
         const align = Math.abs(Math.cos(current.angle) * u.x + Math.sin(current.angle) * u.y);
@@ -1181,6 +1232,7 @@ function buildMortarCoreGeoms(
         name: `${idPrefix}_mortar_${course + 1}_${idx}`,
         type: 'box',
         role: 'visual',
+        mass: 0,
         size: [lengthMm / 2000, depthMm / 2000, heightMm / 2000],
         pos: [(cx + shift[0]) / 1000, (cy + shift[1]) / 1000, (zMid + shift[2]) / 1000],
         quat: [Math.cos(st.angle / 2), 0, 0, Math.sin(st.angle / 2)],
@@ -1306,7 +1358,7 @@ export function brickworkInScene(
   scene: SceneGraph,
   bodyId: string | null,
   opts: Partial<BrickworkOptions> & { placement?: BrickPlacement } = {},
-): { nodes: SceneNode[]; result: BrickworkResult } {
+): { nodes: SceneNode[]; result: BrickworkResult; createdIds: string[] } {
   const subject = subjectScene(scene, bodyId);
   const result = layBricks(subject, opts);
   let shift: [number, number, number] = [0, 0, 0];
@@ -1346,5 +1398,5 @@ export function brickworkInScene(
   });
   // Laid beside again from the same model: the courses laid before go.
   const kept = opts.placement === 'beside' ? scene.nodes.filter((n) => n.laidFrom !== from) : (bodyId ? withoutBody(scene.nodes) : withoutWholeScene(scene.nodes));
-  return { nodes: [...kept, ...laid], result };
+  return { nodes: [...kept, ...laid], result, createdIds: laid.map((n) => n.id) };
 }

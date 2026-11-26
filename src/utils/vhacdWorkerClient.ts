@@ -269,9 +269,10 @@ export async function decomposeSolidOffThread(verts: number[], faces: number[], 
     const { decomposeSolid } = await import('./solidDecomposition');
     return decomposeSolid(verts, faces, options);
   }
+  const priority = faces.length / 3 <= 64 ? 0.5 : 0;
   return request<SolidResult>('Convex decomposition timed out.', SOLID_TIMEOUT_MS, (id) => ({
     type: 'DECOMPOSE_SOLID', id, options,
     verts: Float64Array.from(verts),
     faces: Uint32Array.from(faces),
-  }));
+  }), priority);
 }

@@ -217,7 +217,7 @@ export function booleanActions({ set, get }: SliceDeps): BooleanActions {
       // And stop colliding as the shape before the edit that could not be
       // decomposed: stamping the hash alone left those pieces in place for good.
       // The body collides as its hull instead, which at least contains it.
-      const hadColliders = error ? dropStaleColliders(node) : false;
+      const hadColliders = error ? dropStaleColliders(node, true) : false;
       set({ sceneGraph: newScene });
       if (hadColliders) get().recompile(newScene, undefined, false);
     },

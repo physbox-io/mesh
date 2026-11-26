@@ -267,7 +267,8 @@ export const buildNode = (node: SceneNode): string => {
   // bolted to that body. Only when something else in the body carries the mass,
   // though: MuJoCo will not accept a moving body that ends up with none at all.
   const hasSolid = (node.geoms || []).some(g => g.role !== 'visual');
-  (node.geoms || []).forEach(g => innerXml += buildGeom(g, hasSolid && g.role === 'visual'));
+  const isFixed = !(node.joints && node.joints.length > 0);
+  (node.geoms || []).forEach(g => innerXml += buildGeom(g, (hasSolid || isFixed) && g.role === 'visual'));
   (node.children || []).forEach(c => innerXml += buildNode(c));
   
   let frame = ` pos="${posStr}"`;

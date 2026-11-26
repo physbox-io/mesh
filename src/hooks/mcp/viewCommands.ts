@@ -30,7 +30,7 @@ import { objectReply } from '../../utils/objectReply';
 import { meshPage } from '../../utils/meshPage';
 import { initialContacts } from '../initialContacts';
 import {
-  collectFilledCavities, isFabricationScene, staleBodies, stockReport, summarizeNode,
+  collectFilledCavities, isFabricationScene, isVisualOnlyNode, staleBodies, stockReport, summarizeNode,
 } from '../../utils/sceneSummary';
 import { recompilesInFlight } from '../../store/simulationActions';
 import { modelBuiltFrom } from '../../store/modelProvenance';
@@ -425,13 +425,26 @@ export const viewCommands: McpCommands = {
         return list.rows.length ? { hardwareList: list } : {};
       })(),
       ...(store.model?.body_mass ? (() => {
-        const { body_mass: mass, body_dofnum: dofs, body_parentid: parent } = store.model!;
+        const { body_mass: mass, body_dofnum: dofs, body_parentid: parent, _idMaps } = store.model!;
+        // Visual-only bodies (e.g. recessed mortar core) contribute 0 mass.
+        const visualBodyIds = new Set<number>();
+        const walkVisual = (nodesList: SceneNode[] | undefined) => {
+          for (const n of nodesList || []) {
+            if (isVisualOnlyNode(n)) {
+              const bId = _idMaps?.body?.[n.id];
+              if (bId !== undefined && bId >= 0) visualBodyIds.add(bId);
+            }
+            walkVisual(n.children);
+          }
+        };
+        walkVisual(store.sceneGraph.nodes);
         // What moves: a body with a degree of freedom of its own or under
         // one that has. A fixed body (a wall, a bench) weighs nothing to
         // the simulation, and counting it made the total meaningless.
         const moves = (b: number): boolean => b > 0 && ((dofs?.[b] ?? 1) > 0 || (!!parent && moves(parent[b])));
         let total = 0, fixed = 0;
         for (let b = 1; b < mass!.length; b++) {
+          if (visualBodyIds.has(b)) continue;
           if (moves(b)) total += mass![b]; else fixed += mass![b];
         }
         return {
@@ -554,7 +567,20 @@ export const viewCommands: McpCommands = {
       ...(filter.unknown.length ? { warning: `bodies: no body has the name or id ${filter.unknown.map((u) => `"${u}"`).join(', ')}.` } : {}),
     };
   },
-  GET_OBJECTS: async (_msg, { store }) => {
+  GET_OBJECTS: async (msg, { store }) => {
+    const namesOnly = msg.namesOnly === true || msg.names_only === true;
+    if (namesOnly) {
+      const summarize = (n: SceneNode): Record<string, unknown> => ({
+        id: n.id,
+        name: n.name,
+        type: n.type,
+        pos: n.pos,
+        geomCount: (n.geoms || []).length,
+        childCount: (n.children || []).length,
+        ...(n.children?.length ? { children: n.children.map(summarize) } : {}),
+      });
+      return (store.sceneGraph.nodes || []).map(summarize);
+    }
     return (store.sceneGraph.nodes || []).map(stateNode);
   },
   GET_OBJECT: async (msg, { store }) => {
