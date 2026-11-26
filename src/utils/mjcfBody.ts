@@ -177,7 +177,79 @@ const buildJoint = (joint: SceneJoint) => {
   return `<joint ${attrs} />`;
 };
 
-export const buildNode = (node: SceneNode): string => {
+export type WorldPosMap = Map<string, [number, number, number]>;
+
+/** Collect world-space positions (by node id and name) for anchored composite sag geometry. */
+export function collectWorldPositions(nodes: SceneNode[]): WorldPosMap {
+  const map: WorldPosMap = new Map();
+  const walk = (list: SceneNode[] | undefined, ox: number, oy: number, oz: number) => {
+    for (const n of list || []) {
+      const x = ox + (n.pos?.[0] ?? 0);
+      const y = oy + (n.pos?.[1] ?? 0);
+      const z = oz + (n.pos?.[2] ?? 0);
+      const pt: [number, number, number] = [x, y, z];
+      if (n.id) map.set(n.id, pt);
+      if (n.name) map.set(n.name, pt);
+      walk(n.children, x, y, z);
+    }
+  };
+  walk(nodes, 0, 0, 0);
+  return map;
+}
+
+/**
+ * Build a sagging parabolic vertex list from `start` to `end` whose piecewise-linear
+ * arc length matches `targetLength` (when `targetLength > span`), so increasing a
+ * welded cable's length sags smoothly between both anchors instead of jutting past
+ * the far anchor.
+ */
+function buildSlackCableVertices(
+  start: [number, number, number],
+  end: [number, number, number],
+  vertexCount: number,
+  targetLength: number,
+): string | null {
+  const dx = end[0] - start[0];
+  const dy = end[1] - start[1];
+  const dz = end[2] - start[2];
+  const span = Math.hypot(dx, dy, dz);
+  if (!(span > 1e-4) || !Number.isFinite(targetLength) || targetLength <= span + 1e-4) return null;
+  const n = Math.max(3, Math.floor(vertexCount));
+
+  const arcLen = (sag: number): number => {
+    let total = 0;
+    let px = 0, py = 0, pz = 0;
+    for (let i = 1; i < n; i++) {
+      const t = i / (n - 1);
+      const x = t * dx;
+      const y = t * dy;
+      const z = t * dz - 4 * sag * t * (1 - t);
+      total += Math.hypot(x - px, y - py, z - pz);
+      px = x; py = y; pz = z;
+    }
+    return total;
+  };
+
+  let lo = 0;
+  let hi = targetLength;
+  for (let iter = 0; iter < 24; iter++) {
+    const mid = 0.5 * (lo + hi);
+    if (arcLen(mid) < targetLength) lo = mid;
+    else hi = mid;
+  }
+  const sag = 0.5 * (lo + hi);
+  const coords: string[] = [];
+  for (let i = 0; i < n; i++) {
+    const t = i / (n - 1);
+    const x = t * dx;
+    const y = t * dy;
+    const z = t * dz - 4 * sag * t * (1 - t);
+    coords.push(x.toFixed(5), y.toFixed(5), z.toFixed(5));
+  }
+  return coords.join(' ');
+}
+
+export const buildNode = (node: SceneNode, worldPositions?: WorldPosMap): string => {
   if (!node) return '';
   const posStr = Array.isArray(node.pos) ? node.pos.join(' ') : '0 0 0';
   // Logical-only nodes (e.g. pulley ropes) have no geoms or joints and must not
@@ -189,7 +261,7 @@ export const buildNode = (node: SceneNode): string => {
   if (node.isPulleyRope) {
     if (!node.children?.length) return '';
     const turn = node.quat ? ` quat="${node.quat.join(' ')}"` : node.euler ? ` euler="${node.euler.join(' ')}"` : '';
-    return `<frame pos="${posStr}"${turn}>${node.children.map(buildNode).join('')}</frame>`;
+    return `<frame pos="${posStr}"${turn}>${node.children.map((c) => buildNode(c, worldPositions)).join('')}</frame>`;
   }
 
   const nameStr = node.name || node.id || 'body';
@@ -201,7 +273,7 @@ export const buildNode = (node: SceneNode): string => {
   if (node.cloth) {
     if (!node.children?.length) return '';
     const turn = node.quat ? ` quat="${node.quat.join(' ')}"` : node.euler ? ` euler="${node.euler.join(' ')}"` : '';
-    return `<frame pos="${posStr}"${turn}>${node.children.map(buildNode).join('')}</frame>`;
+    return `<frame pos="${posStr}"${turn}>${node.children.map((c) => buildNode(c, worldPositions)).join('')}</frame>`;
   }
 
   if (node.isComposite) {
@@ -244,7 +316,16 @@ export const buildNode = (node: SceneNode): string => {
       : (geom?.size ? geom.size.join(' ') : '0.02');
     const geomRgba = geom?.rgba ? geom.rgba.join(' ') : '0.8 0.4 0.2 1';
 
-    const compositeXml = `<composite type="${type}" count="${xmlAttr(count)}" size="${xmlAttr(size)}" curve="${xmlAttr(curve)}" prefix="${xmlAttr(prefix)}"><joint kind="main" damping="${damping}" stiffness="${stiffness}" /><geom type="${geomType}" size="${geomSize}" rgba="${geomRgba}" /></composite>`;
+    const startPos = worldPositions?.get(node.id) ?? (node.name ? worldPositions?.get(node.name) : undefined);
+    const endPos = node.weldLastToId ? worldPositions?.get(node.weldLastToId) : undefined;
+    const targetLen = parseFloat(size);
+    const slackVertices = startPos && endPos
+      ? buildSlackCableVertices(startPos, endPos, clampedCount, targetLen)
+      : null;
+
+    const compositeXml = slackVertices
+      ? `<composite type="${type}" vertex="${slackVertices}" prefix="${xmlAttr(prefix)}"><joint kind="main" damping="${damping}" stiffness="${stiffness}" /><geom type="${geomType}" size="${geomSize}" rgba="${geomRgba}" /></composite>`
+      : `<composite type="${type}" count="${xmlAttr(count)}" size="${xmlAttr(size)}" curve="${xmlAttr(curve)}" prefix="${xmlAttr(prefix)}"><joint kind="main" damping="${damping}" stiffness="${stiffness}" /><geom type="${geomType}" size="${geomSize}" rgba="${geomRgba}" /></composite>`;
 
     let attrs = `name="${xmlAttr(nameStr)}" pos="${posStr}"`;
     if (node.quat) {
@@ -254,7 +335,7 @@ export const buildNode = (node: SceneNode): string => {
     }
     
     let childrenXml = '';
-    (node.children || []).forEach(c => childrenXml += buildNode(c));
+    (node.children || []).forEach(c => childrenXml += buildNode(c, worldPositions));
     return `<body ${attrs}>${compositeXml}${childrenXml}</body>`;
   }
 
@@ -268,7 +349,7 @@ export const buildNode = (node: SceneNode): string => {
   // though: MuJoCo will not accept a moving body that ends up with none at all.
   const hasSolid = (node.geoms || []).some(g => g.role !== 'visual');
   (node.geoms || []).forEach(g => innerXml += buildGeom(g, hasSolid && g.role === 'visual'));
-  (node.children || []).forEach(c => innerXml += buildNode(c));
+  (node.children || []).forEach(c => innerXml += buildNode(c, worldPositions));
   
   let frame = ` pos="${posStr}"`;
   if (isNodeRotationBaked(node)) {

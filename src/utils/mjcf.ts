@@ -7,7 +7,7 @@ import { FLOOR_CONTACT, PRINT_CONTACT_TIME } from './contactClasses';
 import { prepareScene } from './mjcfPrepare';
 import { collectHfieldAssets, collectMeshAssets, meshAssetsXml } from './mjcfMeshAssets';
 import { constraintsXml } from './mjcfConstraints';
-import { buildNode } from './mjcfBody';
+import { buildNode, collectWorldPositions } from './mjcfBody';
 
 /*
  * The scene graph compiled to MuJoCo's MJCF. The graph, not the XML, is the
@@ -76,6 +76,7 @@ export const compileToMJCF = (
   const assetXml = meshAssetsXml(meshes, opts.meshFiles, hfields);
   // Before the bodies: it writes into their joints.
   const extras = constraintsXml(nodes, breaks);
+  const worldPositions = collectWorldPositions(nodes);
 
 
   // Contact time constant. MuJoCo will not go below twice the timestep, and at
@@ -110,7 +111,7 @@ ${breaks.numerics.length ? `  <!-- A floor on rotational inertia, for scenes wit
     <light directional="true" pos="-0.3 0.3 1.5" dir="0.3 -0.3 -1.5" diffuse="0.8 0.8 0.8" />
     <geom name="floor" type="plane" size="0.5 0.5 0.1" pos="0 0 0" rgba="0.9 0.9 0.9 1" friction="${compiledSlide(floorFriction)} 0.005 0.0001" solref="${contactTime} ${Math.max(0, 1 - floorBounce).toFixed(3)}" solimp="0.99 0.9999 0.0001 0.5 2"${printFidelity ? ` contype="${FLOOR_CONTACT}" conaffinity="${FLOOR_CONTACT}"` : ''} />
     
-    ${nodes.map(buildNode).join('\n')}
+    ${nodes.map((n) => buildNode(n, worldPositions)).join('\n')}
   </worldbody>
 ${extras.actuator}${extras.tendon}${extras.equality}${extras.contact}
 </mujoco>
