@@ -101,9 +101,10 @@ describe('finding a channel filled along its length', () => {
     expect(found.length).toBeGreaterThanOrEqual(4);
     const xs = found.map(c => c.centerMm[0]);
     expect(Math.max(...xs) - Math.min(...xs)).toBeGreaterThan(200);
-    // Each is in the channel: on the centreline, within a channel's depth of the floor.
+    // Each is in the channel: within the track's ±19 mm envelope (32 mm inner channel + 3 mm walls),
+    // within a channel's depth of the floor.
     for (const c of found) {
-      expect(Math.abs(c.centerMm[1])).toBeLessThan(16);
+      expect(Math.abs(c.centerMm[1])).toBeLessThan(19);
       expect(c.centerMm[2] / 1000 - coasterFloorZ(c.centerMm[0] / 1000)).toBeLessThan(0.03);
     }
   });

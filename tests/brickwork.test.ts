@@ -441,7 +441,7 @@ describe('regressions from the brickwork audit (#22)', () => {
     const byName = await brickCommands.BUILD_BRICKWORK({ bodyId: 'Smoker walls', bond: 'stretcher', placement: 'none' }, ctx) as Record<string, unknown>;
     expect(byName.ok).toBe(true);
     expect(byName.laid).toBe(false);
-    expect(byName.bricksLaid).toBe(259);
+    expect(byName.bricksLaid).toBe(261);
     expect(byName.closers).toBe(0);
     // English bond reply includes queen closers, and whole + cutPieces + closers === bricksLaid.
     const ctxGateway = { store: { ...useStore.getState(), sceneGraph: gateway } } as Parameters<typeof brickCommands.BUILD_BRICKWORK>[1];

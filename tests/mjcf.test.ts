@@ -137,13 +137,21 @@ describe('visual-only geoms weigh nothing', () => {
     expect(geomTag(compile([node]), 'inner_shell')).toContain('mass="0.25"');
   });
 
-  it('will not zero out a body that is nothing but visual geoms', () => {
+  it('will not zero out a moving body that is nothing but visual geoms', () => {
     // Left massless, a moving body with no mass at all is rejected outright by
     // MuJoCo — better a body that weighs something odd than a scene that fails
     // to compile.
     const node = jarLike();
+    node.joints = [{ name: 'jar_free', type: 'free' }];
     node.geoms = [node.geoms[1]];
     expect(geomTag(compile([node]), 'inner_shell')).not.toContain('mass=');
+  });
+
+  it('zeros a fixed body that is nothing but visual geoms', () => {
+    const node = jarLike();
+    node.joints = [];
+    node.geoms = [node.geoms[1]];
+    expect(geomTag(compile([node]), 'inner_shell')).toContain('mass="0"');
   });
 });
 
