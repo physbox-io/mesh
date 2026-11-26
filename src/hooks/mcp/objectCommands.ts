@@ -586,6 +586,7 @@ export const objectCommands: McpCommands = {
         strokesRequested: strokes.length, strokesApplied: landed.length,
         dabsLanded: results.reduce((n, r) => n + Number(r.dabsLanded || 0), 0),
         dabsRequested: results.reduce((n, r) => n + Number(r.dabsRequested || 0), 0),
+        verticesPainted: results.reduce((n, r) => n + Number(r.verticesPainted || 0), 0),
         results,
       };
     }
