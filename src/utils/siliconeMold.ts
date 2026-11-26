@@ -23,8 +23,7 @@
 import type { ManifoldToplevel, CrossSection, Manifold } from 'manifold-3d';
 import { castMaterial, castWeightG, isSiliconeId, mixGrams, type SiliconeId } from './castMaterials';
 import { trappedAirInSoup } from './trappedAir';
-import { printedMeshOf } from './printedMesh';
-import { analyzeMesh } from './meshIntegrity';
+import { cleanManifoldMesh } from './printedMesh';
 
 /** Starts the pour box's warning of air held at other high points; the Silicone chain vents them and drops it. */
 export const OTHER_PEAKS_PREFIX = 'A pour through the hole traps air at';
@@ -279,108 +278,8 @@ function soupVolumeBelow(wasm: ManifoldToplevel, soup: ArrayLike<number>, zCut: 
   }
 }
 
-/**
- * Welds vertices coinciding within `epsMm` (or exact float32 when `epsMm <= 0`),
- * drops triangles collapsed by the weld and opposing zero-volume pairs, and
- * compacts unused vertices. Returns null if the result is not a closed,
- * consistently-wound positive-volume solid.
- */
-function weldAndCleanMesh(raw: PourBoxMesh, epsMm: number): PourBoxMesh | null {
-  const nVerts = raw.positions.length / 3;
-  if (nVerts === 0 || raw.faces.length === 0) return raw;
-  const ids = new Map<string, number>();
-  const remap = new Uint32Array(nVerts);
-  const pos: number[] = [];
-  const inv = epsMm > 0 ? 1 / epsMm : 0;
-  for (let v = 0; v < nVerts; v++) {
-    const rx = raw.positions[v * 3];
-    const ry = raw.positions[v * 3 + 1];
-    const rz = raw.positions[v * 3 + 2];
-    const qx = inv > 0 ? Math.round(rx * inv) : Math.fround(rx);
-    const qy = inv > 0 ? Math.round(ry * inv) : Math.fround(ry);
-    const qz = inv > 0 ? Math.round(rz * inv) : Math.fround(rz);
-    const key = `${qx},${qy},${qz}`;
-    let id = ids.get(key);
-    if (id === undefined) {
-      id = ids.size;
-      ids.set(key, id);
-      pos.push(inv > 0 ? qx * epsMm : qx, inv > 0 ? qy * epsMm : qy, inv > 0 ? qz * epsMm : qz);
-    }
-    remap[v] = id;
-  }
-
-  const tris: [number, number, number][] = [];
-  const canonMap = new Map<string, number[]>();
-  const alive: boolean[] = [];
-  for (let i = 0; i + 2 < raw.faces.length; i += 3) {
-    const a = remap[raw.faces[i]];
-    const b = remap[raw.faces[i + 1]];
-    const c = remap[raw.faces[i + 2]];
-    if (a === b || b === c || a === c) continue;
-    const s0 = a < b ? (a < c ? a : c) : (b < c ? b : c);
-    const s2 = a > b ? (a > c ? a : c) : (b > c ? b : c);
-    const s1 = a + b + c - s0 - s2;
-    const key = `${s0},${s1},${s2}`;
-    const existing = canonMap.get(key);
-    let cancelled = false;
-    if (existing) {
-      for (let k = 0; k < existing.length; k++) {
-        const idx = existing[k];
-        if (!alive[idx]) continue;
-        const [ea, eb, ec] = tris[idx];
-        const sameWinding =
-          (a === ea && b === eb && c === ec) ||
-          (a === eb && b === ec && c === ea) ||
-          (a === ec && b === ea && c === eb);
-        if (!sameWinding) {
-          alive[idx] = false;
-          cancelled = true;
-          break;
-        }
-      }
-    }
-    if (!cancelled) {
-      const idx = tris.length;
-      tris.push([a, b, c]);
-      alive.push(true);
-      if (existing) existing.push(idx);
-      else canonMap.set(key, [idx]);
-    }
-  }
-
-  const used = new Int32Array(pos.length / 3).fill(-1);
-  const outPositions: number[] = [];
-  const outFaces: number[] = [];
-  for (let i = 0; i < tris.length; i++) {
-    if (!alive[i]) continue;
-    const tri = tris[i];
-    for (let k = 0; k < 3; k++) {
-      const oldIdx = tri[k];
-      let newIdx = used[oldIdx];
-      if (newIdx === -1) {
-        newIdx = outPositions.length / 3;
-        used[oldIdx] = newIdx;
-        outPositions.push(pos[oldIdx * 3], pos[oldIdx * 3 + 1], pos[oldIdx * 3 + 2]);
-      }
-      outFaces.push(newIdx);
-    }
-  }
-  const check = analyzeMesh(outPositions, outFaces);
-  if (!check || !check.closed || !check.consistentlyWound || check.volume <= 0) return null;
-  return { positions: outPositions, faces: outFaces };
-}
-
 function meshOf(m: Manifold): PourBoxMesh {
-  // Without the slivers booleans leave along their seams (see printedMesh.ts).
-  const raw = printedMeshOf(m);
-  // Collapse sub-0.1 µm boolean crease slivers that Manifold.simplify leaves on
-  // sharp corners and that would otherwise weld into degenerate triangles once
-  // converted to float32 metres in the scene or binary STL.
-  for (const eps of [1e-4, 1e-5, 0]) {
-    const cleaned = weldAndCleanMesh(raw, eps);
-    if (cleaned) return cleaned;
-  }
-  return raw;
+  return cleanManifoldMesh(m);
 }
 
 function extent(cs: CrossSection): [number, number] {

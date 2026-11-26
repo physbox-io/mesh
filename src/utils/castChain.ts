@@ -23,7 +23,7 @@ import type { SceneGraph } from '../types/scene';
 import type { IndexedMesh } from './stlMesh';
 import { stlToMesh } from './stlMesh';
 import { loadManifold } from './sculptCut';
-import { manifoldToMeshMm } from './timberBreakdown';
+import { cleanManifoldMesh, tryCleanManifoldMesh } from './printedMesh';
 import { trappedAirInSoup } from './trappedAir';
 import { pourIntoCavity } from './pourCast';
 import { pourNodeFor } from './pourTarget';
@@ -77,8 +77,8 @@ function soupOf(mesh: IndexedMesh): Float64Array {
 }
 
 function meshOf(m: Manifold): IndexedMesh {
-  const { positionsMm, faces } = manifoldToMeshMm(m);
-  return { positions: positionsMm, faces };
+  const { positions, faces } = cleanManifoldMesh(m);
+  return { positions: Float32Array.from(positions), faces: Uint32Array.from(faces) };
 }
 
 /**
@@ -451,12 +451,41 @@ export async function siliconeChain(
     const unvented = points.slice(MAX_VENTS);
     if (unvented.length) points = points.slice(0, MAX_VENTS);
     const sb = S.boundingBox();
+    // Offset vent cylinders by half a facet (11.25°) and a 0.53 mm plunge so
+    // vertices never sit tangent to axis-aligned cavity walls or coplanar with
+    // round-mm horizontal ledges. If a vent still creates a pinched/non-manifold
+    // edge under float32-metre welding, replay per vent with slight perturbations.
+    const makeVent = (p: { x: number; y: number; z: number }, r: number, rotDeg: number) =>
+      own.take(
+        wasm.Manifold.cylinder(sb.max[2] - p.z + 1.53, r, r, 16)
+          .rotate([0, 0, rotDeg])
+          .translate([p.x, p.y, p.z - 0.53]),
+      );
     let vented = S;
     for (const p of points) {
-      const vent = own.take(wasm.Manifold.cylinder(sb.max[2] - p.z + 1.5, VENT_DIA_MM / 2, VENT_DIA_MM / 2, 16).translate([p.x, p.y, p.z - 0.5]));
-      vented = own.take(vented.subtract(vent));
+      vented = own.take(vented.subtract(makeVent(p, VENT_DIA_MM / 2, 11.25)));
     }
-    const siliconeMold = meshOf(vented);
+    let cleanedMold = tryCleanManifoldMesh(vented);
+    if (!cleanedMold && points.length > 0) {
+      vented = S;
+      for (const p of points) {
+        let next = own.take(vented.subtract(makeVent(p, VENT_DIA_MM / 2, 11.25)));
+        if (!tryCleanManifoldMesh(next)) {
+          for (const [dr, deg] of [[0.05, 5.625], [0.1, 17.3], [-0.05, 7.1]] as const) {
+            const retry = own.take(vented.subtract(makeVent(p, VENT_DIA_MM / 2 + dr, deg)));
+            if (tryCleanManifoldMesh(retry)) {
+              next = retry;
+              break;
+            }
+          }
+        }
+        vented = next;
+      }
+      cleanedMold = tryCleanManifoldMesh(vented);
+    }
+    const siliconeMold: IndexedMesh = cleanedMold
+      ? { positions: Float32Array.from(cleanedMold.positions), faces: Uint32Array.from(cleanedMold.faces) }
+      : meshOf(vented);
     // Settled as added to the scene; the vents are reported in that frame.
     const vb = vented.boundingBox();
     const vcx = (vb.min[0] + vb.max[0]) / 2, vcy = (vb.min[1] + vb.max[1]) / 2;

@@ -137,9 +137,15 @@ export async function addSimulationToScene(
   if (req.material && node.simulation) node.simulation = { ...node.simulation, material: req.material };
   if (req.mold && node.simulation) node.simulation = { ...node.simulation, mold: req.mold };
   if (req.source && node.simulation) node.simulation = { ...node.simulation, source: req.source };
-  // Drawn in what it was poured in: a clear epoxy see-through, bronze bronze.
+  // Drawn in what it was poured in (a clear epoxy see-through, bronze bronze)
+  // with its real material density so MuJoCo's inertial.massKg matches weightG.
   const poured = resolveCastMaterial(req.material);
-  if (poured) node.geoms = node.geoms?.map((g) => ({ ...g, rgba: [...castMaterial(poured).rgba] }));
+  if (poured) {
+    const spec = castMaterial(poured);
+    const density = Math.round(spec.densityGcm3 * 1000);
+    node.density = density;
+    node.geoms = node.geoms?.map((g) => ({ ...g, rgba: [...spec.rgba], density }));
+  }
   const named = withUniqueNames({ ...store.sceneGraph, nodes: [...store.sceneGraph.nodes, node] });
   const name = named.nodes[named.nodes.length - 1].name;
   store.addHardwareComponentNode({ ...node, name }, { select: req.select !== false });
@@ -242,7 +248,8 @@ export function useAddSimulation() {
  * mesh an exporter made at the model's size, which is only ever put beside it.
  */
 export function sceneStockTransform(): StockTransform {
-  const tris = collectSceneTriangles(useStore.getState().sceneGraph).tris;
+  const scene = useStore.getState().sceneGraph;
+  const tris = collectSceneTriangles(scene).tris;
   const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
   for (let i = 0; i < tris.length; i++) {
     lo[i % 3] = Math.min(lo[i % 3], tris[i] * 1000);
@@ -251,6 +258,16 @@ export function sceneStockTransform(): StockTransform {
   if (!tris.length) {
     lo.fill(0);
     hi.fill(0);
+  } else if (scene.nodes.some((n) => n.pourBox)) {
+    // A pour box base sits below z = 0 (under the master); do not drag
+    // beside-placed simulations down to the pour base's underside.
+    const nonBoxNodes = scene.nodes.filter((n) => !n.pourBox);
+    const modelTris = nonBoxNodes.length ? collectSceneTriangles({ ...scene, nodes: nonBoxNodes }).tris : [];
+    if (modelTris.length) {
+      let minZ = Infinity;
+      for (let i = 2; i < modelTris.length; i += 3) minZ = Math.min(minZ, modelTris[i] * 1000);
+      if (Number.isFinite(minZ)) lo[2] = minZ;
+    }
   }
   return {
     modelOriginMm: [0, 0, 0],

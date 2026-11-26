@@ -179,10 +179,16 @@ export const castCommands: McpCommands = {
     const scene = subject.scene;
     const metal = msg.metalId ?? msg.metal ?? msg.material;
     if (metal !== undefined && metal !== null && (typeof metal !== 'string' || !CAST_METALS.some((m) => m.id === metal))) {
-      return { ok: false, error: `metal is one of ${CAST_METALS.map((m) => m.id).join(', ')}.` };
+      return {
+        ok: false,
+        error: `metal is one of ${CAST_METALS.map((m) => m.id).join(', ')}. For concrete, plaster, resin, or silicone molds, use physics_make_pour_box(out_dir=...) and physics_add_simulation(kind='mold_cast', method='silicone', cast_material=...).`,
+      };
     }
     if (msg.method !== undefined && msg.method !== null && msg.method !== 'sand' && msg.method !== 'lost-pla') {
-      return { ok: false, error: "method is 'sand' or 'lost-pla'." };
+      const hint = msg.method === 'silicone'
+        ? " For silicone molds, use physics_make_pour_box(out_dir=...) and physics_add_simulation(kind='mold_cast', method='silicone', cast_material=...)."
+        : '';
+      return { ok: false, error: `method is 'sand' or 'lost-pla'.${hint}` };
     }
     let partingFromBaseMm: number | 'auto' | undefined;
     if (msg.partingFromBaseMm !== undefined && msg.partingFromBaseMm !== null) {
@@ -273,6 +279,12 @@ export const castCommands: McpCommands = {
         return { ok: true, on: false, baked: true };
       }
       if (msg.method !== undefined && msg.method !== null && msg.method !== 'sand' && msg.method !== 'lost-pla') {
+        if (msg.method === 'silicone') {
+          return {
+            ok: false,
+            error: "method is 'sand' or 'lost-pla'. Silicone molds flex over undercuts and don't need sand/lost-PLA cast prep — go straight to physics_make_pour_box.",
+          };
+        }
         return { ok: false, error: "method is 'sand' or 'lost-pla'." };
       }
       if (msg.draftMode !== undefined && msg.draftMode !== null && msg.draftMode !== 'add' && msg.draftMode !== 'remove') {

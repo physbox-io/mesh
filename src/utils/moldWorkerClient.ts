@@ -574,11 +574,12 @@ export async function addPourToScene(
     lo.fill(0);
     hi.fill(0);
   }
+  const besideMinZ = placement === 'beside' && pourBoxIn(moldNode) ? Math.max(0, lo[2]) : lo[2];
   const moldTransform = {
     modelOriginMm: [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]] as [number, number, number],
     workOriginMm: [0, 0, 0] as [number, number, number],
     scale: [1, 1, 1] as [number, number, number],
-    modelMinMm: lo,
+    modelMinMm: [lo[0], lo[1], besideMinZ] as [number, number, number],
     modelMaxMm: hi,
   };
   // A simulated mold's name carries its own 'Simulated:' and time stamp, which
