@@ -3,13 +3,17 @@
 // tables in utils/hardwareCuts.ts; these check that the pieces read them, that
 // a hex pocket is a hex, and that the cuts land where cutGeometry says.
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
-  HARDWARE_KINDS, HEX_NUTS, CLEARANCE_HOLES, COUNTERBORES, INSERTS, BEARINGS,
-  hardwareCutGeoms, hardwareSpecOf, nextHardwareGroup, type HardwareCutSpec,
+  HARDWARE_KINDS, HEX_NUTS, CLEARANCE_HOLES, COUNTERBORES, COUNTERSINKS, COUNTERSINK_INFO,
+  INSERTS, BEARINGS,
+  hardwareCutGeoms, hardwareSpecOf, nextHardwareGroup, countersinkConeMesh, countersinkCutGeoms,
+  type HardwareCutSpec,
 } from '../src/utils/hardwareCuts';
 import { csgHashOf, cutGeometry, primitiveToScad } from '../src/utils/csg';
 import type { SceneGeom, SceneNode } from '../src/types/scene';
+import { useStore } from '../src/store/useStore';
+import { applySingleCutToBody } from '../src/hooks/mcp/bodyFeatures';
 
 const spec = (over: Partial<HardwareCutSpec>): HardwareCutSpec => ({
   group: 'g1', kind: 'nut_trap', size: 'M3', at: [0, 0, 0.01], normal: [0, 0, 1], ...over,
@@ -121,5 +125,94 @@ describe('placing a feature', () => {
     const node = block(hardwareCutGeoms(spec({ group: 'nut_trap1' }), 'block'));
     expect(nextHardwareGroup(node.geoms, 'nut_trap')).toBe('nut_trap2');
     expect(nextHardwareGroup(node.geoms, 'bearing')).toBe('bearing1');
+  });
+});
+
+describe('countersink cuts', () => {
+  it('covers every metric bolt size with head diameter wider than its clearance hole', () => {
+    for (const size of COUNTERSINK_INFO.sizes) {
+      expect(COUNTERSINKS[size], size).toBeDefined();
+      const [headDia, depth] = COUNTERSINKS[size];
+      expect(headDia).toBeGreaterThan(CLEARANCE_HOLES[size]);
+      expect(depth).toBeGreaterThan(0);
+    }
+  });
+
+  it('builds a closed, outward-wound manifold cone mesh', () => {
+    const { positions, faces } = countersinkConeMesh(0.0043, 0.0018, 0.0025, 0.001, 24);
+    // Every undirected edge must be shared by exactly 2 triangles with opposite half-edges.
+    const halfEdges = new Map<string, number>();
+    let signedVol6 = 0;
+    for (let t = 0; t < faces.length; t += 3) {
+      const i0 = faces[t], i1 = faces[t + 1], i2 = faces[t + 2];
+      for (const [u, v] of [[i0, i1], [i1, i2], [i2, i0]]) {
+        const key = `${u}->${v}`;
+        halfEdges.set(key, (halfEdges.get(key) ?? 0) + 1);
+      }
+      const ax = positions[3 * i0], ay = positions[3 * i0 + 1], az = positions[3 * i0 + 2];
+      const bx = positions[3 * i1], by = positions[3 * i1 + 1], bz = positions[3 * i1 + 2];
+      const cx = positions[3 * i2], cy = positions[3 * i2 + 1], cz = positions[3 * i2 + 2];
+      signedVol6 += ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx);
+    }
+    for (const [key, count] of halfEdges) {
+      expect(count).toBe(1);
+      const [u, v] = key.split('->');
+      expect(halfEdges.get(`${v}->${u}`)).toBe(1);
+    }
+    // Positive signed volume proves outward-facing winding.
+    expect(signedVol6).toBeGreaterThan(0);
+  });
+
+  it('builds 90° metric and 82° conical countersinks with clearance or tapped shanks', () => {
+    const m4 = countersinkCutGeoms({
+      group: 'countersink1', size: 'M4', at: [0, 0, 0.01], normal: [0, 0, 1],
+    }, 'block');
+    expect(m4.head.type).toBe('mesh');
+    expect(m4.head.csg).toBe('difference');
+    expect(m4.shank.type).toBe('cylinder');
+    expect(m4.shank.size![0]).toBeCloseTo(CLEARANCE_HOLES.M4 / 2000, 6);
+    expect(m4.headDiameterMm).toBeCloseTo(COUNTERSINKS.M4[0], 3);
+    expect(m4.depthMm).toBeCloseTo((COUNTERSINKS.M4[0] - CLEARANCE_HOLES.M4) / 2, 2);
+    expect(primitiveToScad(m4.head)).toContain('polyhedron(');
+
+    const m4_82 = countersinkCutGeoms({
+      group: 'countersink2', size: 'M4', at: [0, 0, 0.01], normal: [0, 0, 1],
+      angleDeg: 82, bore: 'tapped', fitMm: 0.2,
+    }, 'block');
+    expect(m4_82.angleDeg).toBe(82);
+    expect(m4_82.bore).toBe('tapped');
+    expect(m4_82.headDiameterMm).toBeCloseTo(COUNTERSINKS.M4[0] + 0.2, 3);
+    // Steeper 82° cone is deeper than 90° for the same head diameter.
+    expect(m4_82.depthMm).toBeGreaterThan(m4.depthMm);
+    expect(m4_82.shank.thread?.pitch).toBeCloseTo(0.0007, 6);
+  });
+
+  it('applies shape: countersink through applySingleCutToBody and validates options', () => {
+    const host = block();
+    useStore.setState({
+      sceneGraph: { ...useStore.getState().sceneGraph, nodes: [host] },
+      recompile: vi.fn(),
+    });
+    const res = applySingleCutToBody('block', {
+      shape: 'countersink', size: 'M5', at: [0, 0, 10], normal: [0, 0, 1],
+    });
+    expect(res.ok).toBe(true);
+    expect(res.shape).toBe('countersink');
+    expect(res.size).toBe('M5');
+    expect(res.angleDeg).toBe(90);
+    expect(res.pieces).toEqual(['head', 'shank']);
+
+    const updated = useStore.getState().sceneGraph.nodes.find((n) => n.id === 'block')!;
+    const head = updated.geoms.find((g) => g.name.endsWith('_head'));
+    const shank = updated.geoms.find((g) => g.name.endsWith('_shank'));
+    expect(head?.type).toBe('mesh');
+    expect(head?.csg).toBe('difference');
+    expect(shank?.type).toBe('cylinder');
+    expect(shank?.size![0]).toBeCloseTo(CLEARANCE_HOLES.M5 / 2000, 6);
+
+    const badSize = applySingleCutToBody('block', { shape: 'countersink', size: 'M99' });
+    expect(badSize.ok).toBe(false);
+    const badAngle = applySingleCutToBody('block', { shape: 'countersink', size: 'M3', angleDeg: 10 });
+    expect(badAngle.ok).toBe(false);
   });
 });

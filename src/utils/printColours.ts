@@ -17,7 +17,8 @@ import type { SceneGeom } from '../types/scene';
 import { appendGeomTriangles, texturedSurfaceOf } from './geomSurface';
 import { yupVertsToZup } from './laserCutExporter';
 import {
-  buildMeshPaintGeometry, buildPaintGeometry, canvasFromLayer, paintArgsFromSize, writeVertexColors,
+  buildPaintGeometry, canvasFromLayer, coarsenPaintedMesh, paintArgsFromSize,
+  subdivideMeshForPaintWithTree, writeVertexColors,
 } from './vertexPaint';
 
 export interface ColouredTriangles {
@@ -28,33 +29,61 @@ export interface ColouredTriangles {
 }
 
 /** The painted surface in the geom's own Z-up frame, with each vertex's linear colour. */
-function paintedSurface(geom: SceneGeom, halfLen: number | undefined) {
+function paintedSurface(geom: SceneGeom, halfLen: number | undefined, coarsen: boolean) {
   if (!geom.paint) return null;
   const dynamicMesh = geom.type === 'mesh' && (geom.dynamic !== false || !geom.vertices?.length);
-  // The same surface the brush was given, in utils/vertexPaint and the MCP paint command.
-  const raw = geom.type === 'mesh' ? (dynamicMesh ? (geom.renderVertices ?? geom.vertices) : geom.vertices) : undefined;
+
+  let positions: number[];
+  let faces: ArrayLike<number>;
+  let count: number;
+  let colors: Float32Array;
+
+  if (geom.type === 'mesh') {
+    // The same surface the brush was given, in utils/vertexPaint and the MCP paint command.
+    const raw = dynamicMesh ? (geom.renderVertices ?? geom.vertices) : geom.vertices;
+    if (!raw?.length || !geom.faces?.length) return null;
+    const sub = subdivideMeshForPaintWithTree(raw, geom.faces, geom.paint.res);
+    count = Math.floor(sub.positions.length / 3);
+    if (!count || sub.faces.length < 3) return null;
+
+    // A printer lays down one filament or another, so a brush's soft edge is
+    // decided at half coverage: the file then shows what will print, and the
+    // blend along a mark's edge cannot snap to some other part's filament.
+    const canvas = canvasFromLayer(geom.paint, count, geom.paint.res);
+    const hard = { ...canvas, data: canvas.data.slice() };
+    for (let i = 3; i < hard.data.length; i += 4) hard.data[i] = hard.data[i] >= 0.5 ? 1 : 0;
+    colors = new Float32Array(count * 3);
+    writeVertexColors(colors, geom.rgba ?? [0.8, 0.8, 0.8, 1], hard);
+
+    // Collapse uniformly coloured regions back to coarse triangles (keeping
+    // watertight conforming edges along colour seams) so flat-walled painted or
+    // split meshes do not explode to 65k triangles on 3MF export.
+    faces = coarsen ? coarsenPaintedMesh(sub, colors) : sub.faces;
+    positions = Array.from(sub.positions);
+    if (!dynamicMesh) positions = yupVertsToZup(positions);
+    return { positions, faces, colors };
+  }
+
   const size = halfLen !== undefined && (geom.type === 'cylinder' || geom.type === 'capsule')
     ? [geom.size?.[0] ?? 0.01, halfLen]
     : geom.size || [];
   const args = paintArgsFromSize(geom.type, size);
-  const built = geom.type === 'mesh'
-    ? (raw?.length && geom.faces?.length ? buildMeshPaintGeometry(raw, geom.faces, geom.paint.res) : null)
-    : buildPaintGeometry(geom.type, args, geom.paint.res);
+  const built = buildPaintGeometry(geom.type, args, geom.paint.res);
   if (!built) return null;
   const position = built.getAttribute('position');
-  const count = position?.count ?? 0;
+  count = position?.count ?? 0;
   if (!count) { built.dispose(); return null; }
-  let positions = Array.from(position.array as ArrayLike<number>);
+  positions = Array.from(position.array as ArrayLike<number>);
   const index = built.getIndex();
-  const faces = index ? Array.from(index.array as ArrayLike<number>) : Array.from({ length: count }, (_, i) => i);
+  faces = index ? Array.from(index.array as ArrayLike<number>) : Array.from({ length: count }, (_, i) => i);
   built.dispose();
 
   if (geom.type === 'ellipsoid') {
     // A unit sphere, scaled by the radii as the renderer does.
     positions = positions.map((v, i) => v * (args[i % 3] ?? 1));
   }
-  // Cylinders, capsules and a static mesh are built Y-up; the geom frame is Z-up.
-  if (geom.type === 'cylinder' || geom.type === 'capsule' || (geom.type === 'mesh' && !dynamicMesh)) {
+  // Cylinders and capsules are built Y-up; the geom frame is Z-up.
+  if (geom.type === 'cylinder' || geom.type === 'capsule') {
     positions = yupVertsToZup(positions);
   }
 
@@ -64,7 +93,7 @@ function paintedSurface(geom: SceneGeom, halfLen: number | undefined) {
   const canvas = canvasFromLayer(geom.paint, count, geom.paint.res);
   const hard = { ...canvas, data: canvas.data.slice() };
   for (let i = 3; i < hard.data.length; i += 4) hard.data[i] = hard.data[i] >= 0.5 ? 1 : 0;
-  const colors = new Float32Array(count * 3);
+  colors = new Float32Array(count * 3);
   writeVertexColors(colors, geom.rgba ?? [0.8, 0.8, 0.8, 1], hard);
   return { positions, faces, colors };
 }
@@ -118,19 +147,27 @@ function nearestIndex(points: number[], cell: number) {
 
 /**
  * The geom's solid triangles placed by `matrix` (body times geom frame), with
- * its paint when it has any. Null when the geom has no surface.
+ * its paint when it has any (unless `includePaint` is false, e.g. monochrome
+ * STL export). Null when the geom has no surface.
  */
-export function colouredGeomTriangles(geom: SceneGeom, halfLen: number | undefined, matrix: THREE.Matrix4): ColouredTriangles | null {
-  const painted = paintedSurface(geom, halfLen);
+export function colouredGeomTriangles(
+  geom: SceneGeom,
+  halfLen: number | undefined,
+  matrix: THREE.Matrix4,
+  options?: { includePaint?: boolean },
+): ColouredTriangles | null {
+  const includePaint = options?.includePaint !== false;
   const textured = texturedSurfaceOf(geom, halfLen);
   const patterned = !!textured && textured.regions.some((r) => r.applied);
+  const painted = includePaint ? paintedSurface(geom, halfLen, !patterned) : null;
   const v = new THREE.Vector3();
 
   const tris: number[] = [];
   let colors: number[] | null = null;
   if (painted && !patterned) {
     colors = [];
-    for (const f of painted.faces) {
+    for (let i = 0; i < painted.faces.length; i++) {
+      const f = painted.faces[i];
       v.set(painted.positions[f * 3], painted.positions[f * 3 + 1], painted.positions[f * 3 + 2]).applyMatrix4(matrix);
       tris.push(v.x, v.y, v.z);
       colors.push(painted.colors[f * 3], painted.colors[f * 3 + 1], painted.colors[f * 3 + 2]);

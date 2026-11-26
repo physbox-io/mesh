@@ -1324,29 +1324,47 @@ export interface WorkbenchGeometries {
   metalProps: THREE.BufferGeometry;
 }
 
-export function buildWorkbenchGeometries(): WorkbenchGeometries {
-  // Solid 40 mm butcher-block top (1.60 m x 0.80 m, top flush at Y = 0) + upper shelf at Y = 0.68 m.
+export interface WorkbenchOptions {
+  /** Tallest scene height above the benchtop in metres; > 0.55 m hides the overhanging upper shelf. */
+  sceneHeightM?: number;
+  /** Explicitly omit the upper shelf and shelf props to keep tall parts unobstructed. */
+  hideUpperShelf?: boolean;
+}
+
+export function buildWorkbenchGeometries(options: WorkbenchOptions = {}): WorkbenchGeometries {
+  const showUpperShelf = !options.hideUpperShelf && !(options.sceneHeightM !== undefined && options.sceneHeightM > 0.55);
+  // Raise the default shelf well above 600 mm furniture (~1.05 m clearance) and recess it
+  // toward the pegboard so tall parts centered on the bench do not clip it.
+  const shelfY = 1.06;
+  const shelfZ = -0.36;
+  const shelfDepth = 0.18;
+  const pegboardH = 1.12;
+
+  // Solid 40 mm butcher-block top (1.60 m x 0.80 m, top flush at Y = 0) + optional upper shelf.
   const oakParts: ColoredPart[] = [
     {
       geo: new THREE.BoxGeometry(1.6, 0.04, 0.8),
       color: '#ffffff',
       matrix: trs([0, -0.02, -0.05]),
     },
-    {
-      geo: new THREE.BoxGeometry(1.6, 0.024, 0.22),
-      color: '#f5efe6',
-      matrix: trs([0, 0.692, -0.34]),
-    },
   ];
+  if (showUpperShelf) {
+    oakParts.push({
+      geo: new THREE.BoxGeometry(1.6, 0.024, shelfDepth),
+      color: '#f5efe6',
+      matrix: trs([0, shelfY, shelfZ]),
+    });
+  }
 
   // A2 self-healing ESD cutting mat: exact 600 mm x 450 mm, resting 0.4 mm proud at Y = +0.0004 m.
   const cuttingMat = new THREE.PlaneGeometry(0.6, 0.45);
   cuttingMat.rotateX(-Math.PI / 2);
   cuttingMat.translate(0, 0.0004, -0.02);
 
-  // Perforated pegboard (1.60 m x 0.85 m) standing at the back edge of the bench (Z = -0.45 m).
-  const pegboard = new THREE.PlaneGeometry(1.6, 0.85);
-  pegboard.translate(0, 0.425, -0.448);
+  // Single-sided (+Z facing) perforated pegboard standing at the back edge of the bench (Z = -0.448 m)
+  // so rear (+Y in MuJoCo / -Z in Three.js) camera angles look straight through via back-face culling.
+  const pegboard = new THREE.PlaneGeometry(1.6, pegboardH);
+  pegboard.translate(0, pegboardH / 2, -0.448);
 
   const matteParts: ColoredPart[] = [];
   const metalParts: ColoredPart[] = [];
@@ -1374,28 +1392,31 @@ export function buildWorkbenchGeometries(): WorkbenchGeometries {
       matrix: trs([lx, -0.62, -0.05]),
     });
     matteParts.push({
-      geo: new THREE.BoxGeometry(0.032, 0.88, 0.032),
+      geo: new THREE.BoxGeometry(0.032, pegboardH + 0.02, 0.032),
       color: legFrameColor,
-      matrix: trs([lx, 0.44, -0.466]),
+      matrix: trs([lx, (pegboardH + 0.02) / 2, -0.466]),
     });
   }
-  // Rear crossbeam + pegboard backing panel + shelf brackets.
+  // Single-sided (+Z facing) pegboard backing plane so rear cameras are never occluded,
+  // plus rear crossbeam and optional shelf brackets.
   matteParts.push({
-    geo: new THREE.BoxGeometry(1.6, 0.85, 0.012),
+    geo: new THREE.PlaneGeometry(1.6, pegboardH),
     color: '#3f4652',
-    matrix: trs([0, 0.425, -0.456]),
+    matrix: trs([0, pegboardH / 2, -0.45]),
   });
   matteParts.push({
     geo: new THREE.BoxGeometry(1.48, 0.04, 0.04),
     color: legFrameColor,
     matrix: trs([0, -0.62, -0.39]),
   });
-  for (const bx of [-0.52, 0, 0.52]) {
-    matteParts.push({
-      geo: new THREE.BoxGeometry(0.022, 0.018, 0.2),
-      color: legFrameColor,
-      matrix: trs([bx, 0.671, -0.34]),
-    });
+  if (showUpperShelf) {
+    for (const bx of [-0.52, 0, 0.52]) {
+      matteParts.push({
+        geo: new THREE.BoxGeometry(0.022, 0.018, shelfDepth - 0.02),
+        color: legFrameColor,
+        matrix: trs([bx, shelfY - 0.021, shelfZ]),
+      });
+    }
   }
 
   // Digital Lab Bench Power Supply (145 mm W x 200 mm D x 165 mm H) at (-0.56, 0, -0.24), angled 12° inward.
@@ -1501,38 +1522,42 @@ export function buildWorkbenchGeometries(): WorkbenchGeometries {
     matrix: calMatrix(-0.046, 0, 0.02),
   });
 
-  // Filament spool (Ø 200 mm x 68 mm) & caliper case resting on the upper shelf (Y = 0.704 m).
-  matteParts.push({
-    geo: new THREE.CylinderGeometry(0.1, 0.1, 0.066, 24),
-    color: '#1e293b',
-    matrix: trs([-0.36, 0.804, -0.34], [0, 0.3, Math.PI / 2]),
-  });
-  matteParts.push({
-    geo: new THREE.CylinderGeometry(0.088, 0.088, 0.056, 24),
-    color: '#f97316',
-    matrix: trs([-0.36, 0.804, -0.34], [0, 0.3, Math.PI / 2]),
-  });
-  matteParts.push({
-    geo: new THREE.BoxGeometry(0.24, 0.042, 0.14),
-    color: '#475569',
-    matrix: trs([0.34, 0.725, -0.34], [0, -0.08, 0]),
-  });
+  // Filament spool (Ø 200 mm x 68 mm) & caliper case resting on the upper shelf.
+  if (showUpperShelf) {
+    const shelfTopY = shelfY + 0.012;
+    matteParts.push({
+      geo: new THREE.CylinderGeometry(0.1, 0.1, 0.066, 24),
+      color: '#1e293b',
+      matrix: trs([-0.36, shelfTopY + 0.1, shelfZ], [0, 0.3, Math.PI / 2]),
+    });
+    matteParts.push({
+      geo: new THREE.CylinderGeometry(0.088, 0.088, 0.056, 24),
+      color: '#f97316',
+      matrix: trs([-0.36, shelfTopY + 0.1, shelfZ], [0, 0.3, Math.PI / 2]),
+    });
+    matteParts.push({
+      geo: new THREE.BoxGeometry(0.24, 0.042, 0.14),
+      color: '#475569',
+      matrix: trs([0.34, shelfTopY + 0.021, shelfZ], [0, -0.08, 0]),
+    });
+  }
 
-  // Workshop concrete floor (5.8 x 5.8 m at Y = -0.78 m) + studio shop walls behind bench.
+  // Workshop concrete floor (5.8 x 5.8 m at Y = -0.78 m) + single-sided studio shop walls
+  // (facing inward toward the bench so rear/side cameras look straight through them).
   matteParts.push({
     geo: new THREE.BoxGeometry(5.8, 0.06, 5.8),
     color: '#525760',
     matrix: trs([0, -0.81, 0.4]),
   });
   matteParts.push({
-    geo: new THREE.BoxGeometry(5.8, 3.0, 0.12),
+    geo: new THREE.PlaneGeometry(5.8, 3.0),
     color: '#676e79',
-    matrix: trs([0, 0.72, -1.35]),
+    matrix: trs([0, 0.72, -1.29]),
   });
   matteParts.push({
-    geo: new THREE.BoxGeometry(0.12, 3.0, 5.8),
+    geo: new THREE.PlaneGeometry(5.8, 3.0),
     color: '#606772',
-    matrix: trs([-2.25, 0.72, 0.4]),
+    matrix: trs([-2.19, 0.72, 0.4], [0, Math.PI / 2, 0]),
   });
 
   return {

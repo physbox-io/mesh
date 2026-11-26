@@ -101,7 +101,9 @@ const breakdownJoineryCommand: McpHandler = async (msg, { store, toId }) => {
   const primary = findNodeInScene(store.sceneGraph.nodes, targetIds[0]);
   if (!primary) return { ok: false, error: `No body called ${rawBodyId ?? targetIds[0]}.` };
 
-  const { items, absorbed } = collectIndividualPartSoups(store.sceneGraph, targetIds);
+  const { items, absorbed } = collectIndividualPartSoups(store.sceneGraph, targetIds, {
+    strictIds: rawWithIds.length > 0,
+  });
   if (!items.length) return { ok: false, error: `${primary.name} has no solid geometry to break down.` };
 
   const boardThick = checkPos(msg.boardThicknessMm ?? msg.board_thickness_mm, 'boardThicknessMm');
@@ -166,29 +168,35 @@ const breakdownJoineryCommand: McpHandler = async (msg, { store, toId }) => {
   try {
     const wasm = await loadManifold();
     const soups = items.map((it) => it.soup);
+    const hintNames = items.map((it) => it.hintName);
 
     if (hasPlankSpecificArg && msg.mode !== 'frame') {
       const jointType: PlankJointType =
         rawJointType === 'miter' || rawJointType === 'finger' || rawJointType === 'butt' || rawJointType === 'glue'
           ? rawJointType
           : 'rabbet';
-      const plankRes = decomposeSolidIntoPlanks(wasm, soups, {
-        boardThicknessMm: boardThick.value,
-        wallThicknessMm: wallThick.value,
-        maxBoardWidthMm: maxBoardW.value,
-        maxBoardLengthMm: maxBoardL.value,
-        jointType,
-        fingerWidthMm: fingerW.value,
-        dowelDiaMm: dowelDia.value,
-        dowelLengthMm: dowelLen.value,
-        clearanceMm: clearance.value,
-        hollowInterior:
-          typeof msg.hollowInterior === 'boolean'
-            ? msg.hollowInterior
-            : typeof msg.hollow_interior === 'boolean'
-              ? msg.hollow_interior
-              : undefined,
-      });
+      const plankRes = decomposeSolidIntoPlanks(
+        wasm,
+        soups,
+        {
+          boardThicknessMm: boardThick.value,
+          wallThicknessMm: wallThick.value,
+          maxBoardWidthMm: maxBoardW.value,
+          maxBoardLengthMm: maxBoardL.value,
+          jointType,
+          fingerWidthMm: fingerW.value,
+          dowelDiaMm: dowelDia.value,
+          dowelLengthMm: dowelLen.value,
+          clearanceMm: clearance.value,
+          hollowInterior:
+            typeof msg.hollowInterior === 'boolean'
+              ? msg.hollowInterior
+              : typeof msg.hollow_interior === 'boolean'
+                ? msg.hollow_interior
+                : undefined,
+        },
+        hintNames,
+      );
       if (!plankRes.ok) return plankRes;
 
       const names = plankRes.planks.map((p) => p.id);
@@ -266,16 +274,22 @@ const breakdownJoineryCommand: McpHandler = async (msg, { store, toId }) => {
         tabletopClips: typeof rawClips === 'boolean' ? rawClips : undefined,
         tenonCutMethod: rawCutMethod === 'cnc' ? 'cnc' : 'bandsaw',
       },
+      hintNames,
     );
     if (!outcome.ok) return outcome;
 
     // If auto-mode was called on a single unframed solid block (1 part, 0 joints)
     // and msg.mode !== 'frame', fall back to hollow-shell / plank breakdown!
     if (msg.mode !== 'frame' && outcome.parts.length <= 1 && outcome.joints.length === 0 && rawJointMode === undefined) {
-      const plankRes = decomposeSolidIntoPlanks(wasm, soups, {
-        maxBoardWidthMm: maxBoardW.value,
-        clearanceMm: clearance.value,
-      });
+      const plankRes = decomposeSolidIntoPlanks(
+        wasm,
+        soups,
+        {
+          maxBoardWidthMm: maxBoardW.value,
+          clearanceMm: clearance.value,
+        },
+        hintNames,
+      );
       if (plankRes.ok && plankRes.planks.length > 1) {
         const names = plankRes.planks.map((p) => p.id);
         const ids =
@@ -564,7 +578,10 @@ const buildMechanismCommand: McpHandler = async (msg, { store, toId }) => {
     // send_command's ten seconds although it had worked.
     const settled = await settleScene(built.nodes, { replacesScene: false, waitForColliders: false });
     // Said, not done quietly: a 0.5 mm lead built as 1 mm runs twice as far.
-    const warnings = adjustmentWarnings(built.family, built.adjusted);
+    const metricWarnings = Array.isArray(built.metrics.warnings)
+      ? built.metrics.warnings.filter((w): w is string => typeof w === 'string')
+      : [];
+    const warnings = [...adjustmentWarnings(built.family, built.adjusted), ...metricWarnings];
     return {
       ok: settled.ok,
       ...(settled.error ? { error: settled.error } : {}),
@@ -572,7 +589,8 @@ const buildMechanismCommand: McpHandler = async (msg, { store, toId }) => {
       addedIds: built.addedIds,
       ...(built.arborId ? { arborId: built.arborId } : {}),
       metrics: built.metrics,
-      ...(built.adjusted.length ? { adjusted: built.adjusted, warnings } : {}),
+      ...(built.adjusted.length ? { adjusted: built.adjusted } : {}),
+      ...(warnings.length ? { warnings } : {}),
       ...(settled.collisionPending ? { collisionPending: settled.collisionPending, note: settled.note } : {}),
     };
   } catch (err) {

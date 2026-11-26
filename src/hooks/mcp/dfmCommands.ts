@@ -8,17 +8,90 @@
 // and so missed 0.6 mm spokes a mold could not hold. CHECK_DFM is the same
 // analysis, on the DFM worker, of master_id or every body.
 
+import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
 import { dfmReportFor } from '../../utils/dfmWorkerClient';
-import type { DfmProcess } from '../../utils/dfm';
-import { mcpMoldSubject } from '../../utils/moldSubject';
-import { CAST_MATERIALS, resolveCastMaterial } from '../../utils/castMaterials';
+import {
+  resolveDfmCastMaterialStrict,
+  SUPPORTED_CAST_MATERIAL_IDS,
+  type DfmProcess,
+} from '../../utils/dfm';
+import { getNodeWorldTransform } from '../../utils/laserCutExporter';
+import { mcpMoldSubject, type MoldSubject } from '../../utils/moldSubject';
+import { isPourTooling } from '../../utils/pourTooling';
+import { isNodeRotationBaked } from '../../utils/sceneTree';
+import type { SceneGraph, SceneNode } from '../../types/scene';
 import { findNodeInScene } from './bridgeUtils';
 import type { McpCommands } from './types';
 
 const PROCESSES: Record<string, DfmProcess> = { print: 'print', fdm: 'print', cnc: 'cnc', machining: 'cnc', cast: 'cast', mold: 'cast' };
 
 const mm = (v: number) => Math.round(v * 10000) / 10;
+
+/**
+ * Picks ONLY the explicitly requested bodies (without pulling in unrequested
+ * descendants such as child hardware), lifting each child node to top-level
+ * world coordinates with `children: []`.
+ */
+function explicitNodesSubject(
+  scene: SceneGraph,
+  named: string[],
+  resolve: (id: string) => SceneNode | null,
+): MoldSubject | { error: string } {
+  const missing = named.filter((id) => !resolve(id));
+  if (missing.length) return { error: `No body called ${missing.join(', ')}.` };
+
+  const orderedIds: string[] = [];
+  const seen = new Set<string>();
+  for (const name of named) {
+    const id = resolve(name)!.id;
+    if (!seen.has(id)) {
+      seen.add(id);
+      orderedIds.push(id);
+    }
+  }
+
+  const worldById = new Map<string, { node: SceneNode; world: THREE.Matrix4; hasParent: boolean }>();
+  const walk = (nodes: SceneNode[], parent?: THREE.Matrix4) => {
+    for (const n of nodes) {
+      const world = getNodeWorldTransform(n, parent);
+      if (seen.has(n.id)) worldById.set(n.id, { node: n, world, hasParent: Boolean(parent) });
+      if (n.children?.length) walk(n.children, world);
+    }
+  };
+  walk(scene.nodes || []);
+
+  const picked: SceneNode[] = [];
+  for (const id of orderedIds) {
+    const entry = worldById.get(id);
+    if (!entry) continue;
+    const { node, world, hasParent } = entry;
+    if (node.simulation || isPourTooling(node)) continue;
+    if (!hasParent) {
+      picked.push({ ...node, children: [] });
+    } else {
+      const pos = new THREE.Vector3();
+      const q = new THREE.Quaternion();
+      world.decompose(pos, q, new THREE.Vector3());
+      const { euler: _euler, ...rest } = node;
+      const geoms = isNodeRotationBaked(node)
+        ? node.geoms.map(({ baseVertices: _bv, baseRenderVertices: _brv, ...g }) => g)
+        : node.geoms;
+      picked.push({ ...rest, geoms, pos: [pos.x, pos.y, pos.z], quat: [q.w, q.x, q.y, q.z], children: [] });
+    }
+  }
+
+  if (!picked.length) {
+    return {
+      error: `${named.join(', ')} ${named.length === 1 ? 'is a simulation or a pour box' : 'are simulations or pour boxes'}, not part of the design: pass master_id for the part to check.`,
+    };
+  }
+  return {
+    scene: { ...scene, nodes: picked },
+    ids: picked.map((n) => n.id),
+    label: picked.length <= 2 ? picked.map((n) => n.name).join(' and ') : `${picked[0].name} and ${picked.length - 1} more`,
+  };
+}
 
 export const dfmCommands: McpCommands = {
   CHECK_DFM: async (msg, { store, toId }) => {
@@ -29,30 +102,72 @@ export const dfmCommands: McpCommands = {
     if (msg.process !== undefined && !asked) return { ok: false, error: "process is 'print', 'cnc' or 'cast'." };
     // Default: what the bench is set up for, as the panel's lens follows it.
     const process: DfmProcess = asked ?? (state.machineTarget === 'fdm' ? 'print' : 'cnc');
-    const castMaterial = resolveCastMaterial(msg.castMaterial);
-    if (msg.castMaterial !== undefined && !castMaterial) {
-      return { ok: false, error: `cast_material is one of ${CAST_MATERIALS.map((m) => m.id).join(', ')}.` };
+
+    const rawCastMaterial = msg.castMaterial !== undefined ? msg.castMaterial : msg.cast_material;
+    const resolvedCast = rawCastMaterial !== undefined && rawCastMaterial !== null
+      ? resolveDfmCastMaterialStrict(rawCastMaterial)
+      : null;
+    if (rawCastMaterial !== undefined && rawCastMaterial !== null && !resolvedCast) {
+      return { ok: false, error: `cast_material is one of ${SUPPORTED_CAST_MATERIAL_IDS.join(', ')}.` };
     }
+
+    const rawBed = msg.bedMm !== undefined ? msg.bedMm : msg.bed_mm;
+    let bedOverride: { widthMm: number; depthMm: number; heightMm: number } | undefined;
+    if (rawBed !== undefined && rawBed !== null) {
+      if (
+        !Array.isArray(rawBed) ||
+        rawBed.length !== 3 ||
+        !rawBed.every((v) => typeof v === 'number' && Number.isFinite(v) && v > 0)
+      ) {
+        return { ok: false, error: 'bed_mm must be [width_mm, depth_mm, height_mm] with positive numbers.' };
+      }
+      bedOverride = { widthMm: rawBed[0], depthMm: rawBed[1], heightMm: rawBed[2] };
+    }
+
+    const rawIncludeChildren = msg.includeChildren !== undefined ? msg.includeChildren : msg.include_children;
+    if (rawIncludeChildren !== undefined && typeof rawIncludeChildren !== 'boolean') {
+      return { ok: false, error: 'include_children must be a boolean.' };
+    }
+
     if (msg.masterId !== undefined && msg.masterId !== null && typeof msg.masterId !== 'string') {
       return { ok: false, error: 'master_id must be a body id or name string.' };
     }
+
     const sceneGraph = store?.sceneGraph ?? state.sceneGraph;
-    const subject = mcpMoldSubject(sceneGraph, msg.masterId, (id) => findNodeInScene(sceneGraph.nodes, resolveId(id) as string), 'check');
+    const resolveNode = (id: string) => findNodeInScene(sceneGraph.nodes, resolveId(id) as string);
+    const named = typeof msg.masterId === 'string'
+      ? msg.masterId.split(',').map((x) => x.trim()).filter(Boolean)
+      : [];
+    // When multiple explicit IDs are passed, default include_children to false so
+    // listing a parent + its panels does not silently pull in unrequested child
+    // hardware or collapse the checked list to the parent.
+    const includeChildren = typeof rawIncludeChildren === 'boolean' ? rawIncludeChildren : named.length <= 1;
+
+    const subject = named.length > 0 && !includeChildren
+      ? explicitNodesSubject(sceneGraph, named, resolveNode)
+      : mcpMoldSubject(sceneGraph, msg.masterId, resolveNode, 'check');
     if ('error' in subject) return { ok: false, error: subject.error };
+
+    const effectiveBed = bedOverride ?? state.printBed;
     const report = await dfmReportFor(subject.scene, process, {
       material: state.material,
       filament: state.filament,
       stock: state.stock,
-      printBed: state.printBed,
+      printBed: effectiveBed,
       printer: state.printer,
       checkAllAsPlate: true,
-      ...(castMaterial ? { castMaterial } : {}),
+      ...(resolvedCast ? { castMaterial: resolvedCast.id } : {}),
     });
     if (!report) return { ok: false, error: 'The check could not be run: try again in a moment.' };
     return {
       ok: true,
       process,
       checked: { label: subject.label, ids: subject.ids },
+      ...(report.minWallMm !== undefined ? { minWallMm: report.minWallMm } : {}),
+      ...(process === 'cast' && report.castMaterial ? { castMaterial: report.castMaterial } : {}),
+      ...(process === 'print' && effectiveBed
+        ? { bedMm: [effectiveBed.widthMm, effectiveBed.depthMm, effectiveBed.heightMm] }
+        : {}),
       score: report.score,
       summary: report.summary,
       findings: report.findings.filter((f) => !f.passed).map((f) => ({

@@ -650,6 +650,7 @@ export function synthesizeTimberJoinery(
   wasm: ManifoldToplevel,
   soupsMetres: ArrayLike<number>[],
   rawOptions: TimberJoineryOptions = {},
+  hintNames?: (string | undefined)[],
 ): TimberBreakdownOutcome {
   const options: Required<TimberJoineryOptions> = {
     ...DEFAULT_TIMBER_JOINERY_OPTIONS,
@@ -659,6 +660,7 @@ export function synthesizeTimberJoinery(
   const extracted = extractTimberMembers(wasm, soupsMetres, {
     maxBoardWidthMm: options.maxBoardWidthMm,
     splitWidePanels: true,
+    hintNames,
   });
   if (!extracted.ok) return extracted;
 
@@ -1466,76 +1468,107 @@ export function synthesizeTimberJoinery(
     });
 
     // -------------------------------------------------------------------------
-    // 4. Plank-to-Plank Alignment Dowels for Split Tabletops / Chair Seats
+    // 4. Plank-to-Plank Alignment Dowels for Split Panels / Tabletops / Seats
     // -------------------------------------------------------------------------
-    const planks =
-      options.jointMode === 'butt'
-        ? []
-        : members
-            .filter((m) => m.plankInfo)
-            .sort((a, b) => a.plankInfo!.index - b.plankInfo!.index);
-    for (let p = 0; p + 1 < planks.length; p++) {
-      const pA = planks[p];
-      const pB = planks[p + 1];
-      if (Math.abs(pA.centerMm[2] - pB.centerMm[2]) > 15) continue;
-      const seamNormal = unit(sub3(pB.centerMm, pA.centerMm));
-      const seamCoord = 0.5 * (
-        dot(pA.centerMm, seamNormal) + pA.dimsMm[1] * 0.5 +
-        dot(pB.centerMm, seamNormal) - pB.dimsMm[1] * 0.5
-      );
-      const midAB: Vec3 = [
-        0.5 * (pA.centerMm[0] + pB.centerMm[0]),
-        0.5 * (pA.centerMm[1] + pB.centerMm[1]),
-        0.5 * (pA.centerMm[2] + pB.centerMm[2]),
-      ];
-      const seamCenter = add3(
-        midAB,
-        scale3(seamNormal, seamCoord - dot(midAB, seamNormal)),
-      );
-      const grainAxis = pA.axes[0];
-      const plankLen = Math.min(pA.dimsMm[0], pB.dimsMm[0]);
-      const dowelDia = Math.min(8, Math.max(6, Math.round(pA.dimsMm[2] * 0.35)));
-      const dowelLen = 30;
-      const holeR = (dowelDia + options.clearanceMm) * 0.5;
-      const holeDepth = dowelLen * 0.5 + 1;
-      const offsets = [-plankLen * 0.3, 0, plankLen * 0.3];
-      const centers = offsets.map((off) => add3(seamCenter, scale3(grainAxis, off)));
-      const { u, v } = planeBasis(seamNormal);
-
-      for (const c of centers) {
-        const bA = orientedCylinderManifold(wasm, c, u, v, seamNormal, holeDepth * 2, holeR, 20);
-        const nextA = solids[pA.index].subtract(bA);
-        const nextB = solids[pB.index].subtract(bA);
-        bA.delete();
-        solids[pA.index].delete();
-        solids[pB.index].delete();
-        solids[pA.index] = nextA;
-        solids[pB.index] = nextB;
+    const plankGroups = new Map<string, TimberMember[]>();
+    if (options.jointMode !== 'butt') {
+      for (const m of members) {
+        if (!m.plankInfo) continue;
+        const gKey =
+          m.plankInfo.groupId !== undefined
+            ? `g:${m.plankInfo.groupId}`
+            : `n:${m.plankInfo.parentName}`;
+        const list = plankGroups.get(gKey);
+        if (list) list.push(m);
+        else plankGroups.set(gKey, [m]);
       }
+    }
+    for (const grp of plankGroups.values()) {
+      grp.sort((a, b) => a.plankInfo!.index - b.plankInfo!.index);
+      for (let p = 0; p + 1 < grp.length; p++) {
+        const pA = grp[p];
+        const pB = grp[p + 1];
+        if (pB.plankInfo!.index !== pA.plankInfo!.index + 1) continue;
+        const seamNormal = unit(sub3(pB.centerMm, pA.centerMm));
+        const seamCoord = 0.5 * (
+          dot(pA.centerMm, seamNormal) + pA.dimsMm[1] * 0.5 +
+          dot(pB.centerMm, seamNormal) - pB.dimsMm[1] * 0.5
+        );
+        const midAB: Vec3 = [
+          0.5 * (pA.centerMm[0] + pB.centerMm[0]),
+          0.5 * (pA.centerMm[1] + pB.centerMm[1]),
+          0.5 * (pA.centerMm[2] + pB.centerMm[2]),
+        ];
+        const seamCenter = add3(
+          midAB,
+          scale3(seamNormal, seamCoord - dot(midAB, seamNormal)),
+        );
+        const grainAxis = pA.axes[0];
+        const plankLen = Math.min(pA.dimsMm[0], pB.dimsMm[0]);
+        const dowelDia = Math.min(8, Math.max(6, Math.round(pA.dimsMm[2] * 0.35)));
+        const dowelLen = 30;
+        const holeR = (dowelDia + options.clearanceMm) * 0.5;
+        const holeDepth = dowelLen * 0.5 + 1;
+        const offsets = [-plankLen * 0.3, 0, plankLen * 0.3];
+        const centers = offsets.map((off) => add3(seamCenter, scale3(grainAxis, off)));
+        const { u, v } = planeBasis(seamNormal);
 
-      joints.push({
-        id: `J${jointCounter++}`,
-        kind: 'plank_dowel',
-        memberAIndex: pA.index,
-        memberBIndex: pB.index,
-        memberAId: pA.id,
-        memberBId: pB.id,
-        centerMm: seamCenter,
-        normalAToB: seamNormal,
-        dowelCentersMm: centers,
-        dowelDiaMm: dowelDia,
-        dowelLengthMm: dowelLen,
-        notes: [
-          `3× Ø${dowelDia}×${dowelLen} mm alignment dowels along edge-glue seam between ${pA.id} and ${pB.id}.`,
-        ],
-      });
+        for (const c of centers) {
+          const bA = orientedCylinderManifold(wasm, c, u, v, seamNormal, holeDepth * 2, holeR, 20);
+          const nextA = solids[pA.index].subtract(bA);
+          const nextB = solids[pB.index].subtract(bA);
+          bA.delete();
+          solids[pA.index].delete();
+          solids[pB.index].delete();
+          solids[pA.index] = nextA;
+          solids[pB.index] = nextB;
+        }
+
+        joints.push({
+          id: `J${jointCounter++}`,
+          kind: 'plank_dowel',
+          memberAIndex: pA.index,
+          memberBIndex: pB.index,
+          memberAId: pA.id,
+          memberBId: pB.id,
+          centerMm: seamCenter,
+          normalAToB: seamNormal,
+          dowelCentersMm: centers,
+          dowelDiaMm: dowelDia,
+          dowelLengthMm: dowelLen,
+          notes: [
+            `3× Ø${dowelDia}×${dowelLen} mm alignment dowels along edge-glue seam between ${pA.id} and ${pB.id}.`,
+          ],
+        });
+      }
     }
 
     // -------------------------------------------------------------------------
     // 5. Tabletop Z-Clip Expansion Slots on Inside of Apron Rails
+    //    (Only for leg-and-apron tabletop frames, never enclosed chests/cases.)
     // -------------------------------------------------------------------------
-    const hasTopPanel = members.some((m) => m.role === 'panel' && Math.abs(m.axes[2][2]) >= 0.7);
-    if (options.tabletopClips && hasTopPanel && options.jointMode !== 'dowel' && options.jointMode !== 'butt') {
+    const legCount = members.filter((m) => m.role === 'leg').length;
+    const vertPanelCount = members.filter(
+      (m) => m.role === 'panel' && Math.abs(m.axes[2][2]) < 0.5,
+    ).length;
+    const isEnclosedCase = vertPanelCount >= 3 || (vertPanelCount >= 2 && legCount < 2);
+    const minAllZ = Math.min(...members.map((m) => m.bboxMm.min[2]));
+    const maxAllZ = Math.max(...members.map((m) => m.bboxMm.max[2]));
+    const totalH = Math.max(1, maxAllZ - minAllZ);
+    const hasTopPanel = members.some(
+      (m) =>
+        m.role === 'panel' &&
+        Math.abs(m.axes[2][2]) >= 0.7 &&
+        (m.centerMm[2] - minAllZ) / totalH >= 0.6,
+    );
+    if (
+      options.tabletopClips &&
+      !isEnclosedCase &&
+      legCount >= 1 &&
+      hasTopPanel &&
+      options.jointMode !== 'dowel' &&
+      options.jointMode !== 'butt'
+    ) {
       for (let i = 0; i < members.length; i++) {
         const m = members[i];
         if (m.role !== 'rail' || !m.id.startsWith('Apron_') || Math.abs(m.axes[0][2]) >= 0.15) continue;

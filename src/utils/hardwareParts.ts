@@ -40,17 +40,189 @@ import type { CorePartKind, HardwareCutKind, HardwarePart, HardwarePartKind, Sce
 import { csgFrameOffset, csgSourceGeoms, fromtoFrame, geomMatrixOf, surfaceUnder } from './csg';
 import { hardwareSpecOf } from './hardwareCuts';
 import { getNodeWorldTransform } from './laserCutExporter';
-import { BEARINGS, BOLTS, CAP_SCREW_HEADS, HEX_NUTS, O_RINGS, SCREW_LENGTHS, SEAL_CORDS, SHAFTS, WASHERS, screwLengthAtMost } from './hardwareSizes';
+import {
+  BEARINGS, BOLTS, BUTT_HINGES, CAP_SCREW_HEADS, CLEARANCE_HOLES, HANDLES, HASP_LATCHES, HEX_NUTS, O_RINGS,
+  SCREW_LENGTHS, SEAL_CORDS, SHAFTS, WASHERS, WOOD_SCREW_LENGTHS, WOOD_SCREWS, screwLengthAtMost,
+} from './hardwareSizes';
 import { loopLengthMm, rimCentreline } from './sealGrooves';
 import { metricThread } from './metricThreads';
 import {
-  BLACK_OXIDE, BRIGHT, NITRILE, RUBBER, SHIELD, STEEL, circleLoop, cylinderGeom, hexRadius, mm, ringGeom, sweepMesh, visual,
+  ANTIQUE_BRASS, BLACK_OXIDE, BRASS, BRASS_COLOR, BRIGHT, DARK_BRONZE, NITRILE, RUBBER, SHIELD, STEEL,
+  boxGeom, circleLoop, cylinderGeom, frustumGeom, hexRadius, mm, ringGeom, sweepMesh, visual,
   type HardwarePartInfo,
 } from './hardwareGeometry';
 import { isBoughtIn } from './boughtIn';
 import { LINEAR_PARTS } from './linearParts';
 import { MOTION_PARTS } from './motionParts';
 import { EXTRUSION_PARTS } from './extrusionParts';
+
+/** Woodworking & cabinetry hardware kinds built in this module. */
+export type WoodworkingPartKind = 'butt_hinge' | 'hasp_latch' | 'handle' | 'wood_screw';
+export type AllHardwarePartKind = HardwarePartKind | WoodworkingPartKind;
+export type HardwarePartSpec = Omit<HardwarePart, 'kind'> & { kind: AllHardwarePartKind };
+
+const ROT_Z_TO_X: [number, number, number, number] = [0.7071068, 0, 0.7071068, 0];
+
+function buildButtHinge(node: SceneNode, p: HardwarePart, id: string) {
+  const [H, openW, thick, pinDia] = BUTT_HINGES[p.size] ?? BUTT_HINGES['75mm'];
+  const pinR = pinDia / 2;
+  const leafSpan = Math.max(4, openW / 2 - pinR * 0.6);
+  const leafCx = pinR * 0.6 + leafSpan / 2;
+  const segH = H / 5;
+  const holeZ = H * 0.3;
+  const holeX = pinR + leafSpan * 0.52;
+
+  // Parent body: fixed leaf (-X), 3 outer knuckles, and central hinge pin along +Z.
+  node.geoms = [
+    boxGeom(`${id}_leaf_a`, [mm(leafSpan / 2), mm(thick / 2), mm(H / 2)], [mm(-leafCx), 0, 0], BRASS_COLOR, BRASS),
+    cylinderGeom(`${id}_pin`, mm(pinR * 0.65), mm(H + 2), 0, BRIGHT),
+    cylinderGeom(`${id}_knuckle_0`, mm(pinR), mm(segH * 0.96), mm(-2 * segH), BRASS_COLOR),
+    cylinderGeom(`${id}_knuckle_2`, mm(pinR), mm(segH * 0.96), 0, BRASS_COLOR),
+    cylinderGeom(`${id}_knuckle_4`, mm(pinR), mm(segH * 0.96), mm(2 * segH), BRASS_COLOR),
+    visual(boxGeom(`${id}_hole_a1`, [mm(1.8), mm(thick * 0.55), mm(1.8)], [mm(-holeX), 0, mm(holeZ)], DARK_BRONZE)),
+    visual(boxGeom(`${id}_hole_a2`, [mm(1.8), mm(thick * 0.55), mm(1.8)], [mm(-holeX), 0, mm(-holeZ)], DARK_BRONZE)),
+  ];
+
+  // Moving leaf (+X) swinging on the central knuckle pin along +Z.
+  node.children = [{
+    id: `${id}_leaf_b`,
+    name: `${p.size} butt hinge moving leaf`,
+    type: 'body',
+    pos: [0, 0, 0],
+    geoms: [
+      boxGeom(`${id}_leaf_b_plate`, [mm(leafSpan / 2), mm(thick / 2), mm(H / 2)], [mm(leafCx), 0, 0], BRASS_COLOR, BRASS),
+      cylinderGeom(`${id}_knuckle_1`, mm(pinR), mm(segH * 0.96), mm(-segH), BRASS_COLOR),
+      cylinderGeom(`${id}_knuckle_3`, mm(pinR), mm(segH * 0.96), mm(segH), BRASS_COLOR),
+      visual(boxGeom(`${id}_hole_b1`, [mm(1.8), mm(thick * 0.55), mm(1.8)], [mm(holeX), 0, mm(holeZ)], DARK_BRONZE)),
+      visual(boxGeom(`${id}_hole_b2`, [mm(1.8), mm(thick * 0.55), mm(1.8)], [mm(holeX), 0, mm(-holeZ)], DARK_BRONZE)),
+    ],
+    joints: [{
+      name: `${id}_hinge`, type: 'hinge', axis: [0, 0, 1], pos: [0, 0, 0],
+      limited: true, range: [-90, 180], damping: 0.005,
+    }],
+    children: [],
+    hardwarePart: { ...p, piece: 'inner' },
+  }];
+}
+
+function buildHaspLatch(node: SceneNode, p: HardwarePart, id: string) {
+  const [strapLen, W, T, stapleProj] = HASP_LATCHES[p.size] ?? HASP_LATCHES['75mm'];
+  const plateH = W * 0.85;
+  const wire = Math.max(2.5, T * 1.4);
+  const loopW = W * 0.36;
+  const railW = (W - loopW - 3) / 2;
+  const strapZ = strapLen + plateH * 0.25;
+  const slotTop = -(strapLen - plateH * 0.35);
+  const slotBot = -(strapLen + plateH * 0.15);
+
+  // Parent body: upper hinge mount plate (+Z), lower lock plate (-Z), and staple U-loop (+Y).
+  node.geoms = [
+    boxGeom(`${id}_mount_plate`, [mm(W / 2), mm(T / 2), mm(plateH / 2)], [0, mm(T / 2), mm(plateH / 2)], ANTIQUE_BRASS, BRASS),
+    cylinderGeom(`${id}_knuckle`, mm(T * 1.2), mm(W * 0.85), 0, ANTIQUE_BRASS, { pos: [0, mm(T), 0], quat: [...ROT_Z_TO_X] }),
+    boxGeom(`${id}_lock_plate`, [mm(W / 2), mm(T / 2), mm(plateH / 2)], [0, mm(T / 2), mm(-strapLen)], ANTIQUE_BRASS, BRASS),
+    // Staple U-loop protruding +Y from the lock plate
+    boxGeom(`${id}_staple_l`, [mm(wire / 2), mm(stapleProj / 2), mm(wire / 2)], [mm(-loopW / 2), mm(T + stapleProj / 2), mm(-strapLen)], ANTIQUE_BRASS, BRASS),
+    boxGeom(`${id}_staple_r`, [mm(wire / 2), mm(stapleProj / 2), mm(wire / 2)], [mm(loopW / 2), mm(T + stapleProj / 2), mm(-strapLen)], ANTIQUE_BRASS, BRASS),
+    boxGeom(`${id}_staple_bar`, [mm((loopW + wire) / 2), mm(wire / 2), mm(wire / 2)], [0, mm(T + stapleProj), mm(-strapLen)], ANTIQUE_BRASS, BRASS),
+  ];
+
+  // Swinging drop strap hanging down -Z over the staple loop.
+  const upperLen = Math.max(4, Math.abs(slotTop));
+  const slotLen = Math.max(6, Math.abs(slotBot - slotTop));
+  const tipLen = Math.max(4, strapZ - Math.abs(slotBot));
+  const strapY = T * 1.65;
+  node.children = [{
+    id: `${id}_strap`,
+    name: `${p.size} hasp latch drop strap`,
+    type: 'body',
+    pos: [0, 0, 0],
+    geoms: [
+      boxGeom(`${id}_strap_upper`, [mm(W / 2), mm(T / 2), mm(upperLen / 2)], [0, mm(strapY), mm(-upperLen / 2)], ANTIQUE_BRASS, BRASS),
+      boxGeom(`${id}_strap_rail_l`, [mm(railW / 2), mm(T / 2), mm(slotLen / 2)], [mm(-(W / 2 - railW / 2)), mm(strapY), mm((slotTop + slotBot) / 2)], ANTIQUE_BRASS, BRASS),
+      boxGeom(`${id}_strap_rail_r`, [mm(railW / 2), mm(T / 2), mm(slotLen / 2)], [mm(W / 2 - railW / 2), mm(strapY), mm((slotTop + slotBot) / 2)], ANTIQUE_BRASS, BRASS),
+      boxGeom(`${id}_strap_tip`, [mm(W / 2), mm(T / 2), mm(tipLen / 2)], [0, mm(strapY), mm(slotBot - tipLen / 2)], ANTIQUE_BRASS, BRASS),
+    ],
+    joints: [{
+      name: `${id}_swing`, type: 'hinge', axis: [1, 0, 0], pos: [0, mm(T), 0],
+      limited: true, range: [0, 153], damping: 0.005,
+    }],
+    children: [],
+    hardwarePart: { ...p, piece: 'inner' },
+  }];
+}
+
+function buildHandle(node: SceneNode, p: HardwarePart, id: string) {
+  const [cc, proj, barDia, baseDia] = HANDLES[p.size] ?? HANDLES['128mm'];
+  const baseH = 3;
+  const postH = Math.max(6, proj - barDia / 2 - baseH);
+  const gripZ = proj - barDia / 2;
+  const gripLen = cc + barDia * 1.2;
+
+  // Origin on mounting face z = 0, handle standing proud along +Z, grip along X.
+  node.geoms = [
+    cylinderGeom(`${id}_base_l`, mm(baseDia / 2), mm(baseH), mm(baseH / 2), ANTIQUE_BRASS, { pos: [mm(-cc / 2), 0, mm(baseH / 2)] }),
+    cylinderGeom(`${id}_base_r`, mm(baseDia / 2), mm(baseH), mm(baseH / 2), ANTIQUE_BRASS, { pos: [mm(cc / 2), 0, mm(baseH / 2)] }),
+    cylinderGeom(`${id}_post_l`, mm(barDia * 0.42), mm(postH), mm(baseH + postH / 2), ANTIQUE_BRASS, { pos: [mm(-cc / 2), 0, mm(baseH + postH / 2)] }),
+    cylinderGeom(`${id}_post_r`, mm(barDia * 0.42), mm(postH), mm(baseH + postH / 2), ANTIQUE_BRASS, { pos: [mm(cc / 2), 0, mm(baseH + postH / 2)] }),
+    cylinderGeom(`${id}_grip`, mm(barDia / 2), mm(gripLen), mm(gripZ), ANTIQUE_BRASS, { pos: [0, 0, mm(gripZ)], quat: [...ROT_Z_TO_X] }),
+  ];
+}
+
+function buildWoodScrew(node: SceneNode, p: HardwarePart, id: string) {
+  const [shankD, headD, headH] = WOOD_SCREWS[p.size] ?? WOOD_SCREWS['#8'];
+  const L = p.lengthMm ?? 30;
+  const tipH = Math.min(shankD * 1.4, Math.max(2, (L - headH) * 0.25));
+  const shankLen = Math.max(2, L - headH - tipH);
+  const slotLen = headD * 0.58;
+  const slotW = Math.max(0.7, headD * 0.12);
+
+  // Origin at top flat face of countersunk head (z = 0); head & shank run down -Z.
+  node.geoms = [
+    frustumGeom(`${id}_head`, mm(shankD / 2), mm(headD / 2), mm(headH), mm(-headH / 2), BRASS_COLOR, STEEL),
+    cylinderGeom(`${id}_shank`, mm(shankD / 2), mm(shankLen), mm(-(headH + shankLen / 2)), BRASS_COLOR),
+    frustumGeom(`${id}_tip`, mm(0.15), mm(shankD / 2), mm(tipH), mm(-(headH + shankLen + tipH / 2)), BRASS_COLOR, STEEL),
+    // Phillips cross recess on top of flat head (visual only)
+    visual(boxGeom(`${id}_drive_x`, [mm(slotLen / 2), mm(slotW / 2), mm(0.08)], [0, 0, mm(0.04)], DARK_BRONZE)),
+    visual(boxGeom(`${id}_drive_y`, [mm(slotW / 2), mm(slotLen / 2), mm(0.08)], [0, 0, mm(0.04)], DARK_BRONZE)),
+  ];
+}
+
+const WOODWORKING_PARTS: Record<WoodworkingPartKind, HardwarePartInfo> = {
+  butt_hinge: {
+    label: 'Butt hinge',
+    sizes: Object.keys(BUTT_HINGES),
+    defaultSize: '75mm',
+    hint: 'A two-leaf brass butt hinge with central knuckle pin for chest lids and cabinet doors.',
+    name: (p) => `${p.size} butt hinge`,
+    build: buildButtHinge,
+  },
+  hasp_latch: {
+    label: 'Hasp latch',
+    sizes: Object.keys(HASP_LATCHES),
+    defaultSize: '75mm',
+    hint: 'An antique brass hasp and staple latch with a swinging drop strap for chests and trunks.',
+    name: (p) => `${p.size} hasp latch`,
+    build: buildHaspLatch,
+  },
+  handle: {
+    label: 'Handle',
+    sizes: Object.keys(HANDLES),
+    defaultSize: '128mm',
+    hint: 'A chest carrying handle or cabinet drawer pull.',
+    name: (p) => `${p.size} handle`,
+    build: buildHandle,
+  },
+  wood_screw: {
+    label: 'Wood screw',
+    sizes: Object.keys(WOOD_SCREWS),
+    defaultSize: '#8',
+    lengths: WOOD_SCREW_LENGTHS,
+    defaultLengthMm: 30,
+    hint: 'A flat-head countersunk wood screw (#6/#8/#10/#12 or M4/M5) for timber joinery and cabinetry.',
+    name: (p) => `${p.size}×${p.lengthMm} wood screw`,
+    build: buildWoodScrew,
+  },
+};
 
 
 const SHAFT_LENGTHS = [10, 16, 20, 25, 30, 40, 50, 60, 80, 100, 120, 150, 200, 250, 300] as const;
@@ -79,11 +251,12 @@ const CORE_PARTS: Record<CorePartKind, HardwarePartInfo> = {
 };
 
 /** Every kind of bought part: the core ones here, then each family's from its own module. */
-export const HARDWARE_PARTS: Record<HardwarePartKind, HardwarePartInfo> = {
+export const HARDWARE_PARTS: Record<AllHardwarePartKind, HardwarePartInfo> = {
   ...CORE_PARTS,
   ...LINEAR_PARTS,
   ...MOTION_PARTS,
   ...EXTRUSION_PARTS,
+  ...WOODWORKING_PARTS,
 };
 
 /** An O-ring's cord diameter, mm: a stocked ring's, or the cord's own. */
@@ -119,15 +292,15 @@ export { isBoughtIn };
 export { ringMesh, sweepMesh } from './hardwareGeometry';
 export type { HardwarePartInfo } from './hardwareGeometry';
 
-const sizeOf = (kind: HardwarePartKind, size: string) => {
+const sizeOf = (kind: AllHardwarePartKind, size: string) => {
   const info = HARDWARE_PARTS[kind];
   return info.sizes.includes(size) ? size : info.defaultSize;
 };
 
 /** The spec with its size and length made valid, defaults filled in. */
-export function normalizePart(spec: HardwarePart): HardwarePart {
+export function normalizePart(spec: HardwarePartSpec): HardwarePart {
   const info = HARDWARE_PARTS[spec.kind];
-  const out: HardwarePart = { ...spec, size: sizeOf(spec.kind, spec.size) };
+  const out = { ...spec, size: sizeOf(spec.kind, spec.size) } as HardwarePart;
   if (info.defaultLengthMm !== undefined) {
     const l = spec.lengthMm && spec.lengthMm > 0 ? spec.lengthMm : info.defaultLengthMm;
     out.lengthMm = +l.toFixed(3);
@@ -141,7 +314,7 @@ export function normalizePart(spec: HardwarePart): HardwarePart {
 }
 
 /** What the hierarchy calls it: "608 bearing", "M3×12 cap screw". */
-export function hardwarePartName(spec: HardwarePart): string {
+export function hardwarePartName(spec: HardwarePartSpec): string {
   const p = normalizePart(spec);
   switch (p.kind) {
     case 'bearing': return `${p.size} bearing`;
@@ -161,7 +334,7 @@ export function hardwarePartName(spec: HardwarePart): string {
  * origin; a screw's origin is where it bears — under its head, or under its
  * washer — with the shank down -Z, because that is the point a seat is.
  */
-export function hardwarePartNode(spec: HardwarePart, id: string): SceneNode {
+export function hardwarePartNode(spec: HardwarePartSpec, id: string): SceneNode {
   const p = normalizePart(spec);
   const node: SceneNode = {
     id, name: hardwarePartName(p), type: 'body', pos: [0, 0, 0],
@@ -358,14 +531,90 @@ export interface Seat {
   gripM?: number;
 }
 
+/** Infers the nearest metric bolt size from a countersink shank diameter (mm). */
+function inferBoltSizeFromShankMm(shankDiaMm: number, tapped: boolean): string {
+  if (!(shankDiaMm > 0)) return 'M4';
+  let best: string = 'M4';
+  let bestErr = Infinity;
+  for (const b of BOLTS) {
+    const nom = tapped ? (metricThread(b)?.[1] ?? CLEARANCE_HOLES[b]) : CLEARANCE_HOLES[b];
+    const err = Math.abs(nom - shankDiaMm);
+    if (err < bestErr) {
+      bestErr = err;
+      best = b;
+    }
+  }
+  return best;
+}
+
+/** Matches a metric bolt size to the closest wood_screw table key. */
+function woodScrewSizeForBolt(boltSize: string, shankDiaMm: number): string {
+  if (Object.hasOwn(WOOD_SCREWS, boltSize)) return boltSize;
+  const targetDia = metricThread(boltSize)?.[1] ?? (shankDiaMm > 0 ? shankDiaMm : 4.0);
+  let best = '#8';
+  let bestErr = Infinity;
+  for (const [key, [dia]] of Object.entries(WOOD_SCREWS)) {
+    const err = Math.abs(dia - targetDia);
+    if (err < bestErr) {
+      bestErr = err;
+      best = key;
+    }
+  }
+  return best;
+}
+
+/**
+ * Seat for a conical countersink cut group (created by `physics_cut(shape="countersink")`,
+ * which writes `${host.id}_${group}_head` and `${host.id}_${group}_shank` geoms).
+ * Accepts `wood_screw` (default) and `screw`.
+ */
+function countersinkSeat(host: SceneNode, group: string, kind?: AllHardwarePartKind): Seat | null {
+  const partKind: AllHardwarePartKind = kind ?? 'wood_screw';
+  if (partKind !== 'wood_screw' && partKind !== 'screw') return null;
+  const geoms = host.geoms || [];
+  const head = geoms.find(
+    (g) => !g.csgDerived && g.csg === 'difference'
+      && (g.name === `${host.id}_${group}_head` || g.name.endsWith(`_${group}_head`)),
+  );
+  const shank = geoms.find(
+    (g) => !g.csgDerived && g.csg === 'difference' && g.type === 'cylinder'
+      && (g.name === `${host.id}_${group}_shank` || g.name.endsWith(`_${group}_shank`)),
+  );
+  if (!head || !shank || !shank.cutAt || !shank.cutNormal) return null;
+
+  const n = new THREE.Vector3(...(shank.cutNormal as [number, number, number])).normalize();
+  const entry = new THREE.Vector3(...(shank.cutAt as [number, number, number]));
+  const offset = csgFrameOffset(host);
+  const at = (p: THREE.Vector3) => [
+    p.x - (offset[0] ?? 0),
+    p.y - (offset[1] ?? 0),
+    p.z - (offset[2] ?? 0),
+  ].map((v) => +v.toFixed(7));
+  const quat = shank.quat ? [...shank.quat] : (() => {
+    const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
+    return [q.w, q.x, q.y, q.z];
+  })();
+  const shankDiaMm = (shank.size?.[0] ?? 0) * 2000;
+  const boltSize = inferBoltSizeFromShankMm(shankDiaMm, !!shank.thread);
+  const size = partKind === 'wood_screw' ? woodScrewSizeForBolt(boltSize, shankDiaMm) : boltSize;
+  const through = surfaceUnder(host, shank.cutAt, shank.cutNormal)?.thickness ?? 0;
+
+  return {
+    pos: at(entry),
+    quat,
+    part: { kind: partKind as HardwarePartKind, size, lengthMm: 0 },
+    gripM: Math.max(0, through),
+  };
+}
+
 /**
  * Where a part goes in one of a body's hardware cuts, and what size it is.
  * Null when the body has no such cut, or the cut takes no part of this kind.
  */
-export function seatFor(host: SceneNode, group: string, kind?: HardwarePartKind, lengthMm?: number): Seat | null {
+export function seatFor(host: SceneNode, group: string, kind?: AllHardwarePartKind, lengthMm?: number): Seat | null {
   const spec = hardwareSpecOf(host.geoms || [], group);
-  if (!spec) return null;
-  const partKind = kind ?? PARTS_FOR_CUT[spec.kind][0];
+  if (!spec) return countersinkSeat(host, group, kind);
+  const partKind = (kind ?? PARTS_FOR_CUT[spec.kind][0]) as HardwarePartKind | undefined;
   if (!partKind || !PARTS_FOR_CUT[spec.kind].includes(partKind)) return null;
   const piece = (host.geoms || []).find((g) => g.hardware?.group === group && g.hardware.part === SEAT_PIECE[spec.kind] && !g.csgDerived);
   if (partKind === 'oring' && piece) return ringSeat(host, piece, spec.size);
@@ -461,13 +710,13 @@ function ringSeat(host: SceneNode, piece: SceneGeom, size: string): Seat | null 
  * It should already be a child of `host`. Returns false when it cannot go there.
  */
 export function seatPart(node: SceneNode, host: SceneNode, group: string, lengthMm?: number): boolean {
-  const kind = node.hardwarePart?.kind;
+  const kind = node.hardwarePart?.kind as AllHardwarePartKind | undefined;
   const seat = kind && seatFor(host, group, kind, node.hardwarePart?.lengthMm);
   if (!seat) return false;
   const part: HardwarePart = { ...node.hardwarePart!, ...seat.part, seat: group };
-  if (kind === 'screw') {
-    part.washer = false; // a washer does not fit in a counterbore, nor between an insert and its screw
-    part.lengthMm = lengthMm ?? (seat.part.lengthMm || node.hardwarePart?.lengthMm || HARDWARE_PARTS.screw.defaultLengthMm!);
+  if (kind === 'screw' || kind === 'wood_screw') {
+    if (kind === 'screw') part.washer = false; // a washer does not fit in a counterbore, nor between an insert and its screw
+    part.lengthMm = lengthMm ?? (seat.part.lengthMm || node.hardwarePart?.lengthMm || HARDWARE_PARTS[kind].defaultLengthMm!);
   }
   node.pos = seat.pos;
   node.quat = seat.quat;
@@ -495,7 +744,8 @@ export function reseatHardware(host: SceneNode): void {
     }
     child.pos = seat.pos;
     child.quat = seat.quat;
-    const size = seat.part.size;
+    const isHardwareCut = !!hardwareSpecOf(host.geoms || [], group);
+    const size = isHardwareCut ? seat.part.size : child.hardwarePart!.size;
     // An O-ring follows its groove's shape as well as its size, a rail its seat's length.
     const path = seat.part.path;
     const samePath = !path || JSON.stringify(path) === JSON.stringify(child.hardwarePart!.path);
@@ -555,7 +805,8 @@ export function fastenTargetFor(scene: SceneGraph, host: SceneNode, screw: Scene
   const S = new THREE.Vector3().setFromMatrixPosition(screwWorld);
   const down = new THREE.Vector3(0, 0, -1).transformDirection(screwWorld);
   const thread = metricThread(screw.hardwarePart!.size);
-  const d = (thread ? thread[1] : 3) / 1000;
+  const wood = WOOD_SCREWS[screw.hardwarePart!.size];
+  const d = (thread ? thread[1] : wood ? wood[0] : 3) / 1000;
   const skip = new Set<string>();
   const mark = (n: SceneNode) => { skip.add(n.id); (n.children || []).forEach(mark); };
   mark(host);
@@ -602,7 +853,8 @@ export function fastenTargetFor(scene: SceneGraph, host: SceneNode, screw: Scene
  */
 export function screwFit(scene: SceneGraph, host: SceneNode, screw: SceneNode, gripM: number): { lengthMm: number; target: SceneNode | null } {
   const thread = metricThread(screw.hardwarePart!.size);
-  const d = (thread ? thread[1] : 3) / 1000;
+  const wood = WOOD_SCREWS[screw.hardwarePart!.size];
+  const d = (thread ? thread[1] : wood ? wood[0] : 3) / 1000;
   const target = fastenTargetFor(scene, host, screw, gripM);
   const reach = target ? target.reachM : gripM + 1.5 * d;
   return { lengthMm: screwLengthAtMost(reach * 1000), target: target?.node ?? null };

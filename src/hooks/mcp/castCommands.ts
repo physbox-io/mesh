@@ -372,6 +372,14 @@ export const castCommands: McpCommands = {
     const marginMm = marginChk.value ?? 5;
     const placement = msg.placement === 'beside' ? 'beside' : msg.placement === undefined || msg.placement === 'replace' ? 'replace' : null;
     if (!placement) return { ok: false, error: "placement is 'replace' or 'beside'." };
+    if (msg.name !== undefined && msg.name !== null && (typeof msg.name !== 'string' || !msg.name.trim())) {
+      return { ok: false, error: 'name must be a non-empty string.' };
+    }
+    const requestedName = typeof msg.name === 'string' && msg.name.trim()
+      ? msg.name.trim()
+      : others.length > 0 && store.sceneGraph.name?.trim()
+        ? store.sceneGraph.name.trim()
+        : undefined;
     let splitOut;
     try {
       splitOut = await splitOffThread(soups, {
@@ -406,9 +414,14 @@ export const castCommands: McpCommands = {
       }
     }
 
+    const names = requestedName
+      ? (result.sections.length === 1
+        ? [requestedName]
+        : result.sections.map((_, i) => `${requestedName}_part${i + 1}`))
+      : undefined;
     const ids = msg.apply === true
       ? useStore.getState().splitBodyForPrint(node.id, result.sections, absorbed, {
-        cutFor: { bed, marginMm }, placement, ...(msg.centerOrigin === true ? { centerOrigin: true } : {}),
+        cutFor: { bed, marginMm }, placement, ...(names ? { names } : {}), ...(msg.centerOrigin === true ? { centerOrigin: true } : {}),
       })
       : null;
     const round = (v: number, d = 1) => +v.toFixed(d);
@@ -419,6 +432,7 @@ export const castCommands: McpCommands = {
       bedMm: [bed.widthMm, bed.depthMm, bed.heightMm],
       sections: result.sections.map((sec, i) => ({
         index: i,
+        sectionNumber: i + 1,
         ...(ids ? { id: ids[i] } : {}),
         fits: sec.fits,
         printedSizeMm: sec.sizeMm.map((v) => round(v)),
@@ -429,10 +443,21 @@ export const castCommands: McpCommands = {
         holes: sec.features.filter((f) => f.kind === 'bore').length,
         pegs: sec.features.filter((f) => f.kind === 'peg').length,
       })),
-      cuts: result.cuts.map((c) => ({ normal: c.normal.map((v) => round(v, 4)), offsetMm: round(c.offset * 1000, 2) })),
+      cuts: result.cuts.map((c, i) => ({
+        index: i,
+        cutNumber: i + 1,
+        normal: c.normal.map((v) => round(v, 4)),
+        offsetMm: round(c.offset * 1000, 2),
+      })),
       joints: result.joints.map((j) => ({
-        between: [j.neg, j.pos], areaMm2: round(j.areaMm2), pins: j.pins.length,
-        ...(j.pegSide ? { pegsOn: j.pegSide === 'neg' ? j.neg : j.pos } : {}),
+        between: [j.neg, j.pos],
+        betweenSections: [j.neg + 1, j.pos + 1],
+        areaMm2: round(j.areaMm2),
+        pins: j.pins.length,
+        ...(j.pegSide ? {
+          pegsOn: j.pegSide === 'neg' ? j.neg : j.pos,
+          pegsOnSection: (j.pegSide === 'neg' ? j.neg : j.pos) + 1,
+        } : {}),
       })),
       checks,
       ...(assembly ? { assembly } : {}),

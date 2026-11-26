@@ -587,6 +587,23 @@ describe('a parting height on a model drafted by Prepare for Casting', () => {
     const r = generateCastPattern(prepped, { metalId: 'aluminium', partingFromBaseMm: auto.summary.partingFromBaseMm });
     expect(r.warnings.some((w) => /draft was prepared there/.test(w))).toBe(false);
   });
+
+  it('warns naming both parting heights when partingFromBaseMm is auto and differs from castPrep', () => {
+    const preppedOffset = {
+      ...latticeBracketPreset,
+      castPrep: { draftDeg: 2, draftMode: 'add', partingZ: 0.02, edges: null, method: 'sand', originals: {}, skipped: [] },
+    } as unknown as SceneGraph;
+    const r = generateCastPattern(preppedOffset, { metalId: 'aluminium', partingFromBaseMm: 'auto' });
+    expect(r.success, r.error).toBe(true);
+    expect(r.summary.partingFromBaseMm).toBeCloseTo(20, 1);
+    const warning = r.warnings.find((w) => /draft was prepared there/.test(w));
+    expect(warning).toBeDefined();
+    expect(warning).toContain('20.0 mm');
+    expect(warning).toMatch(/auto 0\.0 mm/);
+
+    // And when auto agrees with the prepared height, no parting warning is emitted.
+    expect(auto.warnings.some((w) => /draft was prepared there/.test(w))).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------

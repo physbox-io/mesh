@@ -1,8 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
 import type { EdgeRoundFeature, RoundEdge, SceneNode } from '../src/types/scene';
-import { crossSection, setbackOf, edgeSolidScad, cornerPatchesScad, edgeRoundSolids, reconcileEdgeRounds, keepFoundEdges } from '../src/utils/edgeRound';
-import { findFeatureEdges } from '../src/utils/featureEdges';
+import {
+  crossSection, setbackOf, edgeSolidScad, cornerPatchesScad, edgeRoundSolids,
+  normalizeRoundEdge, reconcileEdgeRounds, keepFoundEdges, planClampedRoundings,
+} from '../src/utils/edgeRound';
+import { relaxFacetedCurveSetbacks } from '../src/utils/edgeRoundBase';
+import { findFeatureEdges, maxSizeFor } from '../src/utils/featureEdges';
 import { csgProgram, csgHashOf, hasBooleanOps, meshShells, primitiveToScad } from '../src/utils/csg';
 
 /** The top-front edge of a 20 mm cube centred on the origin, along X. */
@@ -200,5 +204,146 @@ describe('an outside edge ending in a rounded inside corner', () => {
     // Alone, the stop is the floor; with the foot filleted, 2 mm above it.
     expect(alone).toMatch(/\[0, 0, 1, 0\]/);
     expect(withFoot).toMatch(/\[0, 0, 1, 0\.002\]/);
+  });
+
+  it('also stops short of circular concave rim fillets (boss foot / counterbore floor)', () => {
+    // A straight rib edge ending on a z = 0 floor right at a boss foot (r = 8 mm).
+    const ribTop: RoundEdge = {
+      kind: 'line', a: [0.0085, 0, 0], b: [0.02, 0, 0.01],
+      n1: [0, -1, 0], n2: [Math.SQRT1_2, 0, Math.SQRT1_2],
+      t1: [-Math.SQRT1_2, 0, Math.SQRT1_2], t2: [0, 1, 0], convex: true,
+      stops: [{ point: [0.0085, 0, 0], normal: [0, 0, 1] }],
+    };
+    const bossFoot: RoundEdge = {
+      kind: 'circle', centre: [0, 0, 0], axis: [0, 0, 1], radius: 0.008, ref: [1, 0, 0], segments: 32,
+      n1: [0, 0, 1], n2: [1, 0, 0], t1: [1, 0, 0], t2: [0, 0, 1], convex: false,
+    };
+    const alone = edgeRoundSolids([{ mode: 'fillet', size: 0.0015, edges: [ribTop] }], 16).cutters[0];
+    const withBoss = edgeRoundSolids([{ mode: 'fillet', size: 0.0015, edges: [ribTop, bossFoot] }], 16).cutters[0];
+    expect(alone).toMatch(/\[0, 0, 1, 0\]/);
+    expect(withBoss).toMatch(/\[0, 0, 1, 0\.0015\]/);
+  });
+
+  it('repairs circular hole rims whose t1/convex was flipped by flat-face triangulation', () => {
+    // A counterbore inner through-hole rim (n1 = +Z, wall goes down t2 = -Z, wall normal n2 = -X):
+    // true geometry is convex with t1 = +X, but a wrapped flat-face triangle flipped t1 = -X and convex = false.
+    const flippedHoleRim: RoundEdge = {
+      kind: 'circle', centre: [0, 0, 0], axis: [0, 0, 1], radius: 0.00275, ref: [1, 0, 0], segments: 32,
+      n1: [0, 0, 1], n2: [-1, 0, 0], t1: [-1, 0, 0], t2: [0, 0, -1], convex: false,
+    };
+    const fixed = normalizeRoundEdge(flippedHoleRim);
+    expect(fixed.convex).toBe(true);
+    expect(fixed.kind === 'circle' && fixed.t1).toEqual([1, 0, 0]);
+
+    // edgeRoundSolids routes the repaired rim to cutters, never fillers.
+    const { cutters, fillers } = edgeRoundSolids([{ mode: 'chamfer', size: 0.0008, edges: [flippedHoleRim] }], 32);
+    expect(cutters).toHaveLength(1);
+    expect(fillers).toHaveLength(0);
+
+    // A genuine concave counterbore outer floor rim (n1 = +Z, wall goes UP t2 = +Z, n2 = -X, t1 = -X) stays concave.
+    const concaveFloorRim: RoundEdge = {
+      kind: 'circle', centre: [0, 0, 0], axis: [0, 0, 1], radius: 0.00475, ref: [1, 0, 0], segments: 32,
+      n1: [0, 0, 1], n2: [-1, 0, 0], t1: [-1, 0, 0], t2: [0, 0, 1], convex: false,
+    };
+    expect(normalizeRoundEdge(concaveFloorRim)).toBe(concaveFloorRim);
+  });
+});
+
+describe('faceted curves and per-edge clamping', () => {
+  /** Extrudes a 2D CCW polygon along Z in [0, h] into a closed outward-wound mesh. */
+  function extrudePolygon(pts: [number, number][], h: number): { positions: number[]; faces: number[] } {
+    const n = pts.length;
+    const positions: number[] = [];
+    for (const [x, y] of pts) positions.push(x, y, 0);
+    for (const [x, y] of pts) positions.push(x, y, h);
+    const botCenter = 2 * n;
+    const topCenter = 2 * n + 1;
+    let cx = 0, cy = 0;
+    for (const [x, y] of pts) { cx += x / n; cy += y / n; }
+    positions.push(cx, cy, 0, cx, cy, h);
+    const faces: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const next = (i + 1) % n;
+      // Bottom (-Z)
+      faces.push(botCenter, next, i);
+      // Top (+Z)
+      faces.push(topCenter, n + i, n + next);
+      // Side wall (outward)
+      faces.push(i, next, n + next, i, n + next, n + i);
+    }
+    return { positions, faces };
+  }
+
+  it('does not cap a faceted curve loop to half of a single tiny facet', () => {
+    // 20x10 mm plate, 4 mm thick, with faceted 90° corners (2 facets per corner:
+    // normals at 22.5° and 67.5°, each > 20° crease from neighbours so every
+    // corner facet is its own straight edge ~0.76 mm long on an R = 1 mm corner).
+    const r = 0.001;
+    const hx = 0.01, hy = 0.005;
+    const stepsPerCorner = 2;
+    const pts: [number, number][] = [];
+    const corners: [number, number, number][] = [
+      [hx - r, hy - r, 0],
+      [-hx + r, hy - r, Math.PI / 2],
+      [-hx + r, -hy + r, Math.PI],
+      [hx - r, -hy + r, (3 * Math.PI) / 2],
+    ];
+    for (const [cx, cy, a0] of corners) {
+      for (let k = 0; k <= stepsPerCorner; k++) {
+        const a = a0 + (k / stepsPerCorner) * (Math.PI / 2);
+        pts.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]);
+      }
+    }
+    const { positions, faces } = extrudePolygon(pts, 0.004);
+    const found = findFeatureEdges(positions, faces, { up: [0, 0, 1] });
+    const topBefore = found.edges.filter((e) => e.top);
+    expect(topBefore.length).toBe(12);
+    // Before relaxation, adjacent-hop curve facets crush maxSizeFor below 0.4 mm (~0.38 mm).
+    const maxBefore = maxSizeFor(topBefore, 'chamfer');
+    expect(maxBefore).toBeLessThan(0.0004);
+
+    relaxFacetedCurveSetbacks(found, positions, faces);
+    const topAfter = found.edges.filter((e) => e.top);
+    const maxAfter = maxSizeFor(topAfter, 'chamfer');
+    // After relaxation, a practical 0.4 mm bevel easily fits the top loop (~0.707 mm),
+    // while still respecting the 4 mm plate thickness (max <= 2 mm).
+    expect(maxAfter).toBeGreaterThanOrEqual(0.0004);
+    expect(maxAfter).toBeLessThanOrEqual(0.002 + 1e-6);
+  });
+
+  it('clamps tight facet edges individually while keeping roomy edges at requested size', () => {
+    const roomy = {
+      id: 0, edge: topFront, points: [topFront.a as [number, number, number], topFront.b as [number, number, number]],
+      closed: false, surfaces: [0, 1] as [number, number], angleDeg: 90, maxSetback: 0.005,
+      top: true, bottom: false, vertical: false,
+    };
+    const tightEdge: RoundEdge = { ...topFront, a: [0.01, -0.01, 0.01], b: [0.0101, -0.0099, 0.01] };
+    const tight = {
+      ...roomy, id: 1, edge: tightEdge, maxSetback: 0.00012,
+    };
+    const tinyEdge: RoundEdge = { ...topFront, a: [0.0101, -0.0099, 0.01], b: [0.01011, -0.00989, 0.01] };
+    const tiny = {
+      ...roomy, id: 2, edge: tinyEdge, maxSetback: 0.000005, // < 0.01 mm
+    };
+
+    const plan = planClampedRoundings([roomy, tight, tiny], 'chamfer', 0.0004);
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) return;
+    expect(plan.clampedCount).toBe(1);
+    expect(plan.skippedCount).toBe(1);
+    expect(plan.groups).toHaveLength(2);
+    expect(plan.groups.find((g) => Math.abs(g.size - 0.0004) < 1e-9)?.edges).toEqual([topFront]);
+    expect(plan.groups.find((g) => g.size < 0.0004)?.size).toBeCloseTo(0.00012, 6);
+
+    // Every planned group emits valid OpenSCAD cutters.
+    const { cutters } = edgeRoundSolids(
+      plan.groups.map((g) => ({ mode: 'chamfer' as const, size: g.size, edges: g.edges })),
+      32,
+    );
+    expect(cutters).toHaveLength(2);
+
+    // Rejects when a single picked edge cannot fit, or when no edge fits.
+    expect(planClampedRoundings([tight], 'chamfer', 0.0004).ok).toBe(false);
+    expect(planClampedRoundings([roomy, tight], 'chamfer', 0.01).ok).toBe(false);
   });
 });

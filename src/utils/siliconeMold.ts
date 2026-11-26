@@ -24,6 +24,7 @@ import type { ManifoldToplevel, CrossSection, Manifold } from 'manifold-3d';
 import { castMaterial, castWeightG, isSiliconeId, mixGrams, type SiliconeId } from './castMaterials';
 import { trappedAirInSoup } from './trappedAir';
 import { printedMeshOf } from './printedMesh';
+import { analyzeMesh } from './meshIntegrity';
 
 /** Starts the pour box's warning of air held at other high points; the Silicone chain vents them and drops it. */
 export const OTHER_PEAKS_PREFIX = 'A pour through the hole traps air at';
@@ -278,9 +279,108 @@ function soupVolumeBelow(wasm: ManifoldToplevel, soup: ArrayLike<number>, zCut: 
   }
 }
 
+/**
+ * Welds vertices coinciding within `epsMm` (or exact float32 when `epsMm <= 0`),
+ * drops triangles collapsed by the weld and opposing zero-volume pairs, and
+ * compacts unused vertices. Returns null if the result is not a closed,
+ * consistently-wound positive-volume solid.
+ */
+function weldAndCleanMesh(raw: PourBoxMesh, epsMm: number): PourBoxMesh | null {
+  const nVerts = raw.positions.length / 3;
+  if (nVerts === 0 || raw.faces.length === 0) return raw;
+  const ids = new Map<string, number>();
+  const remap = new Uint32Array(nVerts);
+  const pos: number[] = [];
+  const inv = epsMm > 0 ? 1 / epsMm : 0;
+  for (let v = 0; v < nVerts; v++) {
+    const rx = raw.positions[v * 3];
+    const ry = raw.positions[v * 3 + 1];
+    const rz = raw.positions[v * 3 + 2];
+    const qx = inv > 0 ? Math.round(rx * inv) : Math.fround(rx);
+    const qy = inv > 0 ? Math.round(ry * inv) : Math.fround(ry);
+    const qz = inv > 0 ? Math.round(rz * inv) : Math.fround(rz);
+    const key = `${qx},${qy},${qz}`;
+    let id = ids.get(key);
+    if (id === undefined) {
+      id = ids.size;
+      ids.set(key, id);
+      pos.push(inv > 0 ? qx * epsMm : qx, inv > 0 ? qy * epsMm : qy, inv > 0 ? qz * epsMm : qz);
+    }
+    remap[v] = id;
+  }
+
+  const tris: [number, number, number][] = [];
+  const canonMap = new Map<string, number[]>();
+  const alive: boolean[] = [];
+  for (let i = 0; i + 2 < raw.faces.length; i += 3) {
+    const a = remap[raw.faces[i]];
+    const b = remap[raw.faces[i + 1]];
+    const c = remap[raw.faces[i + 2]];
+    if (a === b || b === c || a === c) continue;
+    const s0 = a < b ? (a < c ? a : c) : (b < c ? b : c);
+    const s2 = a > b ? (a > c ? a : c) : (b > c ? b : c);
+    const s1 = a + b + c - s0 - s2;
+    const key = `${s0},${s1},${s2}`;
+    const existing = canonMap.get(key);
+    let cancelled = false;
+    if (existing) {
+      for (let k = 0; k < existing.length; k++) {
+        const idx = existing[k];
+        if (!alive[idx]) continue;
+        const [ea, eb, ec] = tris[idx];
+        const sameWinding =
+          (a === ea && b === eb && c === ec) ||
+          (a === eb && b === ec && c === ea) ||
+          (a === ec && b === ea && c === eb);
+        if (!sameWinding) {
+          alive[idx] = false;
+          cancelled = true;
+          break;
+        }
+      }
+    }
+    if (!cancelled) {
+      const idx = tris.length;
+      tris.push([a, b, c]);
+      alive.push(true);
+      if (existing) existing.push(idx);
+      else canonMap.set(key, [idx]);
+    }
+  }
+
+  const used = new Int32Array(pos.length / 3).fill(-1);
+  const outPositions: number[] = [];
+  const outFaces: number[] = [];
+  for (let i = 0; i < tris.length; i++) {
+    if (!alive[i]) continue;
+    const tri = tris[i];
+    for (let k = 0; k < 3; k++) {
+      const oldIdx = tri[k];
+      let newIdx = used[oldIdx];
+      if (newIdx === -1) {
+        newIdx = outPositions.length / 3;
+        used[oldIdx] = newIdx;
+        outPositions.push(pos[oldIdx * 3], pos[oldIdx * 3 + 1], pos[oldIdx * 3 + 2]);
+      }
+      outFaces.push(newIdx);
+    }
+  }
+  const check = analyzeMesh(outPositions, outFaces);
+  if (!check || !check.closed || !check.consistentlyWound || check.volume <= 0) return null;
+  return { positions: outPositions, faces: outFaces };
+}
+
 function meshOf(m: Manifold): PourBoxMesh {
   // Without the slivers booleans leave along their seams (see printedMesh.ts).
-  return printedMeshOf(m);
+  const raw = printedMeshOf(m);
+  // Collapse sub-0.1 µm boolean crease slivers that Manifold.simplify leaves on
+  // sharp corners and that would otherwise weld into degenerate triangles once
+  // converted to float32 metres in the scene or binary STL.
+  for (const eps of [1e-4, 1e-5, 0]) {
+    const cleaned = weldAndCleanMesh(raw, eps);
+    if (cleaned) return cleaned;
+  }
+  return raw;
 }
 
 function extent(cs: CrossSection): [number, number] {
@@ -414,9 +514,13 @@ function buildSplitPourSleeve(
     const spanV = lb.max[1] - lb.min[1];
     const vMid = Math.round(((lb.min[1] + lb.max[1]) / 2) * 16) / 16;
 
-    const ringL = keep(outerL.subtract(innerL));
     const fullH = sleeveTop - sleeveBottom;
-    const baseSleeve = keep(keep(ringL.extrude(fullH)).translate([0, 0, sleeveBottom]));
+    // Build the outer sleeve solid first (without innerL subtracted) and extend
+    // past sleeveTop so pads, rails, and sleeve never share coplanar faces on
+    // innerL, outerL, or z = sleeveTop; subtract innerCut and trim z = sleeveTop
+    // cleanly once at the end.
+    const outerSleeve = keep(keep(outerL.extrude(fullH + 0.6)).translate([0, 0, sleeveBottom]));
+    const outerInset = keep(outerL.offset(-Math.min(0.15, wall * 0.25), 'Miter'));
 
     const DOVE_H = 3.6;
     const flare = 1.8;
@@ -448,7 +552,7 @@ function buildSplitPourSleeve(
     const uMaxInner = innerAtMid[1];
 
     const innerCut = keep(keep(innerL.extrude(fullH + 4)).translate([0, 0, sleeveBottom - 2]));
-    const padAndRails: Manifold[] = [baseSleeve];
+    const padAndRails: Manifold[] = [outerSleeve];
     const clipsLocal: Manifold[] = [];
     const tongues: Manifold[] = [];
     const grooves: Manifold[] = [];
@@ -460,19 +564,21 @@ function buildSplitPourSleeve(
       const uPad = uOut + sx * padExtra;
       const uReachIn = uIn - sx * Math.max(2.0, (uMaxOuter - uMinOuter) * 0.15);
 
-      // Seam pad: flush inside outerL at zPadStart, 45° ramp out to uPad at zClipSeat, vertical to sleeveTop.
+      // Seam pad: inset inside outerL at zPadStart so the 45° ramp exits outerL
+      // transversely without coplanar curved faces, and extended past sleeveTop.
       const padBox2D = keep(poly2D(wasm, [
         [uReachIn, vAt - padHalfV],
         [uPad, vAt - padHalfV],
         [uPad, vAt + padHalfV],
         [uReachIn, vAt + padHalfV],
       ]));
-      const padFoot2D = keep(padBox2D.intersect(outerL));
+      const padFoot2D = keep(padBox2D.intersect(outerInset));
       const padFoot = keep(keep(padFoot2D.extrude(0.02)).translate([0, 0, zPadStart]));
-      const padBody = keep(keep(padBox2D.extrude(clipH)).translate([0, 0, zClipSeat]));
+      const padBody = keep(keep(padBox2D.extrude(clipH + 0.4)).translate([0, 0, zClipSeat]));
       padAndRails.push(keep(wasm.Manifold.hull([padFoot, padBody])));
 
-      // Tapered dovetail rail: 45° ramp from outerL at zPadStart to full dovetail at zClipSeat..sleeveTop.
+      // Tapered dovetail rail: 45° ramp from inset foot at zPadStart to full dovetail at zClipSeat,
+      // and tapered rail extending past sleeveTop (trimmed cleanly at sleeveTop).
       const wInDelta = 0.5 * (flare / DOVE_H);
       const railTrap2D = (neck: number) => keep(poly2D(wasm, [
         [uPad - sx * 0.5, vAt - (neck - wInDelta)],
@@ -486,8 +592,10 @@ function buildSplitPourSleeve(
         [uOut, vAt + neckBot],
         [uReachIn, vAt + neckBot],
       ]))));
+      const railTopOver = 0.2;
+      const neckTopOver = neckBot - (taper / clipH) * (clipH + railTopOver);
       const rBot = keep(keep(railTrap2D(neckBot).extrude(0.02)).translate([0, 0, zClipSeat]));
-      const rTop = keep(keep(railTrap2D(neckTop).extrude(0.02)).translate([0, 0, sleeveTop - 0.02]));
+      const rTop = keep(keep(railTrap2D(neckTopOver).extrude(0.02)).translate([0, 0, sleeveTop + railTopOver - 0.02]));
       padAndRails.push(keep(wasm.Manifold.hull([rBot, rTop])));
       if (!rFoot2D.isEmpty() && rampH > 0.2) {
         const rFoot = keep(keep(rFoot2D.extrude(0.02)).translate([0, 0, zPadStart]));
@@ -500,7 +608,7 @@ function buildSplitPourSleeve(
         const t2d = keep(poly2D(wasm, [[uMid - 0.6, vAt - 0.4], [uMid + 0.6, vAt - 0.4], [uMid + 0.6, vAt + 1.3], [uMid - 0.6, vAt + 1.3]]));
         const tBase2d = keep(poly2D(wasm, [[uMid - 0.6, vAt - 0.4], [uMid + 0.6, vAt - 0.4], [uMid + 0.6, vAt - 0.1], [uMid - 0.6, vAt - 0.1]]));
         const t0 = keep(keep(tBase2d.extrude(0.02)).translate([0, 0, zClipSeat + 0.2]));
-        const t1 = keep(keep(t2d.extrude(clipH - 2.0)).translate([0, 0, zClipSeat + 2.0]));
+        const t1 = keep(keep(t2d.extrude(Math.max(0.5, clipH - 2.2))).translate([0, 0, zClipSeat + 2.0]));
         tongues.push(keep(wasm.Manifold.hull([t0, t1])));
 
         const g2d = keep(poly2D(wasm, [[uMid - 0.85, vAt - 0.2], [uMid + 0.85, vAt - 0.2], [uMid + 0.85, vAt + 1.65], [uMid - 0.85, vAt + 1.65]]));
@@ -536,7 +644,10 @@ function buildSplitPourSleeve(
       clipsLocal.push(keep(largestSolid(clipBody.subtract(pocket))));
     }
 
-    const fullCollar = keep(keep(wasm.Manifold.union(padAndRails)).subtract(innerCut));
+    const fullCollar = keep(
+      keep(keep(wasm.Manifold.union(padAndRails)).subtract(innerCut))
+        .trimByPlane([0, 0, -1], -sleeveTop),
+    );
 
     // Orthogonal split at v = vMid (nSplit = [0, 1]):
     // Print halves get 0.02 mm clearance; assembled halves meet flush on v = vMid (0 mm³ overlap).

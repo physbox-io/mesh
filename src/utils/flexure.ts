@@ -82,6 +82,23 @@ export interface FlexureDesignInput {
   widthMm?: number;
   folds?: number;
   archRiseMm?: number;
+  /** Optional joint name to target on multi-joint bodies (defaults to first hinge/slide joint). */
+  jointName?: string;
+  /** Optional operating deflection to check stress/strain/SF (deg for hinge, mm for slide). */
+  targetDeflection?: number;
+}
+
+export interface FlexureOperatingPoint {
+  /** Requested deflection (deg for hinge, mm for slide). */
+  deflection: number;
+  /** Peak bending stress at the operating deflection (MPa). */
+  stressMPa: number;
+  /** Peak surface strain at the operating deflection (dimensionless). */
+  strain: number;
+  /** Safety factor against filament yield (yieldMPa / stressMPa). */
+  safetyFactor: number;
+  /** Restoring torque (N·m for hinge) or force (N for slide) at the operating deflection. */
+  forceOrTorque: number;
 }
 
 export interface FlexureEvaluation {
@@ -90,7 +107,19 @@ export interface FlexureEvaluation {
   snapForceN: number;
   /** Peak bending stress at full rated travel (MPa). */
   peakStressMPa: number;
-  /** Actionable engineering warnings (e.g. PLA creep, nozzle wall floor, Q-ratio). */
+  /** Second moment of area I = b·t³/12 (m⁴). */
+  secondMomentM4: number;
+  /** Peak surface strain ε = σ / E at full rated travel (dimensionless). */
+  maxStrain: number;
+  /** Filament yield strain ε_y = σ_y / E (dimensionless). */
+  yieldStrain: number;
+  /** Safety factor against yield at full rated travel (or at targetDeflection if supplied). */
+  safetyFactor: number;
+  /** Peak restoring torque (N·m, hinge) or force (N, slide) at rated travel (or snap force for bistable). */
+  maxForceOrTorque: number;
+  /** Present when `targetDeflection` is supplied in `FlexureDesignInput`. */
+  operating?: FlexureOperatingPoint;
+  /** Actionable engineering warnings (e.g. PLA creep, nozzle wall floor, Q-ratio, over-stress). */
   warnings: string[];
 }
 
@@ -121,7 +150,7 @@ export function evaluateFlexureSpec(input: FlexureDesignInput, jointType: 'hinge
   const mech = FLEXURE_FILAMENT_PROPS[filId];
   const fSpec = filamentSpec(filId);
 
-  const thicknessMm = Math.max(0.4, Math.min(4.0, input.thicknessMm ?? (filId === 'tpu' ? 1.2 : 0.8)));
+  const thicknessMm = Math.max(0.4, Math.min(4.0, input.thicknessMm ?? Math.max(1.0, fSpec.minWallMm)));
   const lengthMm = Math.max(4.0, Math.min(80.0, input.lengthMm ?? (jointType === 'hinge' ? 12 : 16)));
   const widthMm = Math.max(2.0, Math.min(50.0, input.widthMm ?? 8.0));
   const folds = kind === 'serpentine' ? Math.max(2, Math.min(8, Math.round(input.folds ?? 4))) : undefined;
@@ -140,6 +169,7 @@ export function evaluateFlexureSpec(input: FlexureDesignInput, jointType: 'hinge
   let maxTravel: number;
   let snapForceN = 0;
   let peakStressMPa: number;
+  let maxForceOrTorque: number;
   const warnings: string[] = [];
 
   if (thicknessMm + 1e-6 < fSpec.minWallMm) {
@@ -154,6 +184,7 @@ export function evaluateFlexureSpec(input: FlexureDesignInput, jointType: 'hinge
     const thetaMaxRad = Math.min(Math.PI * 0.75, (2 * sigmaAllow * L) / (E * t));
     maxTravel = +((thetaMaxRad * 180) / Math.PI).toFixed(1);
     peakStressMPa = +(((E * t * thetaMaxRad) / (2 * L)) / 1e6).toFixed(1);
+    maxForceOrTorque = +(stiffness * thetaMaxRad).toPrecision(4);
     if (mech.creepsUnderSustainedLoad) {
       warnings.push('PLA creeps under sustained deflection; switch to PETG or TPU if held bent.');
     }
@@ -166,6 +197,7 @@ export function evaluateFlexureSpec(input: FlexureDesignInput, jointType: 'hinge
     const xMaxM = Math.min(L * 0.65, N * deltaSegMax);
     maxTravel = +(xMaxM * 1000).toFixed(2);
     peakStressMPa = +(((3 * E * t * (xMaxM / N)) / (L * L)) / 1e6).toFixed(1);
+    maxForceOrTorque = +(stiffness * xMaxM).toPrecision(4);
     if (mech.creepsUnderSustainedLoad) {
       warnings.push('PLA creeps under sustained spring load; PETG is strongly recommended for compliant springs.');
     }
@@ -179,6 +211,7 @@ export function evaluateFlexureSpec(input: FlexureDesignInput, jointType: 'hinge
     snapForceN = +(stiffness * h0 / (3 * Math.sqrt(3))).toFixed(3);
     maxTravel = +(2 * (archRiseMm ?? 2.4)).toFixed(2);
     peakStressMPa = +(((E * (1.5 * h0 * t + 0.5 * h0 * h0)) / (L * L)) / 1e6).toFixed(1);
+    maxForceOrTorque = snapForceN;
 
     if (qRatio < 1.6) {
       warnings.push(
@@ -197,6 +230,55 @@ export function evaluateFlexureSpec(input: FlexureDesignInput, jointType: 'hinge
     }
   }
 
+  const yieldStrain = +((mech.yieldMPa * 1e6) / E).toPrecision(4);
+  const maxStrain = +((peakStressMPa * 1e6) / E).toPrecision(4);
+  const ratedSafetyFactor = peakStressMPa > 1e-6 ? +(mech.yieldMPa / peakStressMPa).toFixed(2) : 99;
+
+  let operating: FlexureOperatingPoint | undefined;
+  if (input.targetDeflection !== undefined && Number.isFinite(input.targetDeflection) && input.targetDeflection >= 0) {
+    const req = input.targetDeflection;
+    let opStressPa: number;
+    let opForce: number;
+    if (kind === 'blade' || kind === 'cross_pivot') {
+      const rad = (req * Math.PI) / 180;
+      opStressPa = (E * t * rad) / (2 * L);
+      opForce = stiffness * rad;
+    } else if (kind === 'serpentine') {
+      const N = folds ?? 4;
+      const xM = req / 1000;
+      opStressPa = (3 * E * t * (xM / N)) / (L * L);
+      opForce = stiffness * xM;
+    } else {
+      // Bistable peak stress occurs at the snap-through midpoint q = h0
+      const h0 = (archRiseMm ?? 2.4) / 1000;
+      const frac = Math.min(1, (req / 1000) / Math.max(1e-6, h0));
+      opStressPa = ((E * (1.5 * h0 * t + 0.5 * h0 * h0)) / (L * L)) * frac;
+      opForce = Math.abs(bistableForce(req / 1000, {
+        kind, filament: filId, thicknessMm, lengthMm, widthMm, archRiseMm, stiffness, maxTravel,
+      }));
+    }
+    const opStressMPa = +(opStressPa / 1e6).toFixed(2);
+    const opStrain = +(opStressPa / E).toPrecision(4);
+    const opSF = opStressMPa > 1e-6 ? +(mech.yieldMPa / opStressMPa).toFixed(2) : 99;
+    operating = {
+      deflection: req,
+      stressMPa: opStressMPa,
+      strain: opStrain,
+      safetyFactor: opSF,
+      forceOrTorque: +opForce.toPrecision(4),
+    };
+    const unit = jointType === 'hinge' ? '°' : ' mm';
+    if (opSF < 1.0) {
+      warnings.push(
+        `Target deflection (${req}${unit}) exceeds ${fSpec.label} yield (σ = ${opStressMPa.toFixed(1)} MPa > ${mech.yieldMPa} MPa, SF = ${opSF.toFixed(2)}); lengthen leaf or reduce thickness.`,
+      );
+    } else if (opSF < 1.4) {
+      warnings.push(
+        `Target deflection (${req}${unit}) has low fatigue safety factor (SF = ${opSF.toFixed(2)} < 1.4; σ = ${opStressMPa.toFixed(1)} MPa).`,
+      );
+    }
+  }
+
   return {
     spec: {
       kind,
@@ -211,6 +293,12 @@ export function evaluateFlexureSpec(input: FlexureDesignInput, jointType: 'hinge
     },
     snapForceN,
     peakStressMPa,
+    secondMomentM4: +I.toPrecision(5),
+    maxStrain,
+    yieldStrain,
+    safetyFactor: operating ? operating.safetyFactor : ratedSafetyFactor,
+    maxForceOrTorque,
+    ...(operating ? { operating } : {}),
     warnings,
   };
 }
@@ -603,9 +691,12 @@ export function applyFlexureToNode(
   node: SceneNode,
   input: FlexureDesignInput = {},
 ): { node: SceneNode; evaluation: FlexureEvaluation } | null {
-  const jointIdx = (node.joints ?? []).findIndex((j) => j.type === 'hinge' || j.type === 'slide');
+  const joints = node.joints ?? [];
+  const jointIdx = input.jointName
+    ? joints.findIndex((j) => j.name === input.jointName && (j.type === 'hinge' || j.type === 'slide'))
+    : joints.findIndex((j) => j.type === 'hinge' || j.type === 'slide');
   if (jointIdx < 0) return null;
-  const baseJoint = node.joints[jointIdx];
+  const baseJoint = joints[jointIdx];
   const jointType = baseJoint.type as 'hinge' | 'slide';
 
   const mergedInput: FlexureDesignInput = {
@@ -616,6 +707,7 @@ export function applyFlexureToNode(
     widthMm: input.widthMm ?? node.flexure?.widthMm,
     folds: input.folds ?? node.flexure?.folds,
     archRiseMm: input.archRiseMm ?? node.flexure?.archRiseMm,
+    targetDeflection: input.targetDeflection,
   };
 
   const evaluation = evaluateFlexureSpec(mergedInput, jointType);
@@ -655,7 +747,7 @@ export function applyFlexureToNode(
 
   const cleanGeoms = (node.geoms ?? []).filter((g) => !g.name.startsWith('flexure_'));
   const flexureGeoms = buildFlexureGeoms(updatedJoint, spec, cleanGeoms, node.children ?? []);
-  const nextJoints = node.joints.map((j, i) => (i === jointIdx ? updatedJoint : { ...j }));
+  const nextJoints = joints.map((j, i) => (i === jointIdx ? updatedJoint : { ...j }));
 
   return {
     node: {
@@ -666,4 +758,942 @@ export function applyFlexureToNode(
     },
     evaluation,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Howell PRBM Primitives: Cantilever Pawl / Latch, Parallel-Guiding Flexures,
+// and Multi-Flexure Compliant Parallel-Jaw Gripper
+// ---------------------------------------------------------------------------
+
+/** Howell's Pseudo-Rigid-Body Model constants for a fixed-free cantilever beam. */
+export const HOWELL_PRBM_GAMMA = 0.85;
+export const HOWELL_PRBM_K_THETA = 2.65;
+
+export interface CantileverBeamInput {
+  filament?: string;
+  thicknessMm?: number;
+  lengthMm?: number;
+  widthMm?: number;
+  /** Tip deflection to evaluate (mm). Defaults to max safe deflection at SF = 1.4. */
+  deflectionMm?: number;
+  /** Optional catch ramp angle (deg, 5..60) for snap-latch / pawl engagement force. */
+  rampAngleDeg?: number;
+  /** Sliding friction coefficient for ramp engagement (default 0.22 for PETG/PLA). */
+  frictionCoeff?: number;
+}
+
+export interface CantileverBeamEvaluation {
+  filament: FilamentId;
+  thicknessMm: number;
+  lengthMm: number;
+  widthMm: number;
+  secondMomentM4: number;
+  /** Linear tip stiffness k = 3·E·I / L³ (N/m). */
+  tipStiffnessNm: number;
+  /** Howell PRBM torsional stiffness K = γ·K_Θ·E·I / L (N·m/rad). */
+  prbmStiffnessNmRad: number;
+  /** Characteristic pivot offset (1 - γ)·L from the clamped root (mm). */
+  prbmPivotOffsetMm: number;
+  /** Maximum safe tip deflection at safety factor 1.4 (mm). */
+  maxSafeDeflectionMm: number;
+  /** Evaluated tip deflection (mm). */
+  deflectionMm: number;
+  /** Normal tip restoring force at `deflectionMm` (N). */
+  tipForceN: number;
+  /** Axial push force required to deflect the pawl over a ramp (N); 0 if no rampAngleDeg. */
+  engageForceN: number;
+  peakStressMPa: number;
+  maxStrain: number;
+  yieldStrain: number;
+  safetyFactor: number;
+  warnings: string[];
+}
+
+/**
+ * Evaluates a fixed-free compliant cantilever beam (or snap-fit pawl/latch)
+ * using Euler-Bernoulli bending + Howell's Pseudo-Rigid-Body Model.
+ */
+export function evaluateCantileverBeam(input: CantileverBeamInput = {}): CantileverBeamEvaluation {
+  const filId = resolveFilamentId(input.filament);
+  const mech = FLEXURE_FILAMENT_PROPS[filId];
+  const fSpec = filamentSpec(filId);
+
+  const thicknessMm = Math.max(0.4, Math.min(6.0, input.thicknessMm ?? (filId === 'tpu' ? 1.4 : 1.0)));
+  const lengthMm = Math.max(5.0, Math.min(120.0, input.lengthMm ?? 20.0));
+  const widthMm = Math.max(2.0, Math.min(60.0, input.widthMm ?? 8.0));
+
+  const E = mech.modulusGPa * 1e9;
+  const sigmaAllow = (mech.yieldMPa * 1e6) / 1.4;
+  const t = thicknessMm / 1000;
+  const L = lengthMm / 1000;
+  const b = widthMm / 1000;
+  const I = (b * t * t * t) / 12;
+
+  const tipStiffnessNm = (3 * E * I) / (L * L * L);
+  const prbmStiffnessNmRad = (HOWELL_PRBM_GAMMA * HOWELL_PRBM_K_THETA * E * I) / L;
+  const prbmPivotOffsetMm = +((1 - HOWELL_PRBM_GAMMA) * lengthMm).toFixed(2);
+  const maxSafeDeflectionM = Math.min(L * 0.35, (2 * sigmaAllow * L * L) / (3 * E * t));
+  const maxSafeDeflectionMm = +(maxSafeDeflectionM * 1000).toFixed(2);
+
+  const deflectionMm = input.deflectionMm !== undefined && Number.isFinite(input.deflectionMm)
+    ? Math.max(0, input.deflectionMm)
+    : maxSafeDeflectionMm;
+  const delta = deflectionMm / 1000;
+
+  const tipForceN = +(tipStiffnessNm * delta).toPrecision(4);
+  const peakStressPa = (3 * E * t * delta) / (2 * L * L);
+  const peakStressMPa = +(peakStressPa / 1e6).toFixed(2);
+  const yieldStrain = +((mech.yieldMPa * 1e6) / E).toPrecision(4);
+  const maxStrain = +(peakStressPa / E).toPrecision(4);
+  const safetyFactor = peakStressMPa > 1e-6 ? +(mech.yieldMPa / peakStressMPa).toFixed(2) : 99;
+
+  let engageForceN = 0;
+  if (input.rampAngleDeg !== undefined && Number.isFinite(input.rampAngleDeg)) {
+    const alpha = (Math.max(5, Math.min(60, input.rampAngleDeg)) * Math.PI) / 180;
+    const mu = Math.max(0, Math.min(0.8, input.frictionCoeff ?? 0.22));
+    const denom = Math.max(0.05, Math.cos(alpha) - mu * Math.sin(alpha));
+    engageForceN = +(tipForceN * ((Math.sin(alpha) + mu * Math.cos(alpha)) / denom)).toPrecision(4);
+  }
+
+  const warnings: string[] = [];
+  if (thicknessMm + 1e-6 < fSpec.minWallMm) {
+    warnings.push(
+      `${fSpec.label} minimum reliable two-perimeter wall is ${fSpec.minWallMm} mm (beam is ${thicknessMm.toFixed(2)} mm).`,
+    );
+  }
+  if (mech.creepsUnderSustainedLoad) {
+    warnings.push('PLA creeps under sustained latch preload; PETG or ASA is recommended for snap pawls.');
+  }
+  if (safetyFactor < 1.0) {
+    warnings.push(
+      `Cantilever deflection (${deflectionMm.toFixed(2)} mm) exceeds ${fSpec.label} yield (σ = ${peakStressMPa.toFixed(1)} MPa > ${mech.yieldMPa} MPa, SF = ${safetyFactor.toFixed(2)}).`,
+    );
+  } else if (safetyFactor < 1.4) {
+    warnings.push(
+      `Cantilever deflection (${deflectionMm.toFixed(2)} mm) has low fatigue safety factor (SF = ${safetyFactor.toFixed(2)} < 1.4).`,
+    );
+  }
+
+  return {
+    filament: filId,
+    thicknessMm: +thicknessMm.toFixed(2),
+    lengthMm: +lengthMm.toFixed(2),
+    widthMm: +widthMm.toFixed(2),
+    secondMomentM4: +I.toPrecision(5),
+    tipStiffnessNm: +tipStiffnessNm.toPrecision(5),
+    prbmStiffnessNmRad: +prbmStiffnessNmRad.toPrecision(5),
+    prbmPivotOffsetMm,
+    maxSafeDeflectionMm,
+    deflectionMm: +deflectionMm.toFixed(2),
+    tipForceN,
+    engageForceN,
+    peakStressMPa,
+    maxStrain,
+    yieldStrain,
+    safetyFactor,
+    warnings,
+  };
+}
+
+export interface ParallelFlexureInput {
+  filament?: string;
+  thicknessMm?: number;
+  lengthMm?: number;
+  widthMm?: number;
+  /** Number of parallel guiding beams (2..6, default 2). */
+  numBeams?: number;
+  /** Center-to-center spacing between adjacent parallel beams (mm, default 10). */
+  beamSpacingMm?: number;
+  /** Guided lateral deflection to evaluate (mm). Defaults to max safe deflection at SF = 1.4. */
+  deflectionMm?: number;
+}
+
+export interface ParallelFlexureEvaluation {
+  filament: FilamentId;
+  thicknessMm: number;
+  lengthMm: number;
+  widthMm: number;
+  numBeams: number;
+  beamSpacingMm: number;
+  secondMomentM4: number;
+  /** Fixed-guided stiffness per beam k_leaf = 12·E·I / L³ (N/m). */
+  stiffnessPerBeamNm: number;
+  /** Total parallel lateral stiffness k_total = n · 12·E·I / L³ (N/m). */
+  totalStiffnessNm: number;
+  /** Max safe lateral deflection at SF = 1.4 (mm). */
+  maxSafeDeflectionMm: number;
+  /** Evaluated lateral deflection (mm). */
+  deflectionMm: number;
+  /** Total restoring force at `deflectionMm` (N). */
+  restoringForceN: number;
+  /** Parasitic axial foreshortening Δy = 3·δ² / (5·L) (mm). */
+  parasiticShiftMm: number;
+  peakStressMPa: number;
+  maxStrain: number;
+  yieldStrain: number;
+  safetyFactor: number;
+  warnings: string[];
+}
+
+/**
+ * Evaluates a parallel-guiding compliant flexure (N fixed-guided leaf springs
+ * in parallel), computing total lateral stiffness, parasitic foreshortening,
+ * peak bending stress, strain, and safety factor.
+ */
+export function evaluateParallelFlexure(input: ParallelFlexureInput = {}): ParallelFlexureEvaluation {
+  const filId = resolveFilamentId(input.filament);
+  const mech = FLEXURE_FILAMENT_PROPS[filId];
+  const fSpec = filamentSpec(filId);
+
+  const thicknessMm = Math.max(0.4, Math.min(4.0, input.thicknessMm ?? Math.max(1.0, fSpec.minWallMm)));
+  const lengthMm = Math.max(6.0, Math.min(100.0, input.lengthMm ?? 22.0));
+  const widthMm = Math.max(2.0, Math.min(60.0, input.widthMm ?? 10.0));
+  const numBeams = Math.max(2, Math.min(6, Math.round(input.numBeams ?? 2)));
+  const beamSpacingMm = Math.max(thicknessMm * 3, Math.min(80, input.beamSpacingMm ?? 10.0));
+
+  const E = mech.modulusGPa * 1e9;
+  const sigmaAllow = (mech.yieldMPa * 1e6) / 1.4;
+  const t = thicknessMm / 1000;
+  const L = lengthMm / 1000;
+  const b = widthMm / 1000;
+  const I = (b * t * t * t) / 12;
+
+  const stiffnessPerBeamNm = (12 * E * I) / (L * L * L);
+  const totalStiffnessNm = numBeams * stiffnessPerBeamNm;
+  const maxSafeDeflectionM = Math.min(L * 0.3, (sigmaAllow * L * L) / (3 * E * t));
+  const maxSafeDeflectionMm = +(maxSafeDeflectionM * 1000).toFixed(2);
+
+  const deflectionMm = input.deflectionMm !== undefined && Number.isFinite(input.deflectionMm)
+    ? Math.max(0, input.deflectionMm)
+    : maxSafeDeflectionMm;
+  const delta = deflectionMm / 1000;
+
+  const restoringForceN = +(totalStiffnessNm * delta).toPrecision(4);
+  const parasiticShiftMm = +(((3 * delta * delta) / (5 * L)) * 1000).toFixed(3);
+  const peakStressPa = (3 * E * t * delta) / (L * L);
+  const peakStressMPa = +(peakStressPa / 1e6).toFixed(2);
+  const yieldStrain = +((mech.yieldMPa * 1e6) / E).toPrecision(4);
+  const maxStrain = +(peakStressPa / E).toPrecision(4);
+  const safetyFactor = peakStressMPa > 1e-6 ? +(mech.yieldMPa / peakStressMPa).toFixed(2) : 99;
+
+  const warnings: string[] = [];
+  if (thicknessMm + 1e-6 < fSpec.minWallMm) {
+    warnings.push(
+      `${fSpec.label} minimum reliable two-perimeter wall is ${fSpec.minWallMm} mm (beam is ${thicknessMm.toFixed(2)} mm).`,
+    );
+  }
+  if (mech.creepsUnderSustainedLoad) {
+    warnings.push('PLA creeps under sustained load; switch to PETG or ASA for parallel-guiding flexures.');
+  }
+  if (safetyFactor < 1.0) {
+    warnings.push(
+      `Guided deflection (${deflectionMm.toFixed(2)} mm) exceeds ${fSpec.label} yield (σ = ${peakStressMPa.toFixed(1)} MPa > ${mech.yieldMPa} MPa, SF = ${safetyFactor.toFixed(2)}).`,
+    );
+  } else if (safetyFactor < 1.4) {
+    warnings.push(
+      `Guided deflection (${deflectionMm.toFixed(2)} mm) has low fatigue safety factor (SF = ${safetyFactor.toFixed(2)} < 1.4).`,
+    );
+  }
+  if (deflectionMm > beamSpacingMm - thicknessMm * 1.5) {
+    warnings.push(
+      `Deflection (${deflectionMm.toFixed(2)} mm) approaches beam spacing (${beamSpacingMm.toFixed(1)} mm); beams may collide.`,
+    );
+  }
+
+  return {
+    filament: filId,
+    thicknessMm: +thicknessMm.toFixed(2),
+    lengthMm: +lengthMm.toFixed(2),
+    widthMm: +widthMm.toFixed(2),
+    numBeams,
+    beamSpacingMm: +beamSpacingMm.toFixed(2),
+    secondMomentM4: +I.toPrecision(5),
+    stiffnessPerBeamNm: +stiffnessPerBeamNm.toPrecision(5),
+    totalStiffnessNm: +totalStiffnessNm.toPrecision(5),
+    maxSafeDeflectionMm,
+    deflectionMm: +deflectionMm.toFixed(2),
+    restoringForceN,
+    parasiticShiftMm,
+    peakStressMPa,
+    maxStrain,
+    yieldStrain,
+    safetyFactor,
+    warnings,
+  };
+}
+
+export interface CantileverPawlBuildInput extends CantileverBeamInput {
+  /** Catch nub protrusion height (mm, default 2.5). */
+  catchHeightMm?: number;
+  /** World origin of the anchor root (m, default [0, 0, 0.01]). */
+  origin?: [number, number, number];
+  idPrefix?: string;
+}
+
+export interface CantileverPawlBuildResult {
+  nodes: SceneNode[];
+  addedIds: string[];
+  evaluation: CantileverBeamEvaluation;
+}
+
+/**
+ * Builds a simulatable + 3D-printable compliant cantilever pawl / snap-latch:
+ * fixed base block + hinged pawl arm calibrated to Howell's PRBM stiffness,
+ * carrying a printable `flexure_cantilever` leaf that bends in the viewport.
+ */
+export function buildCantileverPawl(input: CantileverPawlBuildInput = {}): CantileverPawlBuildResult {
+  const evaluation = evaluateCantileverBeam({
+    ...input,
+    rampAngleDeg: input.rampAngleDeg ?? 30,
+  });
+  const prefix = input.idPrefix ?? 'cantilever_pawl';
+  const origin = input.origin ?? [0, 0, 0.01];
+  const mech = FLEXURE_FILAMENT_PROPS[evaluation.filament];
+  const rgba = mech.rgba;
+
+  const L = evaluation.lengthMm / 1000;
+  const t = evaluation.thicknessMm / 1000;
+  const b = evaluation.widthMm / 1000;
+  const catchH = Math.max(0.001, (input.catchHeightMm ?? 2.5) / 1000);
+  const pivotOffset = evaluation.prbmPivotOffsetMm / 1000;
+  const maxAngleDeg = Math.max(
+    4,
+    Math.min(45, +((Math.atan2(evaluation.maxSafeDeflectionMm / 1000, L * HOWELL_PRBM_GAMMA) * 180) / Math.PI).toFixed(1)),
+  );
+
+  const rootX = -pivotOffset;
+  const tipX = L - pivotOffset;
+
+  const leafGeom = leafBetween(
+    'flexure_cantilever',
+    new THREE.Vector3(rootX, 0, 0),
+    new THREE.Vector3(tipX, 0, 0),
+    new THREE.Vector3(0, 1, 0),
+    t * 0.5,
+    b * 0.5,
+    rgba,
+    0,
+    1,
+  );
+
+  const catchGeom: SceneGeom = {
+    name: 'pawl_catch',
+    type: 'box',
+    size: [Math.max(0.0015, catchH * 0.7), catchH * 0.5, b * 0.5],
+    pos: [+(tipX - catchH * 0.7).toFixed(6), +((t + catchH) * 0.5).toFixed(6), 0],
+    rgba: [...rgba],
+  };
+
+  const pawlJoint: SceneJoint = {
+    name: `${prefix}_hinge`,
+    type: 'hinge',
+    axis: [0, 0, 1],
+    pos: [0, 0, 0],
+    stiffness: evaluation.prbmStiffnessNmRad,
+    springref: 0,
+    limited: true,
+    range: [-maxAngleDeg, maxAngleDeg],
+  };
+
+  const pawlNode: SceneNode = {
+    id: `${prefix}_arm`,
+    name: 'Cantilever Pawl Arm',
+    type: 'body',
+    pos: [+pivotOffset.toFixed(6), 0, 0],
+    deformMaterial: 'plastic',
+    geoms: [catchGeom, leafGeom],
+    joints: [pawlJoint],
+    flexure: {
+      kind: 'blade',
+      filament: evaluation.filament,
+      thicknessMm: evaluation.thicknessMm,
+      lengthMm: evaluation.lengthMm,
+      widthMm: evaluation.widthMm,
+      stiffness: evaluation.prbmStiffnessNmRad,
+      maxTravel: maxAngleDeg,
+    },
+    children: [],
+  };
+  pawlNode.joints[0].damping = polymerDamping(
+    evaluation.prbmStiffnessNmRad,
+    movingInertia(pawlNode, pawlJoint),
+    mech.lossRatio,
+  );
+
+  const baseDepth = Math.max(0.006, t * 5);
+  const baseHeight = Math.max(0.008, t * 6);
+  const baseNode: SceneNode = {
+    id: `${prefix}_base`,
+    name: 'Cantilever Pawl Base',
+    type: 'body',
+    pos: [...origin],
+    deformMaterial: 'plastic',
+    geoms: [
+      {
+        name: 'anchor_block',
+        type: 'box',
+        size: [baseDepth * 0.5, baseHeight * 0.5, b * 0.5],
+        pos: [+(-baseDepth * 0.5).toFixed(6), 0, 0],
+        rgba: [0.35, 0.4, 0.48, 1],
+      },
+    ],
+    joints: [],
+    children: [pawlNode],
+  };
+
+  return {
+    nodes: [baseNode],
+    addedIds: [baseNode.id, pawlNode.id],
+    evaluation,
+  };
+}
+
+export interface ParallelFlexureStageBuildInput extends ParallelFlexureInput {
+  /** Moving stage thickness along motion axis (mm, default 10). */
+  stageDepthMm?: number;
+  /** World origin of the fixed anchor base (m, default [0, 0, 0.01]). */
+  origin?: [number, number, number];
+  idPrefix?: string;
+}
+
+export interface ParallelFlexureStageBuildResult {
+  nodes: SceneNode[];
+  addedIds: string[];
+  evaluation: ParallelFlexureEvaluation;
+}
+
+/**
+ * Builds a simulatable + monolithic 3D-printable parallel-guiding flexure stage:
+ * fixed anchor rail + guided moving stage on a calibrated `slide` joint with
+ * `numBeams` parallel fixed-guided leaf springs (`flexure_parallel_*`).
+ */
+export function buildParallelFlexureStage(input: ParallelFlexureStageBuildInput = {}): ParallelFlexureStageBuildResult {
+  const evaluation = evaluateParallelFlexure(input);
+  const prefix = input.idPrefix ?? 'parallel_flexure';
+  const origin = input.origin ?? [0, 0, 0.01];
+  const mech = FLEXURE_FILAMENT_PROPS[evaluation.filament];
+  const rgba = mech.rgba;
+
+  const L = evaluation.lengthMm / 1000;
+  const t = evaluation.thicknessMm / 1000;
+  const b = evaluation.widthMm / 1000;
+  const n = evaluation.numBeams;
+  const spacing = evaluation.beamSpacingMm / 1000;
+  const stageDepth = Math.max(0.006, (input.stageDepthMm ?? 10) / 1000);
+  const spanY = (n - 1) * spacing + Math.max(0.006, t * 4);
+  const limM = +(Math.max(0.0005, evaluation.maxSafeDeflectionMm / 1000)).toFixed(5);
+
+  const stageGeoms: SceneGeom[] = [
+    {
+      name: 'guided_stage',
+      type: 'box',
+      size: [stageDepth * 0.5, spanY * 0.5, b * 0.5],
+      pos: [0, 0, 0],
+      rgba: [...rgba],
+    },
+  ];
+
+  // Beams bridge from anchor face (x = -L - stageDepth/2) to stage face (x = -stageDepth/2)
+  const y0 = -((n - 1) * spacing) / 2;
+  for (let i = 0; i < n; i++) {
+    const y = y0 + i * spacing;
+    stageGeoms.push(
+      leafBetween(
+        `flexure_parallel_${i}`,
+        new THREE.Vector3(-stageDepth * 0.5 - L, y, 0),
+        new THREE.Vector3(-stageDepth * 0.5, y, 0),
+        new THREE.Vector3(0, 1, 0),
+        t * 0.5,
+        b * 0.5,
+        rgba,
+        0,
+        1,
+      ),
+    );
+  }
+
+  const slideJoint: SceneJoint = {
+    name: `${prefix}_slide`,
+    type: 'slide',
+    axis: [0, 1, 0],
+    pos: [0, 0, 0],
+    stiffness: evaluation.totalStiffnessNm,
+    springref: 0,
+    limited: true,
+    range: [-limM, limM],
+  };
+
+  const stageNode: SceneNode = {
+    id: `${prefix}_stage`,
+    name: 'Parallel Flexure Stage',
+    type: 'body',
+    pos: [+(L + stageDepth).toFixed(6), 0, 0],
+    deformMaterial: 'plastic',
+    geoms: stageGeoms,
+    joints: [slideJoint],
+    flexure: {
+      kind: 'serpentine',
+      filament: evaluation.filament,
+      thicknessMm: evaluation.thicknessMm,
+      lengthMm: evaluation.lengthMm,
+      widthMm: evaluation.widthMm,
+      folds: n,
+      stiffness: evaluation.totalStiffnessNm,
+      maxTravel: evaluation.maxSafeDeflectionMm,
+    },
+    children: [],
+  };
+  stageNode.joints[0].damping = polymerDamping(
+    evaluation.totalStiffnessNm,
+    movingInertia(stageNode, slideJoint),
+    mech.lossRatio,
+  );
+
+  const baseNode: SceneNode = {
+    id: `${prefix}_base`,
+    name: 'Parallel Flexure Base',
+    type: 'body',
+    pos: [...origin],
+    deformMaterial: 'plastic',
+    geoms: [
+      {
+        name: 'anchor_rail',
+        type: 'box',
+        size: [stageDepth * 0.5, spanY * 0.5, b * 0.5],
+        pos: [0, 0, 0],
+        rgba: [0.35, 0.4, 0.48, 1],
+      },
+    ],
+    joints: [],
+    children: [stageNode],
+  };
+
+  return {
+    nodes: [baseNode],
+    addedIds: [baseNode.id, stageNode.id],
+    evaluation,
+  };
+}
+
+export interface CompliantGripperInput {
+  filament?: string;
+  /** Clear distance between the two gripping jaws at rest (mm, default 24). */
+  jawOpeningMm?: number;
+  /** Forward length of the gripping fingers (mm, default 28). */
+  jawLengthMm?: number;
+  /** Thickness of each jaw bar (mm, default 6). */
+  jawThicknessMm?: number;
+  /** Flexure leaf thickness (mm, default 1.0 for PETG/PLA/ABS/ASA, 1.2 for TPU; always >= filament minWallMm). */
+  beamThicknessMm?: number;
+  /** Flexure leaf length (mm, default 22). */
+  beamLengthMm?: number;
+  /** Out-of-plane print height / extrusion width (mm, default 10). */
+  beamWidthMm?: number;
+  /** Number of parallel flexure beams per jaw (2..5, default 3 => 6 flexures total). */
+  beamsPerJaw?: number;
+  /** Spacing between parallel beams along the jaw (mm, default 10). */
+  beamSpacingMm?: number;
+  /** Design closing stroke per jaw (mm, defaults to safe travel clamped to half-opening). */
+  strokeMm?: number;
+  /** World origin of the gripper palm (m, default [0, 0, 0.01]). */
+  origin?: [number, number, number];
+  idPrefix?: string;
+}
+
+export interface CompliantGripperBuildResult {
+  nodes: SceneNode[];
+  addedIds: string[];
+  /** Per-jaw parallel flexure evaluation. */
+  evaluation: ParallelFlexureEvaluation;
+  /** Total number of individual flexure beams across both jaws (2 × beamsPerJaw). */
+  totalFlexureCount: number;
+  /** Elastic restoring force per jaw at design stroke (N). */
+  pinchForceAtStrokeN: number;
+  /** Parasitic axial jaw foreshortening at design stroke (mm). */
+  parasiticShiftMm: number;
+  warnings: string[];
+}
+
+/**
+ * Builds a complete, monolithic 3D-printable AND MuJoCo-simulatable compliant
+ * parallel-jaw gripper (default 2 jaws × 3 parallel flexures = 6 flexures).
+ *
+ * Each jaw rides on a calibrated parallel-guiding `slide` joint along ±X with
+ * stiffness `k = beamsPerJaw · 12·E·I / L³`, polymer loss damping, and
+ * `flexure_parallel_*` leaves carrying `bend` so the jaws visibly flex in
+ * MuJoCo while exporting monolithically at rest without manual model duplication.
+ */
+export function buildCompliantGripper(input: CompliantGripperInput = {}): CompliantGripperBuildResult {
+  const filId = resolveFilamentId(input.filament);
+  const fSpec = filamentSpec(filId);
+  const beamsPerJaw = Math.max(2, Math.min(5, Math.round(input.beamsPerJaw ?? 3)));
+  const jawOpeningMm = Math.max(4, Math.min(120, input.jawOpeningMm ?? 24));
+  const jawLengthMm = Math.max(10, Math.min(100, input.jawLengthMm ?? 28));
+  const jawThicknessMm = Math.max(3, Math.min(20, input.jawThicknessMm ?? 6));
+  const beamSpacingMm = Math.max(4, Math.min(40, input.beamSpacingMm ?? 10));
+  const defaultBeamThicknessMm = Math.max(1.0, fSpec.minWallMm);
+
+  // Preliminary evaluation to determine max safe stroke if caller omitted strokeMm
+  const prelim = evaluateParallelFlexure({
+    filament: filId,
+    thicknessMm: input.beamThicknessMm ?? defaultBeamThicknessMm,
+    lengthMm: input.beamLengthMm,
+    widthMm: input.beamWidthMm,
+    numBeams: beamsPerJaw,
+    beamSpacingMm,
+  });
+  const maxHalfOpeningMm = Math.max(1, jawOpeningMm * 0.5 - 1);
+  const strokeMm = input.strokeMm !== undefined && Number.isFinite(input.strokeMm)
+    ? Math.max(0.2, input.strokeMm)
+    : +Math.min(prelim.maxSafeDeflectionMm, maxHalfOpeningMm).toFixed(2);
+
+  const evaluation = evaluateParallelFlexure({
+    filament: filId,
+    thicknessMm: prelim.thicknessMm,
+    lengthMm: prelim.lengthMm,
+    widthMm: prelim.widthMm,
+    numBeams: beamsPerJaw,
+    beamSpacingMm,
+    deflectionMm: strokeMm,
+  });
+
+  const prefix = input.idPrefix ?? 'compliant_gripper';
+  const origin = input.origin ?? [0, 0, 0.01];
+  const mech = FLEXURE_FILAMENT_PROPS[filId];
+  const rgba = mech.rgba;
+
+  const L = evaluation.lengthMm / 1000;
+  const t = evaluation.thicknessMm / 1000;
+  const b = evaluation.widthMm / 1000;
+  const openHalf = (jawOpeningMm / 1000) * 0.5;
+  const jawLen = jawLengthMm / 1000;
+  const jawThick = jawThicknessMm / 1000;
+  const spacing = evaluation.beamSpacingMm / 1000;
+  const flexureSpanY = (beamsPerJaw - 1) * spacing + Math.max(0.005, t * 4);
+  const leafPitchX = Math.max(t * 3, spacing * 0.55);
+  const leafMargin = Math.max(t * 2, 0.0025);
+  const outerLeafX = (beamsPerJaw - 1) * leafPitchX;
+  const bridgeOuterExtent = Math.max(jawThick * 0.5, outerLeafX + leafMargin);
+  const palmHalfX = Math.max(0.006, openHalf + jawThick * 0.5 + bridgeOuterExtent);
+  const palmDepthY = Math.max(0.010, flexureSpanY * 0.45);
+  const limM = +(Math.max(0.001, Math.min(evaluation.maxSafeDeflectionMm / 1000, maxHalfOpeningMm / 1000))).toFixed(5);
+
+  const buildJaw = (side: -1 | 1): SceneNode => {
+    const tag = side < 0 ? 'left' : 'right';
+    // Jaw center X sits outside the clear opening by jawThick / 2
+    const jawX = side * (openHalf + jawThick * 0.5);
+    // Rigid jaw-base crossbar bridges the jaw body out to the outermost parallel flexure leaf
+    // while keeping the gripping throat (|X| < openHalf) completely unobstructed.
+    const bridgeInnerX = -side * (jawThick * 0.5);
+    const bridgeOuterX = side * bridgeOuterExtent;
+    const bridgeCenterX = (bridgeInnerX + bridgeOuterX) * 0.5;
+    const bridgeHalfX = Math.abs(bridgeOuterX - bridgeInnerX) * 0.5;
+    const bridgeDepthY = Math.min(flexureSpanY, Math.max(0.005, jawThick * 0.85));
+    const bridgeCenterY = -flexureSpanY * 0.5 + bridgeDepthY * 0.5;
+
+    // Anchor rail sits behind the jaw at y = -L in jaw-local coordinates
+    const jawGeoms: SceneGeom[] = [
+      {
+        name: `jaw_${tag}_body`,
+        type: 'box',
+        size: [jawThick * 0.5, (flexureSpanY + jawLen) * 0.5, b * 0.5],
+        pos: [0, +(jawLen * 0.5).toFixed(6), 0],
+        rgba: [...rgba],
+      },
+      {
+        name: `jaw_${tag}_bridge`,
+        type: 'box',
+        size: [+bridgeHalfX.toFixed(6), +(bridgeDepthY * 0.5).toFixed(6), b * 0.5],
+        pos: [+bridgeCenterX.toFixed(6), +bridgeCenterY.toFixed(6), 0],
+        rgba: [...rgba],
+      },
+      {
+        name: `jaw_${tag}_pad`,
+        type: 'box',
+        size: [Math.max(0.001, jawThick * 0.18), jawLen * 0.35, b * 0.48],
+        pos: [+(-side * (jawThick * 0.5 + jawThick * 0.14)).toFixed(6), +(flexureSpanY * 0.5 + jawLen * 0.55).toFixed(6), 0],
+        rgba: [0.22, 0.26, 0.32, 1],
+      },
+    ];
+
+    // Parallel flexure leaves run along Y from palm (-flexureSpanY/2 - L) to jaw bridge (-flexureSpanY/2),
+    // stepped outward (+side) so every beam connects solidly to both palm and jaw bridge
+    // while preserving full jawOpeningMm center clearance (> 2 * strokeMm).
+    for (let i = 0; i < beamsPerJaw; i++) {
+      const xLeaf = side * (i * leafPitchX);
+      const yFrom = -flexureSpanY * 0.5 - L;
+      const yTo = -flexureSpanY * 0.5;
+      jawGeoms.push(
+        leafBetween(
+          `flexure_parallel_${tag}_${i}`,
+          new THREE.Vector3(xLeaf, yFrom, 0),
+          new THREE.Vector3(xLeaf, yTo, 0),
+          new THREE.Vector3(1, 0, 0),
+          t * 0.5,
+          b * 0.5,
+          rgba,
+          0,
+          1,
+        ),
+      );
+    }
+
+    const slideJoint: SceneJoint = {
+      name: `${prefix}_jaw_${tag}_slide`,
+      type: 'slide',
+      axis: [-side, 0, 0], // positive q closes the jaw inward toward centerline
+      pos: [0, 0, 0],
+      stiffness: evaluation.totalStiffnessNm,
+      springref: 0,
+      limited: true,
+      range: [+(-limM * 0.4).toFixed(5), limM],
+    };
+
+    const jawNode: SceneNode = {
+      id: `${prefix}_jaw_${tag}`,
+      name: `Compliant Jaw (${tag})`,
+      type: 'body',
+      pos: [+jawX.toFixed(6), +(L + flexureSpanY * 0.5).toFixed(6), 0],
+      deformMaterial: 'plastic',
+      geoms: jawGeoms,
+      joints: [slideJoint],
+      flexure: {
+        kind: 'serpentine',
+        filament: filId,
+        thicknessMm: evaluation.thicknessMm,
+        lengthMm: evaluation.lengthMm,
+        widthMm: evaluation.widthMm,
+        folds: beamsPerJaw,
+        stiffness: evaluation.totalStiffnessNm,
+        maxTravel: evaluation.maxSafeDeflectionMm,
+      },
+      children: [],
+    };
+    jawNode.joints[0].damping = polymerDamping(
+      evaluation.totalStiffnessNm,
+      movingInertia(jawNode, slideJoint),
+      mech.lossRatio,
+    );
+    return jawNode;
+  };
+
+  const leftJaw = buildJaw(-1);
+  const rightJaw = buildJaw(1);
+
+  const baseNode: SceneNode = {
+    id: `${prefix}_base`,
+    name: 'Compliant Gripper Palm',
+    type: 'body',
+    pos: [...origin],
+    deformMaterial: 'plastic',
+    geoms: [
+      {
+        name: 'gripper_palm',
+        type: 'box',
+        size: [+palmHalfX.toFixed(6), +(palmDepthY * 0.5).toFixed(6), b * 0.5],
+        pos: [0, +(-palmDepthY * 0.5).toFixed(6), 0],
+        rgba: [0.32, 0.38, 0.46, 1],
+      },
+    ],
+    joints: [],
+    children: [leftJaw, rightJaw],
+  };
+
+  return {
+    nodes: [baseNode],
+    addedIds: [baseNode.id, leftJaw.id, rightJaw.id],
+    evaluation,
+    totalFlexureCount: beamsPerJaw * 2,
+    pinchForceAtStrokeN: evaluation.restoringForceN,
+    parasiticShiftMm: evaluation.parasiticShiftMm,
+    warnings: [...evaluation.warnings],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Multi-Flexure Scene Analysis & PRBM -> Monolithic 3D-Print Bridge
+// ---------------------------------------------------------------------------
+
+export interface SceneFlexureItem {
+  nodeId: string;
+  nodeName: string;
+  kind: FlexureKind;
+  filament: FilamentId;
+  leafCount: number;
+  stiffness: number;
+  maxTravel: number;
+  peakStressMPa: number;
+  maxStrain: number;
+  safetyFactor: number;
+  warnings: string[];
+}
+
+export interface SceneFlexureAnalysis {
+  flexureCount: number;
+  totalLeafCount: number;
+  minSafetyFactor: number | null;
+  hasWarnings: boolean;
+  items: SceneFlexureItem[];
+  warnings: string[];
+}
+
+/**
+ * Audits every compliant flexure in a scene graph, returning per-joint
+ * stiffness, peak stress, surface strain, safety factor, leaf counts, and
+ * aggregated engineering warnings.
+ */
+export function analyzeSceneFlexures(nodes: SceneNode[]): SceneFlexureAnalysis {
+  const items: SceneFlexureItem[] = [];
+  const warnings: string[] = [];
+
+  const walk = (list: SceneNode[]) => {
+    for (const n of list) {
+      if (n.flexure) {
+        const primaryJoint = (n.joints ?? []).find((j) => j.type === 'hinge' || j.type === 'slide');
+        const jointType: 'hinge' | 'slide' = primaryJoint?.type === 'slide' ? 'slide' : 'hinge';
+        const ev = evaluateFlexureSpec(n.flexure, jointType);
+        const leafCount = (n.geoms ?? []).filter((g) => g.name.startsWith('flexure_') || Boolean(g.bend)).length;
+        const itemWarnings = [...ev.warnings];
+        if (leafCount === 0) {
+          itemWarnings.push(`Node '${n.id}' has a flexure spec but no printable flexure_* leaf geoms.`);
+        }
+        items.push({
+          nodeId: n.id,
+          nodeName: n.name,
+          kind: n.flexure.kind,
+          filament: resolveFilamentId(n.flexure.filament),
+          leafCount,
+          stiffness: n.flexure.stiffness,
+          maxTravel: n.flexure.maxTravel,
+          peakStressMPa: ev.peakStressMPa,
+          maxStrain: ev.maxStrain,
+          safetyFactor: ev.safetyFactor,
+          warnings: itemWarnings,
+        });
+        for (const w of itemWarnings) warnings.push(`[${n.id}] ${w}`);
+      }
+      if (n.children?.length) walk(n.children);
+    }
+  };
+  walk(nodes);
+
+  const totalLeafCount = items.reduce((sum, it) => sum + it.leafCount, 0);
+  const minSafetyFactor = items.length > 0 ? Math.min(...items.map((it) => it.safetyFactor)) : null;
+
+  return {
+    flexureCount: items.length,
+    totalLeafCount,
+    minSafetyFactor,
+    hasWarnings: warnings.length > 0,
+    items,
+    warnings,
+  };
+}
+
+function nodeQuat(n: SceneNode): THREE.Quaternion {
+  if (n.quat && n.quat.length === 4) {
+    return new THREE.Quaternion(n.quat[1], n.quat[2], n.quat[3], n.quat[0]).normalize();
+  }
+  if (n.euler && n.euler.length === 3) {
+    const d = Math.PI / 180;
+    return new THREE.Quaternion().setFromEuler(new THREE.Euler(n.euler[0] * d, n.euler[1] * d, n.euler[2] * d, 'XYZ'));
+  }
+  return new THREE.Quaternion();
+}
+
+function transformGeomToParent(
+  g: SceneGeom,
+  childPos: THREE.Vector3,
+  childQuat: THREE.Quaternion,
+  namePrefix: string,
+): SceneGeom {
+  const gp = new THREE.Vector3(g.pos?.[0] ?? 0, g.pos?.[1] ?? 0, g.pos?.[2] ?? 0)
+    .applyQuaternion(childQuat)
+    .add(childPos);
+  const gq = geomRotation(g) ?? new THREE.Quaternion();
+  const combined = childQuat.clone().multiply(gq).normalize();
+  const isFlexLeaf = g.name.startsWith('flexure_') || Boolean(g.bend);
+  const out: SceneGeom = {
+    ...g,
+    name: `${namePrefix}_${g.name}`,
+    pos: [+gp.x.toFixed(6), +gp.y.toFixed(6), +gp.z.toFixed(6)],
+    quat: [+combined.w.toFixed(6), +combined.x.toFixed(6), +combined.y.toFixed(6), +combined.z.toFixed(6)],
+  };
+  delete out.euler;
+  if (isFlexLeaf) {
+    delete out.role;
+    delete out.bend;
+  }
+  return out;
+}
+
+/**
+ * Converts a multi-body PRBM compliant mechanism tree into a monolithic
+ * 3D-printable node tree at rest pose:
+ *   - Flattens every flexure-attached child body into its parent's frame
+ *   - Strips simulation joints so the mechanism exports as one rigid monolithic part
+ *   - Promotes `flexure_*` visual-bend leaves to solid printable geometry
+ *
+ * Pure function — does not mutate the input nodes.
+ */
+export function buildMonolithicPrintNodes(nodes: SceneNode[]): SceneNode[] {
+  const flattenInto = (
+    node: SceneNode,
+    accGeoms: SceneGeom[],
+    relPos: THREE.Vector3,
+    relQuat: THREE.Quaternion,
+    prefix: string,
+  ) => {
+    for (const g of node.geoms ?? []) {
+      if (g.role === 'collision') continue;
+      accGeoms.push(transformGeomToParent(g, relPos, relQuat, prefix));
+    }
+    for (const child of node.children ?? []) {
+      const cp = new THREE.Vector3(child.pos?.[0] ?? 0, child.pos?.[1] ?? 0, child.pos?.[2] ?? 0)
+        .applyQuaternion(relQuat)
+        .add(relPos);
+      const cq = relQuat.clone().multiply(nodeQuat(child)).normalize();
+      flattenInto(child, accGeoms, cp, cq, child.id);
+    }
+  };
+
+  const hasFlexureDescendant = (n: SceneNode): boolean =>
+    Boolean(n.flexure) || (n.children ?? []).some(hasFlexureDescendant);
+
+  return nodes.map((n) => {
+    if (!hasFlexureDescendant(n)) {
+      return { ...n, children: n.children ? buildMonolithicPrintNodes(n.children) : [] };
+    }
+    const mergedGeoms: SceneGeom[] = [];
+    for (const g of n.geoms ?? []) {
+      if (g.role === 'collision') continue;
+      const isFlexLeaf = g.name.startsWith('flexure_') || Boolean(g.bend);
+      if (isFlexLeaf) {
+        const solid: SceneGeom = { ...g };
+        delete solid.role;
+        delete solid.bend;
+        mergedGeoms.push(solid);
+      } else {
+        mergedGeoms.push({ ...g });
+      }
+    }
+    const keptChildren: SceneNode[] = [];
+    for (const child of n.children ?? []) {
+      if (hasFlexureDescendant(child)) {
+        const cp = new THREE.Vector3(child.pos?.[0] ?? 0, child.pos?.[1] ?? 0, child.pos?.[2] ?? 0);
+        const cq = nodeQuat(child);
+        flattenInto(child, mergedGeoms, cp, cq, child.id);
+      } else {
+        keptChildren.push(...buildMonolithicPrintNodes([child]));
+      }
+    }
+    const out: SceneNode = {
+      ...n,
+      geoms: mergedGeoms,
+      joints: [],
+      children: keptChildren,
+    };
+    delete out.flexure;
+    return out;
+  });
 }

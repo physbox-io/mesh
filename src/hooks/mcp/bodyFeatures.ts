@@ -8,7 +8,8 @@ import { pocketMesh, type PocketSpec } from '../../utils/pocketCutter';
 import { useStore } from '../../store/useStore';
 import { compileCsgNodes } from '../useCsgCompile';
 import { bodyEdges, bodyUp, whyNotRoundable } from '../../utils/edgeRoundBase';
-import { maxSizeFor, selectEdges, type EdgeGroup } from '../../utils/featureEdges';
+import { planClampedRoundings } from '../../utils/edgeRound';
+import { selectEdges, type EdgeGroup } from '../../utils/featureEdges';
 import {
   applyDab, buildMeshPaintGeometry, buildPaintGeometry, canvasFromLayer, isPaintable,
   layerFromCanvas, paintArgsFromSize, paintMeshResolution, paintResolution, toGeometrySpace,
@@ -25,7 +26,11 @@ import { geomHalfLen } from '../../utils/geomSurface';
 import { requestTexturedSurface } from '../../utils/textureClient';
 import { Quaternion, Vector3 } from 'three';
 import type { SceneGraph, SceneNode, SceneGeom, HardwareBore, HardwareCutKind, SealType } from '../../types/scene';
-import { HARDWARE_KINDS, hardwareCutProblem, hardwareSpecOf, quarterDirection, quarterFacing } from '../../utils/hardwareCuts';
+import {
+  CLEARANCE_HOLES, COUNTERSINK_INFO, HARDWARE_KINDS, countersinkCutGeoms, hardwareCutProblem,
+  hardwareSpecOf, quarterDirection, quarterFacing,
+} from '../../utils/hardwareCuts';
+import { metricThread } from '../../utils/metricThreads';
 import { SNAP_SIZES, snapBeamLength, snapLipHeight } from '../../utils/snapFits';
 import { sealFindings } from '../../utils/hardwareChecks';
 import { isFiniteNumber, isFiniteVec3, isPlainObject, pointList, findNodeInScene } from './bridgeUtils';
@@ -180,10 +185,11 @@ export function applySingleCutToBody(targetId: string, spec: Record<string, any>
     };
   }
 
+  if (shape === 'countersink') return applyCountersinkCut(targetId, spec, spotIn);
   if (shape === 'pocket') return applyPocketCut(targetId, spec, spotIn);
 
   if (shape !== undefined && !PRIMITIVE_CUT_SHAPES.has(shape)) {
-    const valid = [...PRIMITIVE_CUT_SHAPES, 'pocket', ...Object.keys(HARDWARE_KINDS)].join(', ');
+    const valid = [...PRIMITIVE_CUT_SHAPES, 'pocket', 'countersink', ...Object.keys(HARDWARE_KINDS)].join(', ');
     return { ok: false, error: `Unknown cut shape '${shape}'. Valid shapes: ${valid}` };
   }
 
@@ -249,6 +255,90 @@ export function applySingleCutToBody(targetId: string, spec: Record<string, any>
     } : {}),
     depthMm: cut?.cutDepth ? Math.round(cut.cutDepth * 1000 * 1000) / 1000 : 0,
     through: !(cut?.cutDepth && cut.cutDepth > 0),
+  };
+}
+
+/**
+ * A conical countersink (ISO 90° metric by default, or 82° for US flat-head
+ * screws) paired with a clearance or tapped through-hole below it. Placed on
+ * the surface the same way every cut is, then baked into the body frame as a
+ * closed manifold cone mesh alongside the shank cylinder.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function applyCountersinkCut(targetId: string, spec: Record<string, any>, spotIn?: { at: number[]; normal: number[] }): Record<string, any> {
+  const { size, bore, fitMm, angleDeg } = spec;
+  if (size !== undefined && !COUNTERSINK_INFO.sizes.includes(String(size))) {
+    return { ok: false, error: `${COUNTERSINK_INFO.label} comes in ${COUNTERSINK_INFO.sizes.join(', ')}; got '${size}'` };
+  }
+  if (bore !== undefined && (typeof bore !== 'string' || !COUNTERSINK_INFO.bores!.includes(bore as HardwareBore))) {
+    return { ok: false, error: `bore for ${COUNTERSINK_INFO.label} must be one of ${COUNTERSINK_INFO.bores!.join(', ')}; got '${String(bore)}'` };
+  }
+  if (fitMm !== undefined && (!isFiniteNumber(fitMm) || fitMm < 0)) {
+    return { ok: false, error: 'fitMm must be a non-negative finite number' };
+  }
+  if (angleDeg !== undefined && (!isFiniteNumber(angleDeg) || angleDeg < 30 || angleDeg > 150)) {
+    return { ok: false, error: 'angleDeg must be a finite number between 30 and 150 degrees' };
+  }
+
+  const resolvedSize = size !== undefined ? String(size) : COUNTERSINK_INFO.defaultSize;
+  const resolvedBore: HardwareBore = (bore as HardwareBore | undefined) ?? 'clearance';
+  const resolvedFit = typeof fitMm === 'number' ? fitMm : 0;
+  const resolvedAngle = typeof angleDeg === 'number' ? angleDeg : 90;
+
+  const store = useStore.getState();
+  const shankIndex = store.addBodyCut(targetId, 'cylinder', spotIn);
+  if (shankIndex < 0) return { ok: false, error: 'That body has no solid shape to cut into' };
+
+  const threadInfo = resolvedBore === 'tapped' ? metricThread(resolvedSize) : undefined;
+  const shankDiaMm = threadInfo ? threadInfo[1] : CLEARANCE_HOLES[resolvedSize];
+  useStore.getState().setCutSection(targetId, shankIndex, [shankDiaMm / 2000]);
+  useStore.getState().setCutDepth(targetId, shankIndex, 0);
+  if (threadInfo) {
+    useStore.getState().setGeomThread(targetId, shankIndex, { pitchMm: threadInfo[2], left: false, fitMm: 0 });
+  }
+
+  const node = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+  const placed = node?.geoms?.[shankIndex];
+  if (!node || !placed?.cutAt || !placed.cutNormal) {
+    return { ok: false, error: 'The countersink could not be placed' };
+  }
+
+  const usedNames = new Set((node.geoms ?? []).map((g) => g.name));
+  let n = 1;
+  while (usedNames.has(`${targetId}_countersink${n}_head`) || usedNames.has(`${targetId}_countersink${n}_shank`)) n++;
+  const group = `countersink${n}`;
+
+  const built = countersinkCutGeoms(
+    {
+      group,
+      size: resolvedSize,
+      at: placed.cutAt,
+      normal: placed.cutNormal,
+      bore: resolvedBore,
+      fitMm: resolvedFit,
+      angleDeg: resolvedAngle,
+    },
+    targetId,
+  );
+  const renamedShank: SceneGeom = { ...placed, name: `${targetId}_${group}_shank` };
+  const nextGeoms = node.geoms.map((g, i) => (i === shankIndex ? renamedShank : g));
+  nextGeoms.splice(shankIndex, 0, built.head);
+  useStore.getState().updateNode(targetId, { geoms: nextGeoms, csgEnabled: true });
+
+  return {
+    ok: true,
+    id: targetId,
+    group,
+    shape: 'countersink',
+    size: built.size,
+    bore: built.bore,
+    angleDeg: built.angleDeg,
+    headDiameterMm: built.headDiameterMm,
+    depthMm: built.depthMm,
+    fitMm: built.fitMm,
+    atMm: placed.cutAt.map((v: number) => Math.round(v * 1000 * 1000) / 1000),
+    normal: placed.cutNormal,
+    pieces: ['head', 'shank'],
   };
 }
 
@@ -351,6 +441,8 @@ export async function applyRoundEdgesToBody(targetId: string, specs: Record<stri
     | { remove: true; edges: (typeof found.edges)[number]['edge'][] }
     | { remove: false; mode: 'fillet' | 'chamfer'; size: number; edges: (typeof found.edges)[number]['edge'][] };
   const planned: PlannedRound[] = [];
+  let clampedEdges = 0;
+  let skippedEdges = 0;
 
   for (const spec of specs) {
     if (!isPlainObject(spec)) return { ok: false, error: 'Each rounding specification must be a plain object' };
@@ -379,11 +471,15 @@ export async function applyRoundEdgesToBody(targetId: string, specs: Record<stri
       }
       const kind: 'fillet' | 'chamfer' = mode === 'bevel' || mode === 'chamfer' ? 'chamfer' : 'fillet';
       if (!isFiniteNumber(sizeMm) || !(sizeMm > 0)) return { ok: false, error: 'sizeMm must be a positive finite number of millimetres' };
-      const most = maxSizeFor(picked, kind);
-      if (sizeMm / 1000 > most + 1e-9) {
-        return { ok: false, error: `${sizeMm} mm is too big for ${picked.length === 1 ? 'this edge' : 'these edges'} — ${Math.floor(most * 1e5) / 100} mm is the most that fits` };
+      const plan = planClampedRoundings(picked, kind, sizeMm / 1000);
+      if (!plan.ok) {
+        return { ok: false, error: `${sizeMm} mm is too big for ${picked.length === 1 ? 'this edge' : 'these edges'} — ${Math.floor(plan.maxFit * 1e5) / 100} mm is the most that fits` };
       }
-      planned.push({ remove: false, mode: kind, size: sizeMm / 1000, edges: picked.map((e) => e.edge) });
+      clampedEdges += plan.clampedCount;
+      skippedEdges += plan.skippedCount;
+      for (const group of plan.groups) {
+        planned.push({ remove: false, mode: kind, size: group.size, edges: group.edges });
+      }
     }
   }
 
@@ -409,6 +505,8 @@ export async function applyRoundEdgesToBody(targetId: string, specs: Record<stri
     ok: true,
     id: targetId,
     edgesChanged: totalChanged,
+    ...(clampedEdges > 0 ? { clampedEdges } : {}),
+    ...(skippedEdges > 0 ? { skippedEdges } : {}),
     roundings: (after?.edgeRounds ?? []).map((f, i) => ({
       index: i, mode: f.mode === 'fillet' ? 'round' : 'bevel', sizeMm: Math.round(f.size * 1e5) / 100, edges: f.edges.length,
     })),

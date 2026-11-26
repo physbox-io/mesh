@@ -80,6 +80,16 @@ function emptyCutFor(host: SceneNode, kind: HardwarePartKind, preferredGroup?: s
     if (!h || g.csgDerived || groups.includes(h.group)) continue;
     if (PARTS_FOR_CUT[h.kind].includes(kind) && !seatedIn(host, h.group)) groups.push(h.group);
   }
+  if (kind === 'screw' || (kind as string) === 'wood_screw') {
+    const prefix = `${host.id}_`;
+    for (const g of host.geoms || []) {
+      if (g.csgDerived || g.hardware || g.csg !== 'difference' || g.type !== 'cylinder') continue;
+      if (!g.name.endsWith('_shank')) continue;
+      const base = g.name.startsWith(prefix) ? g.name.slice(prefix.length, -'_shank'.length) : g.name.slice(0, -'_shank'.length);
+      if (!base || groups.includes(base) || seatedIn(host, base)) continue;
+      if (seatFor(host, base, kind)) groups.push(base);
+    }
+  }
   if (preferredGroup && groups.includes(preferredGroup)) return preferredGroup;
   return groups[0] ?? null;
 }
@@ -90,8 +100,9 @@ function emptyCutFor(host: SceneNode, kind: HardwarePartKind, preferredGroup?: s
  */
 function seatInScene(scene: SceneGraph, host: SceneNode, part: SceneNode, group: string): boolean {
   if (!seatPart(part, host, group)) return false;
-  if (part.hardwarePart?.kind !== 'screw') return true;
-  const seat = seatFor(host, group, 'screw');
+  const kind = part.hardwarePart?.kind as string | undefined;
+  if (kind !== 'screw' && kind !== 'wood_screw') return true;
+  const seat = seatFor(host, group, kind as HardwarePartKind);
   if (!seat || seat.gripM === undefined) return true;
   const spec = host.geoms.find((g) => g.hardware?.group === group)?.hardware;
   // Into an insert the screw comes from outside and its length is the insert's.
@@ -112,7 +123,7 @@ export function hardwarePartActions({ set, get, clone }: Deps): HardwarePartActi
     const current = findNodeById(get().sceneGraph.nodes, hostId);
     const partKind = kind ?? (current && (() => {
       const h = current.geoms.find((g) => g.hardware?.group === group)?.hardware;
-      return h ? PARTS_FOR_CUT[h.kind][0] : undefined;
+      return h ? PARTS_FOR_CUT[h.kind][0] : seatFor(current, group)?.part.kind;
     })());
     if (!current || !partKind || !seatFor(current, group, partKind)) return null;
     const scene = clone(get().sceneGraph);
@@ -206,9 +217,11 @@ export function hardwarePartActions({ set, get, clone }: Deps): HardwarePartActi
       if (!current || !spec || spec.piece) return;
       const host = parentOf(get().sceneGraph.nodes, partId);
       const group = spec.seat;
-      // Seated in a cut (not through a bearing's bore, nor joining a frame or
-      // riding a rail, which are seats with no cut behind them).
-      const inCut = !!host && !!group && !NO_CUT_SEATS.includes(group);
+      // Seated in a hardware cut (not through a bearing's bore, nor joining a
+      // frame or riding a rail, nor a countersink cut which is not resized via
+      // setHardwareCut).
+      const inCut = !!host && !!group && !NO_CUT_SEATS.includes(group)
+        && (host.geoms || []).some((g) => g.hardware?.group === group && !g.csgDerived);
       // A joining piece is sized by what it joins, and a shaft by its bore.
       if (group && NO_CUT_SEATS.includes(group) && changes.size) {
         const { size: _size, ...rest } = changes;

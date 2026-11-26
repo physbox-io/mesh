@@ -3,6 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { useStore } from '../../store/useStore';
+import { framingPatch } from '../../store/sceneFraming';
 import {
   addFacesMm, addRingMm, bevelEdgesMm, bevelFaceMm, bridgeFacesMm, describeLattice,
   dimensionSelectionMm, extrudeMm, insetFaceMm, latticeSummary, removeFacesMm, revolveMm,
@@ -105,6 +106,7 @@ export const latticeCommands: McpCommands = {
     };
 
     const currentNodes = useStore.getState().sceneGraph.nodes || [];
+    const wasEmpty = currentNodes.length === 0;
     const updatedNodes = parent ? withChild(currentNodes, parent.id, newNode) : [...currentNodes, newNode];
     // Not waiting for its convex pieces: those are V-HACD, one job at a time
     // across the whole scene, and a burst of creates queued behind each
@@ -114,6 +116,12 @@ export const latticeCommands: McpCommands = {
     const settleRes = await settleScene(updatedNodes, { replacesScene: false, waitForColliders: false });
     if (!settleRes.ok) {
       throw new Error(`The lattice body failed to compile: ${settleRes.error}`);
+    }
+
+    // Auto-frame the camera when the first body is created in an empty scene.
+    if (wasEmpty) {
+      const patch = framingPatch(useStore.getState().sceneGraph, null);
+      if (patch.cameraOverride) useStore.setState(patch);
     }
 
     // Opening the tools is opt-in: it takes over the viewport and pauses

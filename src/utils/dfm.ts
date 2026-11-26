@@ -40,8 +40,76 @@ import { sampleColumns, sampleWallSpans } from './partColumns';
 import { squaredDistanceTransform } from './heightmapMesh';
 import { overhangDeg, supportArea } from './printSupport';
 import { trappedAirInSoup } from './trappedAir';
-import { castMaterial, type CastMaterialId } from './castMaterials';
+import { CAST_MATERIALS, castMaterial, resolveCastMaterial, type CastMaterialId } from './castMaterials';
 import type { SceneGraph, SceneNode } from '../types/scene';
+
+export type DfmExtraCastMaterialId = 'pewter' | 'zinc' | 'iron';
+export type DfmCastMaterialId = CastMaterialId | DfmExtraCastMaterialId;
+
+export interface ResolvedDfmCastMaterial {
+  id: DfmCastMaterialId;
+  label: string;
+  minSectionMm: number;
+  slip: boolean;
+  /** Set when an unrecognised name fell back to epoxy. */
+  fallbackFrom?: string;
+}
+
+const EXTRA_CAST_MATERIALS: Record<DfmExtraCastMaterialId, { label: string; minSectionMm: number }> = {
+  pewter: { label: 'Pewter', minSectionMm: 2.0 },
+  zinc: { label: 'Zinc', minSectionMm: 2.0 },
+  iron: { label: 'Cast iron', minSectionMm: 3.5 },
+};
+
+const EXTRA_CAST_ALIASES: Record<string, DfmCastMaterialId> = {
+  aluminum: 'aluminium',
+  'cast-iron': 'iron',
+  cast_iron: 'iron',
+};
+
+export const SUPPORTED_CAST_MATERIAL_IDS: readonly DfmCastMaterialId[] = [
+  ...CAST_MATERIALS.map((m) => m.id),
+  'pewter',
+  'zinc',
+  'iron',
+];
+
+/**
+ * Resolves a casting material name (case-insensitive, including US spelling
+ * `aluminum` and extra casting metals `pewter`, `zinc`, `iron`) to its
+ * minimum section threshold, or null if unknown.
+ */
+export function resolveDfmCastMaterialStrict(value: unknown): ResolvedDfmCastMaterial | null {
+  if (typeof value !== 'string') return null;
+  const norm = value.trim().toLowerCase();
+  if (!norm) return null;
+  const aliased = Object.hasOwn(EXTRA_CAST_ALIASES, norm) ? EXTRA_CAST_ALIASES[norm] : norm;
+  if (Object.hasOwn(EXTRA_CAST_MATERIALS, aliased)) {
+    const extra = EXTRA_CAST_MATERIALS[aliased as DfmExtraCastMaterialId];
+    return { id: aliased as DfmExtraCastMaterialId, label: extra.label, minSectionMm: extra.minSectionMm, slip: false };
+  }
+  const baseId = resolveCastMaterial(aliased);
+  if (baseId) {
+    const m = castMaterial(baseId);
+    return { id: baseId, label: m.label, minSectionMm: m.minSectionMm, slip: Boolean(m.slip) };
+  }
+  return null;
+}
+
+/** Resolves a casting material name, falling back to `epoxy` with `fallbackFrom` set if unknown. */
+export function resolveDfmCastMaterial(value: unknown): ResolvedDfmCastMaterial {
+  if (value === undefined || value === null || value === '') {
+    const m = castMaterial('epoxy');
+    return { id: 'epoxy', label: m.label, minSectionMm: m.minSectionMm, slip: false };
+  }
+  const hit = resolveDfmCastMaterialStrict(value);
+  if (hit) return hit;
+  const m = castMaterial('epoxy');
+  return { id: 'epoxy', label: m.label, minSectionMm: m.minSectionMm, slip: false, fallbackFrom: String(value) };
+}
+
+/** Minimum recommended air gap between opposing walls in a print-in-place assembly, mm. */
+export const PRINT_MIN_AIR_GAP_MM = 0.35;
 
 export type DfmProcess = 'print' | 'cnc' | 'cast';
 export type DfmSeverity = 'critical' | 'warning' | 'info';
@@ -98,6 +166,10 @@ export interface DfmLimits {
   castMinSectionMm: number;
   /** The casting is clay slip in plaster: sharp inside corners crack as it dries and fires. */
   castSlip?: boolean;
+  /** Resolved casting material id (e.g. 'bronze', 'aluminium', 'pewter', 'epoxy'). */
+  castMaterial?: DfmCastMaterialId;
+  /** Resolved casting material display label. */
+  castMaterialLabel?: string;
   /** Printer process ('fdm' | 'resin'). Resin runs SLA suction-cup checks instead of FDM bridging/warping. */
   printerProcess?: 'fdm' | 'resin';
   /** Active FDM nozzle diameter, mm (used for thin-wall remediation suggestions). */
@@ -172,6 +244,8 @@ export interface DfmBench {
   filament: FilamentId;
   stock?: { widthMm: number; depthMm: number; thicknessMm: number } | null;
   printBed?: { widthMm: number; depthMm: number; heightMm: number } | null;
+  /** Shorthand print build volume `[widthMm, depthMm, heightMm]`; overrides `printBed` when provided. */
+  bed_mm?: [number, number, number] | null;
   /** Active printer settings (FDM nozzle/layer or Resin SLA pixel/layer). */
   printer?: PrinterSettings | null;
   /**
@@ -182,7 +256,7 @@ export interface DfmBench {
   /** When true with `nodeId == null` on a multi-body scene, run per-part DFM on every body. */
   checkAllAsPlate?: boolean;
   /** What is poured, for the casting lens's thinnest section (default epoxy). */
-  castMaterial?: CastMaterialId;
+  castMaterial?: DfmCastMaterialId | string;
 }
 
 /**
@@ -207,6 +281,13 @@ export function dfmLimitsFor(bench: DfmBench): DfmLimits {
       ? Math.max(fil.minWallMm, 2 * pLim.minWallMm)
       : fil.minWallMm;
   const biggestBit = STANDARD_BIT_DIAS[STANDARD_BIT_DIAS.length - 1];
+  const resolvedBed =
+    Array.isArray(bench.bed_mm) &&
+    bench.bed_mm.length === 3 &&
+    bench.bed_mm.every((v) => typeof v === 'number' && Number.isFinite(v) && v > 0)
+      ? { widthMm: bench.bed_mm[0], depthMm: bench.bed_mm[1], heightMm: bench.bed_mm[2] }
+      : (bench.printBed ?? null);
+  const resolvedCast = resolveDfmCastMaterial(bench.castMaterial);
   return {
     overhangDeg: isResin ? 45 : fil.maxOverhangDeg,
     minWallMm,
@@ -216,10 +297,12 @@ export function dfmLimitsFor(bench: DfmBench): DfmLimits {
     maxToolReachMm: biggestBit * MAX_AVAILABLE_REACH_DIAMETERS,
     draftDeg: 2,
     stockMm: bench.stock ?? null,
-    bedMm: bench.printBed ?? null,
+    bedMm: resolvedBed,
     cncMinWallMm: mat.minWallMm,
-    castMinSectionMm: Math.max(PRINTED_DETAIL_MM, castMaterial(bench.castMaterial ?? 'epoxy').minSectionMm),
-    castSlip: Boolean(castMaterial(bench.castMaterial ?? 'epoxy').slip),
+    castMinSectionMm: Math.max(PRINTED_DETAIL_MM, resolvedCast.minSectionMm),
+    castSlip: resolvedCast.slip,
+    castMaterial: resolvedCast.id,
+    castMaterialLabel: resolvedCast.label,
     printerProcess: isResin ? 'resin' : 'fdm',
     nozzleMm: printer?.nozzleMm ?? 0.4,
   };
@@ -338,6 +421,10 @@ export interface DfmReport {
   judgedPoseLabel?: string;
   /** The scoped body id this report was generated for, preserved across withLivePoses. */
   nodeId?: string | null;
+  /** Resolved minimum wall-thickness threshold used by this check, mm. */
+  minWallMm?: number;
+  /** Resolved casting material id when `process === 'cast'`. */
+  castMaterial?: DfmCastMaterialId;
 }
 
 const RAD = 180 / Math.PI;
@@ -638,6 +725,7 @@ function analysePrint(
   limits: DfmLimits,
   wallTris: Float64Array = tris,
   posedForBed = false,
+  gapTris: Float64Array = wallTris,
 ): Omit<DfmReport, 'process' | 'tris' | 'warnings'> {
   const count = Math.floor(tris.length / 9);
   const heat = new Float32Array(count);
@@ -782,16 +870,46 @@ function analysePrint(
       if (nozzle > 0.4 && thin.mm >= 0.8) actions.push({ kind: 'set_nozzle', label: 'Use 0.4 mm nozzle', nozzleMm: 0.4 });
       else if (nozzle > 0.2) actions.push({ kind: 'set_nozzle', label: 'Use 0.2 mm nozzle', nozzleMm: 0.2 });
     }
+    // Vertical-extruded XY beams >= 0.8 mm (thin in X or Y, printed flat on the bed)
+    // are often intentional compliant flexure blades (>= 2 perimeters on a 0.4 mm nozzle).
+    // Avoid over-penalizing them with warning/critical severity; report as an info note instead.
+    const isXyFlexureBeam = !isResin && (thin.axis === 0 || thin.axis === 1) && thin.mm >= 0.8;
+    const severity: DfmSeverity = isXyFlexureBeam
+      ? 'info'
+      : thin.mm < limits.minWallMm / 2
+        ? 'critical'
+        : 'warning';
     findings.push({
       id: 'print_thin_wall',
       process: 'print',
-      severity: thin.mm < limits.minWallMm / 2 ? 'critical' : 'warning',
-      title: `Wall down to ${thin.mm.toFixed(2)} mm`,
-      detail: `Minimum wall is ${thin.mm.toFixed(2)} mm (min ${limits.minWallMm} mm for this ${isResin ? 'resin printer' : 'printer & filament'}).`,
-      fix: `Thicken walls to at least ${limits.minWallMm} mm.`,
+      severity,
+      title: isXyFlexureBeam
+        ? `Thin vertical XY beam (${thin.mm.toFixed(2)} mm)`
+        : `Wall down to ${thin.mm.toFixed(2)} mm`,
+      detail: isXyFlexureBeam
+        ? `Minimum wall is ${thin.mm.toFixed(2)} mm (min ${limits.minWallMm} mm for this printer & filament). Note: vertical-extruded XY beams ≥ 0.8 mm print cleanly flat on the bed as intentional flexure blades (≥ 2 perimeters with a 0.4 mm nozzle).`
+        : `Minimum wall is ${thin.mm.toFixed(2)} mm (min ${limits.minWallMm} mm for this ${isResin ? 'resin printer' : 'printer & filament'}).`,
+      fix: isXyFlexureBeam
+        ? `Keep as-is if this is an intentional XY-flat flexure blade; otherwise thicken structural walls to at least ${limits.minWallMm} mm.`
+        : `Thicken walls to at least ${limits.minWallMm} mm.`,
       position: thin.at,
       metric: thin.mm,
       ...(actions.length ? { actions } : {}),
+    });
+  }
+
+  // Print-in-place opposing-wall air-gap clearance check (< 0.35 mm risks fusion).
+  const gap = gapTris.length >= 9 ? narrowestAirGap(gapTris, PRINT_MIN_AIR_GAP_MM) : null;
+  if (gap) {
+    findings.push({
+      id: 'print_narrow_gap',
+      process: 'print',
+      severity: gap.mm < 0.2 ? 'critical' : 'warning',
+      title: `Narrow air gap (${gap.mm.toFixed(2)} mm) risks fusion`,
+      detail: `Opposing walls are separated by ${gap.mm.toFixed(2)} mm (minimum ${PRINT_MIN_AIR_GAP_MM} mm recommended for print-in-place clearance to avoid fusing).`,
+      fix: `Increase print-in-place air-gap clearance between opposing walls to at least ${PRINT_MIN_AIR_GAP_MM} mm (0.4 mm recommended for FDM).`,
+      position: gap.at,
+      metric: gap.mm,
     });
   }
 
@@ -921,9 +1039,17 @@ function stockFindings(b: ReturnType<typeof bounds>, limits: DfmLimits): DfmFind
   const fitsThick = h <= stock.thicknessMm;
   if (fitsPlan && fitsThick) return [];
 
-  // Plainly not meant for this board.
-  const planRatio = Math.max(w / stock.widthMm, d / stock.depthMm);
-  if (planRatio > STOCK_BALLPARK || h / stock.thicknessMm > STOCK_BALLPARK) return [];
+  // Plainly not meant for this board. Compare sorted dimensions so the
+  // ballpark gate is invariant to 90° rotations — otherwise analyseBestSide
+  // can stand a flat board on edge (making h >> stock.thicknessMm) just to
+  // silence stock_fit and trade a critical fit error for a cnc_reach warning.
+  const partSorted = [w, d, h].sort((a, b) => a - b);
+  const stockSorted = [stock.widthMm, stock.depthMm, stock.thicknessMm].sort((a, b) => a - b);
+  if (
+    partSorted[0] / stockSorted[0] > STOCK_BALLPARK ||
+    partSorted[1] / stockSorted[1] > STOCK_BALLPARK ||
+    partSorted[2] / stockSorted[2] > STOCK_BALLPARK
+  ) return [];
 
   const size = [w, d, h];
   const stockDims = [stock.widthMm, stock.depthMm, stock.thicknessMm];
@@ -963,9 +1089,9 @@ function stockFindings(b: ReturnType<typeof bounds>, limits: DfmLimits): DfmFind
 export function thinnestWall(
   tris: Float64Array,
   minWallMm: number,
-): { mm: number; at: [number, number, number]; share: number } | null {
+): { mm: number; at: [number, number, number]; share: number; axis: number } | null {
   if (tris.length < 9 || !Number.isFinite(minWallMm)) return null;
-  let best: { mm: number; at: [number, number, number]; share: number } | null = null;
+  let best: { mm: number; at: [number, number, number]; share: number; axis: number } | null = null;
 
   for (const axis of [0, 1, 2]) {
     // Rotate the soup so `axis` becomes Z, then sample individual wall spans.
@@ -1028,7 +1154,173 @@ export function thinnestWall(
     // How much of the part is actually thin, not just the single worst sample.
     const share = thinCells / solidCells;
     if (best && thinnest >= best.mm) continue;
-    best = { mm: thinnest, at: unrotateFromZ(at, axis), share };
+    best = { mm: thinnest, at: unrotateFromZ(at, axis), share, axis };
+  }
+  return best;
+}
+
+/**
+ * Finds the narrowest opposing-wall air gap (< `maxGapMm`, and >= 0.02 mm to
+ * ignore coincident touching faces) along X, Y, or Z. Used to detect
+ * print-in-place clearances that risk fusing during FDM printing.
+ *
+ * Requires the two bounding faces to oppose each other (`dot(nA, nB) < -0.5`
+ * and aligned with the sampling ray) and skips interior V-creases (such as a
+ * gable roof ridge apex) where two non-parallel walls converge directly into a
+ * continuous solid.
+ */
+export function narrowestAirGap(
+  tris: Float64Array,
+  maxGapMm: number = PRINT_MIN_AIR_GAP_MM,
+): { mm: number; at: [number, number, number]; axis: number; gapCells: number } | null {
+  if (tris.length < 9 || !Number.isFinite(maxGapMm) || maxGapMm <= 0.02) return null;
+  const MIN_GAP_MM = 0.02;
+  let best: { mm: number; at: [number, number, number]; axis: number; gapCells: number } | null = null;
+
+  for (const axis of [0, 1, 2]) {
+    const rotated = axis === 2 ? tris : rotateAxisToZ(tris, axis);
+    const rb = bounds(rotated);
+    const spanX = rb.maxX - rb.minX;
+    const spanY = rb.maxY - rb.minY;
+    const cols = gridFor(spanX, Math.max(1.0, maxGapMm * 3));
+    const rows = gridFor(spanY, Math.max(1.0, maxGapMm * 3));
+    if (cols < 3 || rows < 3) continue;
+
+    const {
+      spanStart,
+      spanZ0,
+      spanZ1,
+      spanEnNx,
+      spanEnNy,
+      spanEnNz,
+      spanExNx,
+      spanExNy,
+      spanExNz,
+    } = sampleWallSpans(rotated, rb, cols, rows);
+    const stepX = spanX / (cols - 1);
+    const stepY = spanY / (rows - 1);
+    const stepMax = Math.max(stepX, stepY);
+    const margin = stepMax * 2.5 + maxGapMm / 1000;
+
+    const isOpposingGap = (sA: number, sB: number): boolean => {
+      const exNz = spanExNz[sA];
+      const enNz = spanEnNz[sB];
+      if (exNz < 0.5 || enNz > -0.5) return false;
+      const dot = spanExNx[sA] * spanEnNx[sB] + spanExNy[sA] * spanEnNy[sB] + exNz * enNz;
+      return dot < -0.5;
+    };
+
+    const cellBridgesZ = (pc: number, pr: number, zMid: number): boolean => {
+      if (pc < 0 || pr < 0 || pc >= cols || pr >= rows) return false;
+      const ni = pr * cols + pc;
+      const ns0 = spanStart[ni], ns1 = spanStart[ni + 1];
+      for (let k = ns0; k < ns1; k++) {
+        if (spanZ0[k] <= zMid && spanZ1[k] >= zMid) return true;
+      }
+      return false;
+    };
+
+    // Detect sharp acute interior V-creases (e.g., steep > 60° gable ridge apex)
+    // where two non-parallel walls converge to 0 and merge into a solid right next
+    // to this cell. Parallel opposing walls have dot <= -0.98 and gMag ~ 0.
+    const isConvergingCrease = (
+      c: number,
+      r: number,
+      sA: number,
+      sB: number,
+      g0: number,
+      g1: number,
+    ): boolean => {
+      const exNx = spanExNx[sA], exNy = spanExNy[sA], exNz = spanExNz[sA];
+      const enNx = spanEnNx[sB], enNy = spanEnNy[sB], enNz = spanEnNz[sB];
+      const dot = exNx * enNx + exNy * enNy + exNz * enNz;
+      if (dot <= -0.98) return false;
+      // Gradient of gap(x, y) = zB(x, y) - zA(x, y) in rotated XY.
+      const gx = exNx / exNz - enNx / enNz;
+      const gy = exNy / exNz - enNy / enNz;
+      const gMag = Math.hypot(gx, gy);
+      if (gMag <= 0.15) return false;
+      const dApex = (g1 - g0) / gMag;
+      const maxSearch = stepMax * 4 + (maxGapMm / 1000) * 6;
+      if (dApex > maxSearch) return false;
+      const dirX = -gx / gMag;
+      const dirY = -gy / gMag;
+      const zMid = (g0 + g1) * 0.5;
+      const probeLimit = dApex + stepMax * 1.25;
+      const probeStep = Math.max(Math.min(stepX, stepY) * 0.5, 1e-6);
+      let lastC = c, lastR = r;
+      for (let d = probeStep; d <= probeLimit; d += probeStep) {
+        const pc = Math.round(c + (dirX * d) / stepX);
+        const pr = Math.round(r + (dirY * d) / stepY);
+        if (pc === lastC && pr === lastR) continue;
+        lastC = pc;
+        lastR = pr;
+        if (cellBridgesZ(pc, pr, zMid)) return true;
+      }
+      return false;
+    };
+
+    const neighborHasNarrowGapNear = (ni: number, g0: number, g1: number): boolean => {
+      const s0 = spanStart[ni], s1 = spanStart[ni + 1];
+      for (let s = s0; s + 1 < s1; s++) {
+        const ng0 = spanZ1[s], ng1 = spanZ0[s + 1];
+        const ngMm = (ng1 - ng0) * 1000;
+        if (
+          ngMm >= MIN_GAP_MM &&
+          ngMm < maxGapMm &&
+          ng1 >= g0 - margin &&
+          ng0 <= g1 + margin &&
+          isOpposingGap(s, s + 1)
+        ) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    let minGapMm = Infinity;
+    let at: [number, number, number] | null = null;
+    let gapCells = 0;
+
+    for (let r = 1; r < rows - 1; r++) {
+      for (let c = 1; c < cols - 1; c++) {
+        const i = r * cols + c;
+        const s0 = spanStart[i], s1 = spanStart[i + 1];
+        if (s1 - s0 < 2) continue;
+        let cellMinMm = Infinity;
+        let cellMidZ = 0;
+        for (let s = s0; s + 1 < s1; s++) {
+          const g0 = spanZ1[s], g1 = spanZ0[s + 1];
+          const gapMm = (g1 - g0) * 1000;
+          if (gapMm < MIN_GAP_MM || gapMm >= maxGapMm) continue;
+          if (!isOpposingGap(s, s + 1)) continue;
+          if (isConvergingCrease(c, r, s, s + 1, g0, g1)) continue;
+          // Require at least one 4-connected neighbour to also see a narrow gap
+          // at the same depth so 1-cell grazing edge slivers are ignored.
+          const backed =
+            neighborHasNarrowGapNear(i - 1, g0, g1) ||
+            neighborHasNarrowGapNear(i + 1, g0, g1) ||
+            neighborHasNarrowGapNear(i - cols, g0, g1) ||
+            neighborHasNarrowGapNear(i + cols, g0, g1);
+          if (!backed) continue;
+          if (gapMm < cellMinMm) {
+            cellMinMm = gapMm;
+            cellMidZ = (g0 + g1) * 0.5;
+          }
+        }
+        if (cellMinMm < maxGapMm) {
+          gapCells++;
+          if (cellMinMm < minGapMm) {
+            minGapMm = cellMinMm;
+            at = [rb.minX + c * stepX, rb.minY + r * stepY, cellMidZ];
+          }
+        }
+      }
+    }
+
+    if (!at || gapCells < 2) continue;
+    if (best && minGapMm >= best.mm) continue;
+    best = { mm: minGapMm, at: unrotateFromZ(at, axis), axis, gapCells };
   }
   return best;
 }
@@ -1402,7 +1694,8 @@ function analyseCast(
   // An undercut means the pattern physically does not come out of a rigid draw
   // mould, so the bar is low — though a dissolvable liner, silicone pour box,
   // or lost-PLA burnout releases undercuts cleanly.
-  if (undercutShare > T.castUndercutShare) {
+  const hasUndercut = undercutShare > T.castUndercutShare;
+  if (hasUndercut) {
     findings.push({
       id: 'cast_undercut',
       process: 'cast',
@@ -1422,7 +1715,8 @@ function analyseCast(
   // Draft is a nicety on a shallow part and a real problem on a deep one: drag
   // scales with how far the wall has to slide. So this needs both a lot of the
   // part to be upright AND enough height for it to matter.
-  if (dragShare > T.dragShare && heightMm > T.dragMinHeightMm) {
+  const hasDraft = dragShare > T.dragShare && heightMm > T.dragMinHeightMm;
+  if (hasDraft) {
     findings.push({
       id: 'cast_draft',
       process: 'cast',
@@ -1438,6 +1732,7 @@ function analyseCast(
 
   // Too thin to cast: below what the material fills, or what a printed mold
   // can draw. Spokes and fins a hair wide came out of a mold as nothing.
+  const castMatLabel = limits.castMaterialLabel ?? limits.castMaterial ?? 'epoxy';
   const thin = wallTris.length >= 9 ? thinnestWall(wallTris, limits.castMinSectionMm) : null;
   if (thin && thin.mm < limits.castMinSectionMm && thin.share > T.thinCellShare) {
     findings.push({
@@ -1445,7 +1740,7 @@ function analyseCast(
       process: 'cast',
       severity: thin.mm < limits.castMinSectionMm / 2 ? 'critical' : 'warning',
       title: `Sections down to ${thin.mm.toFixed(1)} mm`,
-      detail: `The thinnest part is ${thin.mm.toFixed(2)} mm; a cast keeps about ${limits.castMinSectionMm} mm here (the material, or a printed mold's ${PRINTED_DETAIL_MM} mm detail).`,
+      detail: `The thinnest part is ${thin.mm.toFixed(2)} mm; ${castMatLabel} casting keeps about ${limits.castMinSectionMm} mm here (the material, or a printed mold's ${PRINTED_DETAIL_MM} mm detail).`,
       fix: `Thicken it to ${limits.castMinSectionMm} mm, or cast in a finer material.`,
       position: thin.at,
       metric: thin.mm,
@@ -1471,10 +1766,13 @@ function analyseCast(
     }
   }
 
+  const summaryParts: string[] = [];
+  if (hasUndercut) summaryParts.push(`${(undercutShare * 100).toFixed(0)}% undercut`);
+  if (hasDraft) summaryParts.push(`${(dragShare * 100).toFixed(0)}% short of draft`);
   const summary = findings.length === 0
-    ? `Everything draws cleanly along Z.`
-    : (undercutShare > T.castUndercutShare || (dragShare > T.dragShare && heightMm > T.dragMinHeightMm))
-      ? `${(undercutShare * 100).toFixed(0)}% undercut, ${(dragShare * 100).toFixed(0)}% short of draft.`
+    ? `Everything draws cleanly along Z (${castMatLabel}, min wall ${limits.castMinSectionMm} mm).`
+    : summaryParts.length > 0
+      ? `${summaryParts.join(', ')}.`
       : primaryFindingSummary(findings);
 
   return {
@@ -1823,19 +2121,21 @@ function analyseBestSide(
   process: DfmProcess,
   lim: DfmLimits,
   nodeId: string,
+  gapTris: Float64Array = wallTris,
 ): Analysis & { side: string } {
-  const run = (t: Float64Array, wt: Float64Array) => (
-    process === 'print' ? analysePrint(t, lim, wt, false)
+  const run = (t: Float64Array, wt: Float64Array, gt: Float64Array) => (
+    process === 'print' ? analysePrint(t, lim, wt, false, gt)
       : process === 'cnc' ? analyseCnc(t, lim, wt)
         : analyseCast(t, lim, wt)
   );
-  const placed = run(tris, wallTris);
+  const placed = run(tris, wallTris, gapTris);
   if (tris.length / 9 > MAX_TURNED_TRIANGLES || placed.findings.length === 0) return { ...placed, side: '' };
 
   const b = bounds(tris);
   const c = new THREE.Vector3((b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, (b.minZ + b.maxZ) / 2);
   const badness = (a: Analysis) => 100 - a.score;
   const sameWalls = wallTris === tris;
+  const sameGap = gapTris === wallTris;
 
   const rotateSoupAroundCenter = (src: Float64Array, q: THREE.Quaternion): Float64Array => {
     const v = new THREE.Vector3();
@@ -1854,7 +2154,8 @@ function analyseBestSide(
     const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(...side.up), new THREE.Vector3(0, 0, 1));
     const turned = rotateSoupAroundCenter(tris, q);
     const turnedWalls = sameWalls ? turned : rotateSoupAroundCenter(wallTris, q);
-    const a = run(turned, turnedWalls);
+    const turnedGaps = sameGap ? turnedWalls : gapTris === tris ? turned : rotateSoupAroundCenter(gapTris, q);
+    const a = run(turned, turnedWalls, turnedGaps);
     const scoreBad = badness(a);
     if (scoreBad >= bestBadness) continue;
     bestBadness = scoreBad;
@@ -1923,22 +2224,28 @@ export function analyseDfm(
   bench: Partial<DfmBench & DfmLimits> & { asPlaced?: boolean } = {},
 ): DfmReport {
   if (bench.asPlaced) return analyseDfmAsPlaced(scene, process, bench);
+  const resolvedCast = resolveDfmCastMaterial(bench.castMaterial);
   const lim: DfmLimits = {
     ...dfmLimitsFor({
       material: bench.material ?? DEFAULT_MATERIAL,
       filament: bench.filament ?? DEFAULT_FILAMENT,
       stock: bench.stock ?? null,
       printBed: bench.printBed ?? null,
+      bed_mm: bench.bed_mm ?? null,
       printer: bench.printer ?? null,
       castMaterial: bench.castMaterial,
     }),
-    ...Object.fromEntries(Object.entries(bench).filter(([k]) => k in DFM_DEFAULTS)),
+    ...Object.fromEntries(Object.entries(bench).filter(([k]) => k in DFM_DEFAULTS && k !== 'castMaterial')),
   };
+  const resolvedMinWallMm = process === 'cast' ? lim.castMinSectionMm : process === 'cnc' ? lim.cncMinWallMm : lim.minWallMm;
   const target = bench.nodeId ? findNode(scene.nodes || [], bench.nodeId) : null;
   const scopeNodeId = target ? target.id : null;
   // Said as the walk goes, not by sampling the whole scene a second time for
   // its warnings alone.
   const warnings: string[] = [];
+  if (process === 'cast' && resolvedCast.fallbackFrom) {
+    warnings.push(`Unknown cast material "${resolvedCast.fallbackFrom}"; falling back to ${resolvedCast.id} (min wall ${lim.castMinSectionMm} mm).`);
+  }
   const skipped: string[] = [];
 
   // Each body is a part, judged in its own frame — a board modelled tilted
@@ -1948,6 +2255,7 @@ export function analyseDfm(
     local: Float64Array;
     solids: Int32Array;
     flexureTri: Uint8Array;
+    gapSkipTri: Uint8Array;
     world: THREE.Matrix4;
   }[] = [];
   const walk = (nodes: SceneNode[], parent?: THREE.Matrix4) => {
@@ -1960,6 +2268,7 @@ export function analyseDfm(
         const out: number[] = [];
         const solids: number[] = [];
         const flexFlags: number[] = [];
+        const gapSkipFlags: number[] = [];
         let solid = 0;
         for (const g of resolveCsgGeoms(n, 'render')) {
           if (g.role === 'collision') continue;
@@ -1969,9 +2278,12 @@ export function analyseDfm(
             continue;
           }
           const isFlexureLeaf = Boolean(g.bend || g.name?.startsWith('flexure_') || (n.flexure && g.role === 'visual'));
+          // Visual-only flexure leaf geoms intentionally fuse monolithically into their parent body.
+          const isGapIgnored = Boolean(g.bend || g.name?.startsWith('flexure_') || (g.role === 'visual' && !g.csgDerived));
           for (let i = before; i < out.length; i += 9) {
             solids.push(solid);
             flexFlags.push(isFlexureLeaf ? 1 : 0);
+            gapSkipFlags.push(isGapIgnored ? 1 : 0);
           }
           solid++;
         }
@@ -1981,6 +2293,7 @@ export function analyseDfm(
             local: Float64Array.from(out),
             solids: Int32Array.from(solids),
             flexureTri: Uint8Array.from(flexFlags),
+            gapSkipTri: Uint8Array.from(gapSkipFlags),
             world,
           });
         }
@@ -2015,21 +2328,25 @@ export function analyseDfm(
   }
 
   const allTris: number[] = [];
+  const assemblyGapTris: number[] = [];
   const allHeat: number[] = [];
   const findings: DfmFinding[] = [];
   let legend = '';
   let summaries: string[] = [];
   let judgedPoseLabel: string | undefined;
   const named = bodies.length > 1;
-  for (const { node, local, solids, flexureTri, world } of bodies) {
+  for (const { node, local, solids, flexureTri, gapSkipTri, world } of bodies) {
     // Faces where one of the part's shapes sits on another are inside the
     // part, not on it: judged without them, and given no heat.
     const kept = outsideFaces(local, solids);
 
     // Exclude intentional compliant flexure leaves from thin-wall false positives.
     let hasFlex = false;
+    let hasGapSkip = false;
     for (let k = 0; k < kept.index.length; k++) {
-      if (flexureTri[kept.index[k]]) { hasFlex = true; break; }
+      if (flexureTri[kept.index[k]]) hasFlex = true;
+      if (gapSkipTri[kept.index[k]]) hasGapSkip = true;
+      if (hasFlex && hasGapSkip) break;
     }
     let wallTris = kept.tris;
     if (hasFlex) {
@@ -2041,6 +2358,16 @@ export function analyseDfm(
       keepWall.forEach((k, idx) => wt.set(kept.tris.subarray(k * 9, k * 9 + 9), idx * 9));
       wallTris = wt;
     }
+    let gapTris = kept.tris;
+    if (hasGapSkip) {
+      const keepGap: number[] = [];
+      for (let k = 0; k < kept.index.length; k++) {
+        if (!gapSkipTri[kept.index[k]]) keepGap.push(k);
+      }
+      const gt = new Float64Array(keepGap.length * 9);
+      keepGap.forEach((k, idx) => gt.set(kept.tris.subarray(k * 9, k * 9 + 9), idx * 9));
+      gapTris = gt;
+    }
 
     let a: Analysis & { side: string };
     if (process === 'print' && node.printPose) {
@@ -2050,11 +2377,12 @@ export function analyseDfm(
       const mInv = transposeMat3(m);
       const posedTris = rotatePoints(m, kept.tris);
       const posedWallTris = wallTris === kept.tris ? posedTris : rotatePoints(m, wallTris);
+      const posedGapTris = gapTris === kept.tris ? posedTris : gapTris === wallTris ? posedWallTris : rotatePoints(m, gapTris);
       const cutBed = node.printPose.cutFor?.bedMm;
       const bodyLim: DfmLimits = !lim.bedMm && cutBed
         ? { ...lim, bedMm: { widthMm: cutBed[0], depthMm: cutBed[1], heightMm: cutBed[2] } }
         : lim;
-      const posed = analysePrint(posedTris, bodyLim, posedWallTris, true);
+      const posed = analysePrint(posedTris, bodyLim, posedWallTris, true, posedGapTris);
       posed.findings = posed.findings.map((f) => ({
         ...f,
         position: applyMat3Vec(mInv, f.position),
@@ -2062,7 +2390,7 @@ export function analyseDfm(
       a = { ...posed, side: '' };
       judgedPoseLabel = 'print pose';
     } else {
-      a = analyseBestSide(kept.tris, wallTris, process, lim, node.id);
+      a = analyseBestSide(kept.tris, wallTris, process, lim, node.id, gapTris);
       if (a.side) judgedPoseLabel = a.side;
     }
 
@@ -2073,6 +2401,12 @@ export function analyseDfm(
     for (let i = 0; i < local.length; i += 3) {
       v.set(local[i], local[i + 1], local[i + 2]).applyMatrix4(world);
       allTris.push(v.x, v.y, v.z);
+    }
+    if (process === 'print' && gapTris.length >= 9) {
+      for (let i = 0; i < gapTris.length; i += 3) {
+        v.set(gapTris[i], gapTris[i + 1], gapTris[i + 2]).applyMatrix4(world);
+        assemblyGapTris.push(v.x, v.y, v.z);
+      }
     }
     for (const h of a.heat) allHeat.push(h);
     legend = a.legend;
@@ -2101,7 +2435,33 @@ export function analyseDfm(
     return {
       process, tris, warnings, findings, heat: new Float32Array(0), legend: '',
       score: scoreOf(findings), summary: 'Nothing in the scene to analyse.', nodeId: scopeNodeId,
+      minWallMm: resolvedMinWallMm,
+      ...(process === 'cast' && lim.castMaterial ? { castMaterial: lim.castMaterial } : {}),
     };
+  }
+  // Multi-body print-in-place assembly air-gap check across all parts in world space
+  // (skipping visual-only flexure leaf geoms that fuse monolithically into their parent).
+  const assemblyGapSoup = Float64Array.from(assemblyGapTris);
+  if (process === 'print' && parts > 1 && assemblyGapSoup.length >= 9 && assemblyGapSoup.length / 9 <= MAX_BURIED_CHECK) {
+    const assemblyGap = narrowestAirGap(assemblyGapSoup, PRINT_MIN_AIR_GAP_MM);
+    if (assemblyGap) {
+      const existingTightest = findings
+        .filter((f) => f.id === 'print_narrow_gap' || f.id.endsWith(':print_narrow_gap'))
+        .reduce((min, f) => Math.min(min, f.metric ?? Infinity), Infinity);
+      if (assemblyGap.mm < existingTightest - 0.01) {
+        findings.push({
+          id: 'print_narrow_gap',
+          process: 'print',
+          severity: assemblyGap.mm < 0.2 ? 'critical' : 'warning',
+          title: `Narrow air gap (${assemblyGap.mm.toFixed(2)} mm) risks fusion`,
+          detail: `Opposing walls between print-in-place parts are separated by ${assemblyGap.mm.toFixed(2)} mm (minimum ${PRINT_MIN_AIR_GAP_MM} mm recommended to avoid fusing).`,
+          fix: `Increase print-in-place air-gap clearance between opposing walls to at least ${PRINT_MIN_AIR_GAP_MM} mm (0.4 mm recommended for FDM).`,
+          position: assemblyGap.at,
+          metric: assemblyGap.mm,
+          assembly: true,
+        });
+      }
+    }
   }
   const open = findings.filter((f) => !f.passed);
   if (parts > 1) summaries = [open.length === 0 ? `All ${parts} parts come out clean.` : `${open.length} to look at across ${parts} parts.`];
@@ -2110,6 +2470,8 @@ export function analyseDfm(
     heat: Float32Array.from(allHeat), legend, score: scoreOf(findings), summary: summaries[0] ?? '',
     ...(judgedPoseLabel ? { judgedPoseLabel } : {}),
     nodeId: scopeNodeId,
+    minWallMm: resolvedMinWallMm,
+    ...(process === 'cast' && lim.castMaterial ? { castMaterial: lim.castMaterial } : {}),
   };
 }
 
@@ -2122,22 +2484,28 @@ function analyseDfmAsPlaced(
   // The bench first — what is clamped down and what is loaded — then any
   // explicit override on top, so a caller can pin one number without having to
   // restate the material it came with.
+  const resolvedCast = resolveDfmCastMaterial(bench.castMaterial);
   const lim: DfmLimits = {
     ...dfmLimitsFor({
       material: bench.material ?? DEFAULT_MATERIAL,
       filament: bench.filament ?? DEFAULT_FILAMENT,
       stock: bench.stock ?? null,
       printBed: bench.printBed ?? null,
+      bed_mm: bench.bed_mm ?? null,
       printer: bench.printer ?? null,
       castMaterial: bench.castMaterial,
     }),
-    ...Object.fromEntries(Object.entries(bench).filter(([k]) => k in DFM_DEFAULTS)),
+    ...Object.fromEntries(Object.entries(bench).filter(([k]) => k in DFM_DEFAULTS && k !== 'castMaterial')),
   };
+  const resolvedMinWallMm = process === 'cast' ? lim.castMinSectionMm : process === 'cnc' ? lim.cncMinWallMm : lim.minWallMm;
   const target = bench.nodeId ? findNode(scene.nodes || [], bench.nodeId) : null;
   const scopeNodeId = target ? target.id : null;
   const collected = collectSceneTriangles(target ? { ...scene, nodes: [target] } : scene);
   const tris = Float64Array.from(collected.tris);
   const warnings = [...collected.warnings];
+  if (process === 'cast' && resolvedCast.fallbackFrom) {
+    warnings.push(`Unknown cast material "${resolvedCast.fallbackFrom}"; falling back to ${resolvedCast.id} (min wall ${lim.castMinSectionMm} mm).`);
+  }
   if (collected.skipped.length) {
     warnings.push(`Not analysed: ${collected.skipped.join(', ')}.`);
   }
@@ -2149,6 +2517,8 @@ function analyseDfmAsPlaced(
       legend: '', score: 100,
       summary: 'Nothing in the scene to analyse.',
       nodeId: scopeNodeId,
+      minWallMm: resolvedMinWallMm,
+      ...(process === 'cast' && lim.castMaterial ? { castMaterial: lim.castMaterial } : {}),
     };
   }
 
@@ -2169,7 +2539,11 @@ function analyseDfmAsPlaced(
     body.score = scoreOf(body.findings);
   }
 
-  return { process, tris, warnings, ...body, nodeId: scopeNodeId };
+  return {
+    process, tris, warnings, ...body, nodeId: scopeNodeId,
+    minWallMm: resolvedMinWallMm,
+    ...(process === 'cast' && lim.castMaterial ? { castMaterial: lim.castMaterial } : {}),
+  };
 }
 
 /**

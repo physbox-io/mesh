@@ -56,21 +56,60 @@ const VALID_HISTORY_INCLUDE = new Set(['bodies', 'joints', 'contacts', 'aero']);
 /** Serializes overlapping SCREENSHOT calls so temporary view toggles cannot corrupt each other. */
 let screenshotQueue: Promise<unknown> = Promise.resolve();
 
-const waitTwoFramesOrTimeout = (fallbackMs = 100): Promise<void> => new Promise((resolve) => {
-  let done = false;
-  const finish = () => {
-    if (done) return;
-    done = true;
-    clearTimeout(timer);
-    resolve();
-  };
-  const timer = setTimeout(finish, fallbackMs);
-  if (typeof requestAnimationFrame === 'function') {
-    requestAnimationFrame(() => requestAnimationFrame(finish));
-  } else {
-    finish();
+/**
+ * Yields two macrotasks so React commits Zustand view-flag / clean-capture
+ * updates and flushes passive effects without waiting on `requestAnimationFrame`.
+ * Waiting on rAF lets R3F execute 1–2 extra full WebGL renders (several seconds
+ * each under SwiftShader) right before `renderViewportNow()` renders again.
+ */
+const flushReactCommit = (): Promise<void> =>
+  new Promise<void>((resolve) => setTimeout(resolve, 0))
+    .then(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+
+interface OutlineLikeEffect {
+  selection: Iterable<unknown> & { clear: () => void; set: (values: unknown[]) => void };
+  forceUpdate?: boolean;
+}
+
+/**
+ * Temporarily clears any postprocessing OutlineEffect selection on the composer
+ * for a clean screenshot, avoiding unmounting `<SelectionOutline />` from
+ * `<EffectComposer>` (which tears down passes and forces two full WebGL shader
+ * recompilations that stall headless/SwiftShader past the 10s MCP timeout).
+ */
+function suppressComposerOutlines(composer: unknown): () => void {
+  const passes = (composer as { passes?: Array<{ effects?: unknown[] }> } | null | undefined)?.passes;
+  if (!Array.isArray(passes)) return () => {};
+  const saved: Array<{ effect: OutlineLikeEffect; items: unknown[] }> = [];
+  for (const pass of passes) {
+    if (!Array.isArray(pass?.effects)) continue;
+    for (const raw of pass.effects) {
+      const effect = raw as Partial<OutlineLikeEffect> | null | undefined;
+      if (
+        effect &&
+        typeof effect === 'object' &&
+        effect.selection &&
+        typeof effect.selection.clear === 'function' &&
+        typeof effect.selection.set === 'function' &&
+        Symbol.iterator in effect.selection
+      ) {
+        const items = Array.from(effect.selection);
+        if (items.length > 0) {
+          effect.selection.clear();
+          // Ensure OutlineEffect.update() clears its outline render target on this frame.
+          effect.forceUpdate = true;
+          saved.push({ effect: effect as OutlineLikeEffect, items });
+        }
+      }
+    }
   }
-});
+  return () => {
+    for (const { effect, items } of saved) {
+      effect.selection.set(items);
+      effect.forceUpdate = true;
+    }
+  };
+}
 
 async function takeScreenshot(msg: Record<string, unknown>) {
   const win = getPhysicsWindow();
@@ -99,13 +138,16 @@ async function takeScreenshot(msg: Record<string, unknown>) {
   const clean = msg.clean === true;
   if (overridden) apply(wanted);
   if (clean) useCapture.setState({ clean: true });
+  let restoreOutlines: (() => void) | null = null;
   let dataUrl: string;
   try {
-    if (overridden || clean) await waitTwoFramesOrTimeout(100);
+    if (overridden || clean) await flushReactCommit();
+    if (clean) restoreOutlines = suppressComposerOutlines(win?._physics_composer);
     // Through the composer when there is one; see renderViewportNow.
     renderViewportNow();
     dataUrl = gl.domElement.toDataURL('image/png');
   } finally {
+    restoreOutlines?.();
     if (overridden) apply(before);
     if (clean) useCapture.setState({ clean: false });
   }
@@ -610,6 +652,7 @@ export const viewCommands: McpCommands = {
         subdivisionAndGridPolyhedra: 'Use declarative `lattice: { sizeMm: 40, subdiv: 1, thicknessMm: 0, ops: [{ op: "extrude" | "inset" | "bevel" | "bevel_edges" | "circle" | "revolve" | "bridge" | "faces" | "delete_faces" | "sharpen" | "dimension" | "orient" | "smooth" | "wall", ... }] }` on the body, or pass `ops: [...]` to `physics_create_lattice`.',
         organicClayShapes: 'Use declarative `sculpt: { base: "sphere" | "cube" | "cylinder" | "humanoid" | "quadruped" | "bird" | "fish" | "hand" | "head", strokes: [...], cuts: [...] }` on the body, or pass batch `strokes: [...]` to `physics_sculpt`.',
         curvedTracksAndRamps: 'Set `isCurve: true` and `curvePoints: [[x,y,z], ...]` (Z-up metres) on the body.',
+        compliantFlexures: 'Set declarative `flexure: { kind: "blade" | "cross_pivot" | "serpentine" | "bistable", filament?: "pla" | "petg" | "abs" | "asa" | "tpu", thicknessMm?, lengthMm?, widthMm?, folds?, archRiseMm?, jointName?, targetDeflection? }` on a hinged/sliding body, or use `physics_build_mechanism` families `compliant_gripper`, `parallel_flexure`, `cantilever_pawl`.',
         ropesCablesChains: 'Set `isComposite: true`, `compositeType: "cable"`, `compositeCount`, `compositeSize` on the body.',
         customPolyhedra: 'If you must supply raw triangles (`type: "mesh"`), pass `verticesZUp: [x0,y0,z0, ...]` in standard MuJoCo Z-up metres (auto-converted to Y-up `vertices` and `renderVertices`, with inside-out closed meshes auto-flipped). Avoid hand-typing hundreds of coordinates when `extrude`, `lathe`, `lattice`, or `scad` can express the shape in 5 lines.',
       },
@@ -667,7 +710,8 @@ export const viewCommands: McpCommands = {
         euler:         'number[3] — body orientation in degrees, alternative to quat',
         static:        'boolean — if true (or `fixed: true` / `dynamic: false`), omits the default free joint so a top-level body is fixed in world space',
         geoms:         'SceneGeom[] — one or more geoms composing the body shape (optional if body-level `type`/`size` shorthand, `lattice`, `sculpt`, `isCurve`, or `scad` is used)',
-        cuts:          'DeclarativeCut[] — array of hole/slot/pocket/hardware cut specs `{ shape?: "cylinder"|"box"|"pocket"|"slot"|"nut_trap"|"nut_slot"|"counterbore"|"insert"|"insert_boss"|"bearing"|"oring"|"seal_cord"|"rail_seat"|"rod_clamp"|"lm_housing"|"snap_hook"|"snap_catch", at?: [xMm,yMm,zMm], normal?: [nx,ny,nz], diameterMm?, widthMm?, lengthMm?, depthMm?, threadPitchMm?, size?: "M3"|"M4"|..., bore?, fitMm? }` applied automatically when the body is built or updated',
+        cuts:          'DeclarativeCut[] — array of hole/slot/pocket/hardware cut specs `{ shape?: "cylinder"|"box"|"pocket"|"slot"|"nut_trap"|"nut_slot"|"counterbore"|"countersink"|"insert"|"insert_boss"|"bearing"|"oring"|"seal_cord"|"rail_seat"|"rod_clamp"|"lm_housing"|"snap_hook"|"snap_catch", at?: [xMm,yMm,zMm], normal?: [nx,ny,nz], diameterMm?, widthMm?, lengthMm?, depthMm?, threadPitchMm?, size?: "M3"|"M4"|..., bore?, fitMm?, angleDeg? }` applied automatically when the body is built or updated',
+        flexure:       'FlexureDesignInput — declarative monolithic compliant flexure replacing a rigid hinge or slide joint: `{ kind: "blade"|"cross_pivot"|"serpentine"|"bistable", filament?: "pla"|"petg"|"abs"|"asa"|"tpu", thicknessMm?, lengthMm?, widthMm?, folds? (2..8 for serpentine), archRiseMm? (for bistable), jointName?, targetDeflection? (deg for hinge, mm for slide) }`. Computes spring stiffness, travel limits, yield safety factor, and deformable bending leaf geoms automatically.',
         roundEdges:    'DeclarativeRound[] | DeclarativeRound — `{ edges?: "all"|"top"|"bottom"|"vertical"|"inside"|number[], sizeMm: number, mode?: "round"|"bevel" }` (or array of them; alias `roundings`) applied automatically after cuts',
         patterns:      'DeclarativePattern[] — array of surface textures `{ at: [xMm,yMm,zMm], normal?: [nx,ny,nz], pattern: "knurl"|"hex"|"ribs"|"grid"|"wave"|"dimples"|"voronoi"|"flutes"|"threads"|"text", depthMm?: number, emboss?: boolean, options?: {...} }` applied automatically to the body faces',
         paint:         'DeclarativePaint[] — array of paint strokes `{ at: [x,y,z] | [[x,y,z],...], rgba: [r,g,b,a?], radius?: number, flow?: number, geomName?: string }` (in metres) applied automatically after CSG',

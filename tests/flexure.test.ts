@@ -1,11 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import type { SceneNode } from '../src/types/scene';
 import {
+  HOWELL_PRBM_GAMMA,
+  HOWELL_PRBM_K_THETA,
   allowedFlexureKindsForJoint,
+  analyzeSceneFlexures,
   applyFlexureToNode,
   bendLeafPoint,
   bistableForce,
+  buildCantileverPawl,
+  buildCompliantGripper,
+  buildMonolithicPrintNodes,
+  buildParallelFlexureStage,
+  evaluateCantileverBeam,
   evaluateFlexureSpec,
+  evaluateParallelFlexure,
   revertFlexure,
 } from '../src/utils/flexure';
 
@@ -162,6 +171,251 @@ describe('Monolithic Compliant Mechanisms (Flexures)', () => {
       expect(tz).toBeLessThan(0);
       expect(Math.abs(fx)).toBeCloseTo(Math.abs(fz), 6);
       expect(Math.abs(tx)).toBeCloseTo(Math.abs(tz), 6);
+    }
+  });
+
+  it('computes second moment I, strain, safety factor, and targetDeflection over-stress warnings', () => {
+    const safe = evaluateFlexureSpec(
+      { kind: 'blade', filament: 'petg', thicknessMm: 0.8, lengthMm: 16, widthMm: 10, targetDeflection: 15 },
+      'hinge',
+    );
+    // I = b * t^3 / 12 = 0.010 * (0.0008)^3 / 12 = 4.2667e-13 m^4
+    expect(safe.secondMomentM4).toBeCloseTo((0.01 * 0.0008 ** 3) / 12, 16);
+    expect(safe.yieldStrain).toBeCloseTo(48e6 / 2.1e9, 4);
+    expect(safe.operating).toBeDefined();
+    expect(safe.operating!.safetyFactor).toBeGreaterThan(1.4);
+    expect(safe.safetyFactor).toBe(safe.operating!.safetyFactor);
+    expect(safe.maxForceOrTorque).toBeGreaterThan(0);
+
+    // Push well past PETG yield on a thick, short blade
+    const overstressed = evaluateFlexureSpec(
+      { kind: 'blade', filament: 'petg', thicknessMm: 2.0, lengthMm: 8, widthMm: 10, targetDeflection: 30 },
+      'hinge',
+    );
+    expect(overstressed.operating!.safetyFactor).toBeLessThan(1.0);
+    expect(overstressed.warnings.some((w) => w.includes('exceeds') && w.includes('yield'))).toBe(true);
+
+    // TPU has much higher yield strain than PLA/PETG, so the same deflection is safe
+    const tpu = evaluateFlexureSpec(
+      { kind: 'blade', filament: 'tpu', thicknessMm: 2.0, lengthMm: 8, widthMm: 10, targetDeflection: 30 },
+      'hinge',
+    );
+    expect(tpu.yieldStrain).toBeGreaterThan(overstressed.yieldStrain * 10);
+    expect(tpu.operating!.safetyFactor).toBeGreaterThan(2.0);
+  });
+
+  it('targets a named joint on multi-joint bodies via jointName', () => {
+    const multiJoint: SceneNode = {
+      id: 'carriage',
+      name: 'Carriage',
+      pos: [0, 0, 0],
+      geoms: [{ name: 'block', type: 'box', size: [0.01, 0.01, 0.01] }],
+      joints: [
+        { name: 'j_hinge', type: 'hinge', axis: [0, 0, 1], pos: [0, 0, 0] },
+        { name: 'j_slide', type: 'slide', axis: [0, 1, 0], pos: [0, 0, 0] },
+      ],
+      children: [],
+    };
+    const res = applyFlexureToNode(multiJoint, { kind: 'serpentine', filament: 'petg', jointName: 'j_slide' });
+    expect(res).not.toBeNull();
+    expect(res!.node.joints[0].stiffness).toBeUndefined();
+    expect(res!.node.joints[1].stiffness).toBeGreaterThan(0);
+    expect(res!.node.flexure?.kind).toBe('serpentine');
+  });
+
+  it('evaluates and builds a Howell PRBM cantilever pawl / snap-latch', () => {
+    const ev = evaluateCantileverBeam({
+      filament: 'petg',
+      thicknessMm: 1.0,
+      lengthMm: 20,
+      widthMm: 8,
+      deflectionMm: 2.0,
+      rampAngleDeg: 30,
+      frictionCoeff: 0.2,
+    });
+    const E = 2.1e9;
+    const I = (0.008 * 0.001 ** 3) / 12;
+    expect(ev.tipStiffnessNm).toBeCloseTo((3 * E * I) / 0.02 ** 3, 2);
+    expect(ev.prbmStiffnessNmRad).toBeCloseTo((HOWELL_PRBM_GAMMA * HOWELL_PRBM_K_THETA * E * I) / 0.02, 5);
+    expect(ev.prbmPivotOffsetMm).toBeCloseTo(3.0, 2);
+    expect(ev.engageForceN).toBeGreaterThan(ev.tipForceN * 0.5);
+    expect(ev.safetyFactor).toBeGreaterThan(1.4);
+
+    const pawl = buildCantileverPawl({
+      filament: 'petg',
+      thicknessMm: 1.0,
+      lengthMm: 20,
+      widthMm: 8,
+      idPrefix: 'latch1',
+    });
+    expect(pawl.addedIds).toEqual(['latch1_base', 'latch1_arm']);
+    const arm = pawl.nodes[0].children![0];
+    expect(arm.joints[0].type).toBe('hinge');
+    expect(arm.joints[0].stiffness).toBeCloseTo(ev.prbmStiffnessNmRad, 4);
+    expect(arm.geoms.some((g) => g.name === 'flexure_cantilever' && g.role === 'visual' && Boolean(g.bend))).toBe(true);
+  });
+
+  it('evaluates and builds a parallel-guiding flexure stage with parasitic shift and N-beam stiffness', () => {
+    const ev2 = evaluateParallelFlexure({
+      filament: 'petg',
+      thicknessMm: 0.8,
+      lengthMm: 24,
+      widthMm: 10,
+      numBeams: 2,
+      deflectionMm: 3.0,
+    });
+    const ev3 = evaluateParallelFlexure({
+      filament: 'petg',
+      thicknessMm: 0.8,
+      lengthMm: 24,
+      widthMm: 10,
+      numBeams: 3,
+      deflectionMm: 3.0,
+    });
+    // 3 parallel beams are 1.5x stiffer than 2 parallel beams with identical peak stress
+    expect(ev3.totalStiffnessNm / ev2.totalStiffnessNm).toBeCloseTo(1.5, 3);
+    expect(ev3.peakStressMPa).toBeCloseTo(ev2.peakStressMPa, 2);
+    // Parasitic foreshortening = 3 * delta^2 / (5 * L) = 3 * 9 / (5 * 24) = 0.225 mm
+    expect(ev2.parasiticShiftMm).toBeCloseTo(0.225, 3);
+
+    const stage = buildParallelFlexureStage({
+      filament: 'petg',
+      thicknessMm: 0.8,
+      lengthMm: 24,
+      widthMm: 10,
+      numBeams: 3,
+      idPrefix: 'pstage',
+    });
+    const stageNode = stage.nodes[0].children![0];
+    expect(stageNode.joints[0].type).toBe('slide');
+    expect(stageNode.joints[0].stiffness).toBeCloseTo(ev3.totalStiffnessNm, 1);
+    const leaves = stageNode.geoms.filter((g) => g.name.startsWith('flexure_parallel_'));
+    expect(leaves.length).toBe(3);
+    expect(leaves.every((g) => g.role === 'visual' && Boolean(g.bend))).toBe(true);
+  });
+
+  it('builds a 6-flexure compliant parallel-jaw gripper, audits it, and bridges PRBM to monolithic print geometry', () => {
+    const gripper = buildCompliantGripper({
+      filament: 'petg',
+      jawOpeningMm: 24,
+      beamThicknessMm: 0.8,
+      beamLengthMm: 22,
+      beamWidthMm: 10,
+      beamsPerJaw: 3,
+      idPrefix: 'grip6',
+    });
+    expect(gripper.totalFlexureCount).toBe(6);
+    expect(gripper.addedIds).toEqual(['grip6_base', 'grip6_jaw_left', 'grip6_jaw_right']);
+    expect(gripper.pinchForceAtStrokeN).toBeGreaterThan(0);
+    expect(gripper.parasiticShiftMm).toBeGreaterThan(0);
+    expect(gripper.evaluation.safetyFactor).toBeGreaterThanOrEqual(1.39);
+
+    const [base] = gripper.nodes;
+    expect(base.children?.length).toBe(2);
+    for (const jaw of base.children!) {
+      expect(jaw.joints[0].type).toBe('slide');
+      expect(jaw.joints[0].stiffness).toBeCloseTo(gripper.evaluation.totalStiffnessNm, 1);
+      const leaves = jaw.geoms.filter((g) => g.name.startsWith('flexure_parallel_'));
+      expect(leaves.length).toBe(3);
+    }
+
+    // Scene flexure audit sees both compliant jaws and all 6 printable leaves
+    const audit = analyzeSceneFlexures(gripper.nodes);
+    expect(audit.flexureCount).toBe(2);
+    expect(audit.totalLeafCount).toBe(6);
+    expect(audit.minSafetyFactor).toBeGreaterThan(1.0);
+
+    // PRBM -> Monolithic 3D-print bridge merges base + jaws + 6 leaves into one solid body
+    const mono = buildMonolithicPrintNodes(gripper.nodes);
+    expect(mono.length).toBe(1);
+    expect(mono[0].children).toEqual([]);
+    expect(mono[0].joints).toEqual([]);
+    expect(mono[0].flexure).toBeUndefined();
+    // Base palm (1) + 2 jaws * (body + bridge + pad + 3 leaves = 6) = 13 solid geoms
+    expect(mono[0].geoms.length).toBe(13);
+    // All promoted flexure leaves are now solid printable geometry (no visual role, no bend)
+    const promotedLeaves = mono[0].geoms.filter((g) => g.name.includes('flexure_parallel_'));
+    expect(promotedLeaves.length).toBe(6);
+    expect(promotedLeaves.every((g) => g.role === undefined && g.bend === undefined)).toBe(true);
+    // Original PRBM gripper was not mutated
+    expect(gripper.nodes[0].children?.length).toBe(2);
+  });
+
+  it('connects every compliant gripper flexure beam to its jaw and palm with center clearance > 2 * strokeMm and 0 default wall warnings', () => {
+    // Bare buildCompliantGripper() defaults to PETG with beamThicknessMm >= minWallMm (0 warnings)
+    const bare = buildCompliantGripper();
+    expect(bare.evaluation.filament).toBe('petg');
+    expect(bare.evaluation.thicknessMm).toBeGreaterThanOrEqual(1.0);
+    expect(bare.warnings.filter((w) => w.includes('minimum reliable two-perimeter wall'))).toEqual([]);
+    expect(bare.warnings).toEqual([]);
+
+    // No filament emits a wall-thickness warning with default beamThicknessMm
+    for (const filament of ['pla', 'petg', 'abs', 'asa', 'tpu'] as const) {
+      const g = buildCompliantGripper({ filament });
+      expect(g.warnings.filter((w) => w.includes('minimum reliable two-perimeter wall'))).toEqual([]);
+    }
+
+    // Check beam-to-jaw, beam-to-palm connectivity and center clearance across beam counts
+    for (const beamsPerJaw of [2, 3, 4, 5]) {
+      const g = buildCompliantGripper({ beamsPerJaw });
+      const base = g.nodes[0];
+      const palm = base.geoms.find((gm) => gm.name === 'gripper_palm')!;
+      const palmMinX = (palm.pos?.[0] ?? 0) - palm.size[0];
+      const palmMaxX = (palm.pos?.[0] ?? 0) + palm.size[0];
+      const palmMaxY = (palm.pos?.[1] ?? 0) + palm.size[1];
+
+      const halfThick = (g.evaluation.thicknessMm / 1000) * 0.5;
+      const strokeM = g.evaluation.deflectionMm / 1000;
+      const leftJaw = base.children!.find((c) => c.id.endsWith('_jaw_left'))!;
+      const rightJaw = base.children!.find((c) => c.id.endsWith('_jaw_right'))!;
+
+      const jawInnerEdgeX = (jaw: SceneNode, side: -1 | 1) => {
+        const jx = jaw.pos?.[0] ?? 0;
+        const solidGeoms = jaw.geoms.filter((gm) => gm.role !== 'visual' && !gm.name.startsWith('flexure_'));
+        if (side < 0) {
+          return Math.max(...solidGeoms.map((gm) => jx + (gm.pos?.[0] ?? 0) + gm.size[0]));
+        }
+        return Math.min(...solidGeoms.map((gm) => jx + (gm.pos?.[0] ?? 0) - gm.size[0]));
+      };
+
+      // Center clearance between left and right jaws strictly exceeds 2 * strokeMm
+      const centerClearanceM = jawInnerEdgeX(rightJaw, 1) - jawInnerEdgeX(leftJaw, -1);
+      expect(centerClearanceM).toBeGreaterThan(2 * strokeM);
+
+      for (const jaw of [leftJaw, rightJaw]) {
+        const jx = jaw.pos?.[0] ?? 0;
+        const jy = jaw.pos?.[1] ?? 0;
+        const solidGeoms = jaw.geoms.filter((gm) => gm.role !== 'visual' && !gm.name.startsWith('flexure_'));
+        const leaves = jaw.geoms.filter((gm) => gm.name.startsWith('flexure_parallel_'));
+        expect(leaves.length).toBe(beamsPerJaw);
+
+        for (const leaf of leaves) {
+          const from = leaf.bend!.from;
+          const to = leaf.bend!.to;
+          // Base-frame coordinates of both leaf ends
+          const fromBaseX = jx + from[0];
+          const fromBaseY = jy + from[1];
+          const toBaseX = jx + to[0];
+          const toBaseY = jy + to[1];
+
+          // Leaf root connects solidly into gripper_palm at Y = 0
+          expect(fromBaseY).toBeCloseTo(palmMaxY, 5);
+          expect(fromBaseX - halfThick).toBeGreaterThanOrEqual(palmMinX - 1e-6);
+          expect(fromBaseX + halfThick).toBeLessThanOrEqual(palmMaxX + 1e-6);
+
+          // Leaf tip connects solidly into at least one rigid jaw geom (body or bridge) at Y = +lengthMm
+          const connectsToJaw = solidGeoms.some((gm) => {
+            const gMinX = jx + (gm.pos?.[0] ?? 0) - gm.size[0];
+            const gMaxX = jx + (gm.pos?.[0] ?? 0) + gm.size[0];
+            const gMinY = jy + (gm.pos?.[1] ?? 0) - gm.size[1];
+            const gMaxY = jy + (gm.pos?.[1] ?? 0) + gm.size[1];
+            const xInside = toBaseX - halfThick >= gMinX - 1e-6 && toBaseX + halfThick <= gMaxX + 1e-6;
+            const yTouches = toBaseY >= gMinY - 1e-5 && toBaseY <= gMaxY + 1e-5;
+            return xInside && yTouches;
+          });
+          expect(connectsToJaw).toBe(true);
+        }
+      }
     }
   });
 });

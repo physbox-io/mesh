@@ -952,4 +952,52 @@ describe('DFM engine declutter, wall thickness, pose, printer, & hardware regres
     const rBox = analyseDfm(scene([flatBox]), 'print', { asPlaced: true });
     expect(rBox.findings.find((f) => f.id === 'print_tiny_bed_contact')).toBeUndefined();
   });
+
+  it('keeps flat 19 mm boards flat in CNC orientation search instead of standing them on edge', () => {
+    // 800 x 420 x 19 mm flat board against a 300 x 300 x 20 mm bench stock:
+    // stock_fit fires flat, and standing it on edge (+X up, 800 mm deep) must
+    // NOT silence stock_fit via STOCK_BALLPARK to trade it for a cnc_reach warning.
+    const flatBoard = boxBody([0, 0, 0.0095], [0.4, 0.21, 0.0095], 'flat_board');
+    const stock = { widthMm: 300, depthMm: 300, thicknessMm: 20 };
+    const rFlat = analyseDfm(scene([flatBoard]), 'cnc', { stock });
+    expect(rFlat.findings.find((f) => f.id === 'cnc_reach')).toBeUndefined();
+    expect(rFlat.findings.find((f) => f.id === 'stock_fit')).toBeDefined();
+    expect(rFlat.judgedPoseLabel).toBeUndefined();
+
+    // 800 x 19 x 374 mm upright panel: CNC orientation search must lay it flat
+    // (+Y up, 19 mm thick) so cnc_reach does not fire, regardless of stock size.
+    const uprightPanel = boxBody([0, 0, 0.187], [0.4, 0.0095, 0.187], 'upright_panel');
+    const rUpright = analyseDfm(scene([uprightPanel]), 'cnc', { stock });
+    expect(rUpright.findings.find((f) => f.id === 'cnc_reach')).toBeUndefined();
+    expect(rUpright.findings.find((f) => f.id === 'stock_fit')).toBeDefined();
+
+    // Same upright panel with roomy stock (or no stock): lays flat and passes cleanly.
+    const rClean = analyseDfm(scene([uprightPanel]), 'cnc', { stock: { widthMm: 900, depthMm: 500, thicknessMm: 25 } });
+    expect(rClean.findings).toEqual([]);
+    expect(rClean.score).toBe(100);
+  });
+
+  it('keeps cast summary in sync with emitted cast_undercut and cast_draft findings', () => {
+    // Spool has an undercut (critical) and ~28% vertical walls (< 50% dragShare),
+    // so cast_draft is NOT emitted and summary must not claim "short of draft".
+    const spool = scene([
+      boxBody([0, 0, 0.01], [0.06, 0.06, 0.01], 'foot'),
+      boxBody([0, 0, 0.04], [0.01, 0.01, 0.02], 'waist'),
+      boxBody([0, 0, 0.07], [0.06, 0.06, 0.01], 'cap'),
+    ]);
+    const rSpool = analyseDfm(spool, 'cast', { asPlaced: true });
+    expect(rSpool.findings.find((f) => f.id === 'cast_undercut')).toBeDefined();
+    expect(rSpool.findings.find((f) => f.id === 'cast_draft')).toBeUndefined();
+    expect(rSpool.summary).toMatch(/undercut/);
+    expect(rSpool.summary).not.toMatch(/short of draft/);
+
+    // Tall cube has cast_draft and 0% undercut: summary must mention "short of draft"
+    // and NOT "0% undercut".
+    const tallCube = scene([boxBody([0, 0, 0.05], [0.05, 0.05, 0.05])]);
+    const rCube = analyseDfm(tallCube, 'cast', { asPlaced: true });
+    expect(rCube.findings.find((f) => f.id === 'cast_draft')).toBeDefined();
+    expect(rCube.findings.find((f) => f.id === 'cast_undercut')).toBeUndefined();
+    expect(rCube.summary).toMatch(/short of draft/);
+    expect(rCube.summary).not.toMatch(/undercut/);
+  });
 });

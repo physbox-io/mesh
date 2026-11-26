@@ -154,6 +154,39 @@ describe('splitForPrint — cutting', () => {
     expect(r.sections[0].up[2]).toBeLessThan(-0.99);
   });
 
+  it('uses balanced axis-aligned cuts without fragile slivers on a 430x256x380 mm dollhouse with a tight 220x220x250 mm bed', () => {
+    // 430 x 256 x 380 mm hollow dollhouse with floor slabs, walls, and a pitched overhanging roof.
+    const floor1 = box(410, 236, 12, [10, 10, 0]);
+    const backWall = box(410, 12, 240, [10, 234, 12]);
+    const leftWall = box(12, 236, 240, [10, 10, 12]);
+    const rightWall = box(12, 236, 240, [408, 10, 12]);
+    const midFloor = box(410, 236, 12, [10, 10, 126]);
+    const atticFloor = box(410, 236, 12, [10, 10, 252]);
+    // Pitched roof built as stepped gable + eaves overhanging to full 430 x 256 x 380 mm.
+    const roofEaves = box(430, 256, 16, [0, 0, 264]);
+    const roofMid = box(320, 200, 50, [55, 28, 280]);
+    const roofRidge = box(180, 120, 50, [125, 68, 330]);
+    const dollhouse = [floor1, backWall, leftWall, rightWall, midFloor, atticFloor, roofEaves, roofMid, roofRidge];
+
+    const r = ok(splitForPrint(wasm, dollhouse, {
+      bed: { widthMm: 220, depthMm: 220, heightMm: 250 },
+      joinery: { kind: 'dowel' },
+    }));
+
+    expect(r.sections.length).toBeGreaterThanOrEqual(4);
+    expect(r.sections.length).toBeLessThanOrEqual(8);
+    for (const s of r.sections) {
+      expect(s.fits).toBe(true);
+      // No fragile <15 mm slivers along any posed axis.
+      expect(Math.min(...s.sizeMm)).toBeGreaterThanOrEqual(15);
+    }
+    // Cuts stay axis-aligned rather than skewed diagonals.
+    for (const c of r.cuts) {
+      expect(Math.max(Math.abs(c.normal[0]), Math.abs(c.normal[1]), Math.abs(c.normal[2]))).toBeGreaterThan(0.999);
+    }
+    expect(r.joints.some((j) => j.pins.length > 0)).toBe(true);
+  });
+
   it('refuses something that is not a solid, and says why', () => {
     const open = box(50, 50, 50).slice(0, 9 * 10);
     // Ten of twelve triangles: two rims meeting at corners, not fillable as simple loops.

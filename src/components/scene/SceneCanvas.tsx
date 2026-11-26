@@ -59,6 +59,25 @@ installMeshBvh();
 const CAMERA_CONFIG = { position: DEFAULT_EYE, fov: 45, near: 0.01, far: 1000 };
 
 /**
+ * Editor handles hidden during a clean screenshot (see captureStore).
+ * Subscribes to `useCapture` in its own component so toggling `clean` never
+ * re-renders `SceneCanvas` or rebuilds `<EffectComposer>` passes.
+ */
+function EditorOverlays() {
+  const cleanCapture = useCapture((s) => s.clean);
+  if (cleanCapture) return null;
+  return (
+    <>
+      <TransformGizmo />
+      <MeasureTool />
+      <DimensionOverlay />
+      <CenterOfGravityOverlay />
+      <EdgeRoundTool />
+    </>
+  );
+}
+
+/**
  * The R3F canvas: lights, floor, the physics loop, the bodies, every viewport
  * tool and the post-processing. `threeSceneRef` is handed the three.js scene
  * for the mesh exports; `axisCanvasRef` is the HTML overlay the axis legend
@@ -71,7 +90,6 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
   onImportSceneJson: (text: string, fileName: string, dropped: boolean) => void;
 }) {
   const hiRes = useViewQuality(s => s.hiRes);
-  const cleanCapture = useCapture((s) => s.clean);
   const pathTrace = useViewQuality(s => s.pathTrace);
   // The EffectComposer instance, so a screenshot can render through the same
   // post-processing pipeline the viewport uses (AO included) instead of a raw
@@ -285,12 +303,8 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
       <PaintStrokeController />
       <ObjectGestureController />
       {/* A clean screenshot (see captureStore) draws none of the editor's handles. */}
-      {!cleanCapture && <TransformGizmo />}
-      {!cleanCapture && <MeasureTool />}
-      {!cleanCapture && <DimensionOverlay />}
-      {!cleanCapture && <CenterOfGravityOverlay />}
+      <EditorOverlays />
       <SectionCut />
-      {!cleanCapture && <EdgeRoundTool />}
 
       {/* Subtle contact-shadow AO — reads as "more depth", not a style
           change. The composer takes over the render loop from r3f, so a
@@ -329,8 +343,11 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
             shadow — see BodyToneMapping. Last in the chain so it sees
             AO's output in linear light. Hi-Res only. */}
         {hiRes && <BodyToneMapping />}
-        {/* After the tone mapping, so the outline is the blue asked for. */}
-        {hiRes && !cleanCapture && <SelectionOutline />}
+        {/* After the tone mapping, so the outline is the blue asked for.
+            Kept mounted during clean captures so EffectComposer never tears
+            down passes or recompiles WebGL shaders (which stalls SwiftShader);
+            SCREENSHOT temporarily clears the outline selection instead. */}
+        {hiRes && <SelectionOutline />}
       </EffectComposer>
       {/* Draws over the composer's frame, so it comes after it. */}
       {pathTrace && <PathTracedView background={darkMode ? '#0b0f19' : '#f8fafc'} />}

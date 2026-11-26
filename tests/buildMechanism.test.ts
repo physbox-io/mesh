@@ -6,7 +6,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import load_mujoco from '@mujoco/mujoco';
 import { compileToMJCF } from '../src/utils/mjcf';
-import { buildMechanism, MECHANISM_FAMILIES, type MechanismBuild } from '../src/utils/buildMechanism';
+import { buildMechanism, COMPLIANT_MECHANISM_FAMILIES, MECHANISM_FAMILIES, type MechanismBuild } from '../src/utils/buildMechanism';
 import type { SceneNode } from '../src/types/scene';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -49,13 +49,25 @@ describe('build_mechanism options', () => {
   });
 
   it('every family takes actuate, speed and torqueLimitNm', () => {
+    const compliantSet = new Set<string>(COMPLIANT_MECHANISM_FAMILIES);
     for (const family of MECHANISM_FAMILIES) {
-      const driven = ok(buildMechanism({ family, speed: 7, torqueLimitNm: 0.3 }, []));
-      const acts = actuators(driven.nodes);
-      expect(acts.length, family).toBe(1);
-      expect(acts[0].ctrlValue, family).toBe(7);
-      expect(acts[0].forceLimit, family).toBe(0.3);
-      expect(actuators(ok(buildMechanism({ family, actuate: false }, [])).nodes), family).toEqual([]);
+      if (compliantSet.has(family)) {
+        // Compliant mechanisms are passive elastic flexures by default, and attach motor actuators when actuate: true
+        expect(actuators(ok(buildMechanism({ family }, [])).nodes), family).toEqual([]);
+        const driven = ok(buildMechanism({ family, actuate: true, speed: 7, torqueLimitNm: 0.3 }, []));
+        const acts = actuators(driven.nodes);
+        expect(acts.length, family).toBeGreaterThanOrEqual(1);
+        expect(acts[0].ctrlValue, family).toBe(7);
+        expect(acts[0].forceLimit, family).toBe(0.3);
+        expect(actuators(ok(buildMechanism({ family, actuate: false }, [])).nodes), family).toEqual([]);
+      } else {
+        const driven = ok(buildMechanism({ family, speed: 7, torqueLimitNm: 0.3 }, []));
+        const acts = actuators(driven.nodes);
+        expect(acts.length, family).toBe(1);
+        expect(acts[0].ctrlValue, family).toBe(7);
+        expect(acts[0].forceLimit, family).toBe(0.3);
+        expect(actuators(ok(buildMechanism({ family, actuate: false }, [])).nodes), family).toEqual([]);
+      }
     }
   });
 

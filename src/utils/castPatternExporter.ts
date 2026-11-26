@@ -706,19 +706,8 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
   // Thirteen levels is plenty: the trapped-volume curve is piecewise linear in
   // the plane height, so the minimum sits at or very near one of them, and the
   // scan costs one pass over an already-sampled grid.
-  let parting: number;
-  const preppedDraft = scene.castPrep && scene.castPrep.draftDeg > 0 ? scene.castPrep : null;
-  if (preppedDraft) {
-    // The walls were tapered away from one plane; parting anywhere else puts
-    // the drafted walls the wrong way round on one side of it.
-    parting = Math.min(partH, Math.max(0, preppedDraft.partingZ * 1000 - mnZ));
-    if (opts.partingFromBaseMm !== 'auto' && !lostPla && Math.abs(opts.partingFromBaseMm - parting) > 0.05) {
-      warnings.push(
-        `Parting plane kept at ${parting.toFixed(1)} mm (draft was prepared there, not ${opts.partingFromBaseMm} mm).`,
-      );
-    }
-  } else if (opts.partingFromBaseMm === 'auto') {
-    parting = 0;
+  const findAutoParting = (): number => {
+    let best = 0;
     let bestTrapped = trappedAt(0);
     // Only move off the base for a real improvement: a flat-backed pattern is
     // the easiest thing to ram and to print, so it wins every near-tie.
@@ -728,9 +717,34 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
       const t = trappedAt(p);
       if (t < bestTrapped - worthMoving) {
         bestTrapped = t;
-        parting = p;
+        best = p;
       }
     }
+    return best;
+  };
+
+  let parting: number;
+  const preppedDraft = scene.castPrep && scene.castPrep.draftDeg > 0 ? scene.castPrep : null;
+  if (preppedDraft) {
+    // The walls were tapered away from one plane; parting anywhere else puts
+    // the drafted walls the wrong way round on one side of it.
+    parting = Math.min(partH, Math.max(0, preppedDraft.partingZ * 1000 - mnZ));
+    if (!lostPla) {
+      if (opts.partingFromBaseMm === 'auto') {
+        const autoParting = findAutoParting();
+        if (Math.abs(autoParting - parting) > 0.05) {
+          warnings.push(
+            `Parting plane kept at ${parting.toFixed(1)} mm (draft was prepared there, not auto ${autoParting.toFixed(1)} mm).`,
+          );
+        }
+      } else if (Math.abs(opts.partingFromBaseMm - parting) > 0.05) {
+        warnings.push(
+          `Parting plane kept at ${parting.toFixed(1)} mm (draft was prepared there, not ${opts.partingFromBaseMm} mm).`,
+        );
+      }
+    }
+  } else if (opts.partingFromBaseMm === 'auto') {
+    parting = findAutoParting();
   } else {
     parting = Math.max(0, opts.partingFromBaseMm);
   }

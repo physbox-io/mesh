@@ -76,8 +76,8 @@ export interface TimberMember {
   positionsMm: Float32Array;
   faces: Uint32Array;
   volumeMm3: number;
-  /** If split from a wide tabletop/seat panel, which plank index (1-based) and total planks. */
-  plankInfo?: { index: number; total: number; parentName: string };
+  /** If split from a wide tabletop/seat/case panel, which plank index (1-based) and total planks. */
+  plankInfo?: { index: number; total: number; parentName: string; groupId?: number };
 }
 
 export interface ExtractMembersOptions {
@@ -91,6 +91,8 @@ export interface ExtractMembersOptions {
    * edge-glued planks along their grain. Default true.
    */
   splitWidePanels?: boolean;
+  /** Optional per-soup body/geom names corresponding to `soupsMetres`. */
+  hintNames?: (string | undefined)[];
 }
 
 const dot3 = (a: ArrayLike<number>, b: ArrayLike<number>) =>
@@ -209,6 +211,50 @@ export function resolveTimberTargetIds(
   return nodes.map((n) => n.id);
 }
 
+const NON_WOOD_MATERIALS = new Set([
+  'steel',
+  'softMetal',
+  'metal',
+  'brass',
+  'aluminum',
+  'aluminium',
+  'iron',
+  'copper',
+  'bronze',
+  'titanium',
+  'glass',
+  'ceramic',
+  'stone',
+  'concrete',
+]);
+
+/** Max plausible wood/composite density in kg/m³; metals/glass/stone exceed 1500. */
+const MAX_WOOD_DENSITY_KG_M3 = 1500;
+
+function isNonWoodGeom(g: SceneGeom): boolean {
+  return typeof g.density === 'number' && g.density > MAX_WOOD_DENSITY_KG_M3;
+}
+
+function isNonWoodNode(n: SceneNode): boolean {
+  if (isBoughtIn(n) || n.hardwareType) return true;
+  if (typeof n.density === 'number' && n.density > MAX_WOOD_DENSITY_KG_M3) return true;
+  if (n.deformMaterial && NON_WOOD_MATERIALS.has(n.deformMaterial)) return true;
+  const solidGeoms = resolveCsgGeoms(n, 'render').filter((g: SceneGeom) => g.role !== 'collision');
+  if (solidGeoms.length > 0 && solidGeoms.every((g: SceneGeom) => isNonWoodGeom(g))) {
+    return true;
+  }
+  return false;
+}
+
+export interface CollectPartSoupsOptions {
+  /**
+   * When true (e.g. caller passed an explicit `with_ids` list), collect only
+   * the explicitly named nodes without walking unrequested child subtrees of
+   * nodes that already carry their own solid geometry.
+   */
+  strictIds?: boolean;
+}
+
 /**
  * Collect individual geom soups from a selection of scene nodes, preserving
  * per-geom separation when a body is built from multiple positive geoms or
@@ -217,7 +263,9 @@ export function resolveTimberTargetIds(
 export function collectIndividualPartSoups(
   scene: SceneGraph,
   ids: string[],
+  options: CollectPartSoupsOptions = {},
 ): { items: { soup: Float64Array; hintName?: string; hintQuat?: [number, number, number, number] }[]; absorbed: string[] } {
+  const strictIds = options.strictIds === true;
   const worlds = new Map<string, { node: SceneNode; world: THREE.Matrix4 }>();
   const walk = (nodes: SceneNode[], parent?: THREE.Matrix4) => {
     for (const n of nodes) {
@@ -236,33 +284,38 @@ export function collectIndividualPartSoups(
   const absorbed: string[] = [];
   const seen = new Set<string>([first.node.id]);
 
-  const collectFromNode = (n: SceneNode, frame: THREE.Matrix4) => {
-    const geoms = isBoughtIn(n) ? [] : resolveCsgGeoms(n, 'render').filter((g: SceneGeom) => g.role !== 'collision');
+  const collectFromNode = (n: SceneNode, frame: THREE.Matrix4, walkChildren: boolean) => {
+    const geoms = isNonWoodNode(n)
+      ? []
+      : resolveCsgGeoms(n, 'render').filter((g: SceneGeom) => g.role !== 'collision' && !isNonWoodGeom(g));
     for (const geom of geoms) {
       const out: number[] = [];
       if (appendSolidTriangles(geom, frame, out) && out.length >= 36) {
         items.push({
           soup: Float64Array.from(out),
-          hintName: geom.name || n.name,
+          hintName: n.name || geom.name,
         });
       }
     }
+    if (!walkChildren) return;
+    // In strict mode, only descend into empty container groups that have no solid geoms of their own.
+    if (strictIds && geoms.length > 0) return;
     for (const child of n.children || []) {
-      if (child.joints?.length || isBoughtIn(child)) continue;
+      if (child.joints?.length || isNonWoodNode(child)) continue;
       if (!seen.has(child.id)) {
         seen.add(child.id);
         absorbed.push(child.id);
       }
-      collectFromNode(child, getNodeWorldTransform(child, frame));
+      collectFromNode(child, getNodeWorldTransform(child, frame), !strictIds);
     }
   };
 
-  collectFromNode(first.node, new THREE.Matrix4());
+  collectFromNode(first.node, new THREE.Matrix4(), true);
   for (const { node, world } of picked.slice(1)) {
     if (seen.has(node.id)) continue;
     seen.add(node.id);
     absorbed.push(node.id);
-    collectFromNode(node, new THREE.Matrix4().multiplyMatrices(toFirst, world));
+    collectFromNode(node, new THREE.Matrix4().multiplyMatrices(toFirst, world), true);
   }
 
   return { items, absorbed };
@@ -877,6 +930,25 @@ function stripProtrudingPanelTabs(
   return current;
 }
 
+const GENERIC_HINT_NAMES = new Set([
+  'g', 'geom', 'box', 'mesh', 'body', 'solid', 'part', 'cube', 'cylinder', 'object', 'shape',
+]);
+
+function parseHintName(raw?: string): { id: string; title: string } | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed || GENERIC_HINT_NAMES.has(trimmed.toLowerCase())) return null;
+  const cleaned = trimmed.replace(/[^a-zA-Z0-9 _-]+/g, ' ').trim();
+  if (!cleaned) return null;
+  const words = cleaned.split(/[\s_-]+/).filter(Boolean);
+  if (!words.length) return null;
+  const titleWords = words.map((w) => w.charAt(0).toUpperCase() + w.slice(1));
+  return {
+    id: titleWords.join('_'),
+    title: titleWords.join(' '),
+  };
+}
+
 /**
  * Extract and classify all structural timber members from a list of metre
  * triangle soups (either multiple parts or a single combined solid).
@@ -888,12 +960,13 @@ export function extractTimberMembers(
 ): { ok: true; members: TimberMember[]; warnings: string[] } | { ok: false; error: string } {
   const maxBoardWidthMm = options.maxBoardWidthMm ?? 200;
   const splitWidePanels = options.splitWidePanels ?? true;
+  const hintNames = options.hintNames ?? [];
   const warnings: string[] = [];
 
-  const rawManifolds: Manifold[] = [];
-  for (const soup of soupsMetres) {
-    const m = soupToManifoldMm(wasm, soup);
-    if (m) rawManifolds.push(m);
+  const rawManifolds: { manifold: Manifold; hintName?: string }[] = [];
+  for (let i = 0; i < soupsMetres.length; i++) {
+    const m = soupToManifoldMm(wasm, soupsMetres[i]);
+    if (m) rawManifolds.push({ manifold: m, hintName: hintNames[i] });
   }
   if (!rawManifolds.length) {
     return { ok: false, error: 'This selection has no closed 3D solid geometry to break down into timber parts.' };
@@ -901,26 +974,40 @@ export function extractTimberMembers(
 
   // If the input is a single soup (or a single connected component), run our
   // concave furniture decomposition so a one-piece table becomes legs, rails, and top.
-  let decomposed: Manifold[] = [];
+  let decomposed: { manifold: Manifold; hintName?: string }[] = [];
   if (rawManifolds.length === 1) {
-    decomposed = decomposeSingleSolidIntoManifolds(wasm, rawManifolds[0]);
+    decomposed = decomposeSingleSolidIntoManifolds(wasm, rawManifolds[0].manifold).map((manifold) => ({
+      manifold,
+      hintName: rawManifolds[0].hintName,
+    }));
   } else {
     // Even with multiple soups, each soup may contain disjoint components; decompose them.
     for (const rm of rawManifolds) {
-      const comps = rm.decompose();
-      rm.delete();
-      decomposed.push(...comps);
+      const comps = rm.manifold.decompose();
+      rm.manifold.delete();
+      for (const c of comps) decomposed.push({ manifold: c, hintName: rm.hintName });
     }
     // If all components still merged into 1 single manifold, decompose it.
     if (decomposed.length === 1) {
-      decomposed = decomposeSingleSolidIntoManifolds(wasm, decomposed[0]);
+      const onlyHint = decomposed[0].hintName;
+      decomposed = decomposeSingleSolidIntoManifolds(wasm, decomposed[0].manifold).map((manifold) => ({
+        manifold,
+        hintName: onlyHint,
+      }));
     }
   }
 
-  // Optional wide-panel plank splitting (e.g. a 600 mm wide tabletop split into
+  // Optional wide-panel plank splitting (e.g. a 600 mm wide tabletop or chest lid split into
   // narrower boards that fit a bandsaw / benchtop thicknesser and edge-glue together).
-  const splitPieces: { manifold: Manifold; plankInfo?: { index: number; total: number; parentName: string } }[] = [];
-  for (let m of decomposed) {
+  let nextPlankGroupId = 1;
+  const splitPieces: {
+    manifold: Manifold;
+    hintName?: string;
+    plankInfo?: { index: number; total: number; parentName: string; groupId?: number };
+  }[] = [];
+  for (const entry of decomposed) {
+    let m = entry.manifold;
+    const hintName = entry.hintName;
     let mesh = manifoldToMeshMm(m);
     let obb = computeMemberObb(mesh.positionsMm, mesh.faces);
     const role = classifyRole(obb.axes, obb.dimsMm);
@@ -956,17 +1043,19 @@ export function extractTimberMembers(
       if (remainder.volume() > 500) planks.push(remainder);
       else remainder.delete();
 
+      const groupId = nextPlankGroupId++;
       planks.forEach((p, idx) => {
         splitPieces.push({
           manifold: p,
-          plankInfo: { index: idx + 1, total: planks.length, parentName: 'Tabletop' },
+          hintName,
+          plankInfo: { index: idx + 1, total: planks.length, parentName: 'Panel', groupId },
         });
       });
       warnings.push(
-        `Top/panel (${Math.round(widthMm)} mm wide) exceeds max board width (${maxBoardWidthMm} mm) and was split into ${planks.length} edge-glued planks (~${Math.round(stepW)} mm wide each).`,
+        `Panel (${Math.round(widthMm)} mm wide) exceeds max board width (${maxBoardWidthMm} mm) and was split into ${planks.length} edge-glued planks (~${Math.round(stepW)} mm wide each).`,
       );
     } else {
-      splitPieces.push({ manifold: m });
+      splitPieces.push({ manifold: m, hintName });
     }
   }
 
@@ -981,13 +1070,13 @@ export function extractTimberMembers(
       if (obb.bboxMm.min[k] < minAll[k]) minAll[k] = obb.bboxMm.min[k];
       if (obb.bboxMm.max[k] > maxAll[k]) maxAll[k] = obb.bboxMm.max[k];
     }
-    return { mesh, obb, plankInfo: sp.plankInfo };
+    return { mesh, obb, hintName: sp.hintName, plankInfo: sp.plankInfo };
   });
 
   // Group coplanar side-by-side horizontal panels (including pre-split planks
   // like Top_Plank_1 & Top_Plank_2 in `flowerStandPreset`, or a wide tabletop
   // re-split across multiple planks) into ordered plank sets so they receive
-  // sequential `Top_Plank_1..N` IDs and edge-glue alignment dowels.
+  // sequential plank IDs and edge-glue alignment dowels.
   const panelIndices = prelim
     .map((item, idx) => ({ item, idx }))
     .filter(
@@ -1025,11 +1114,13 @@ export function extractTimberMembers(
         }
       }
       if (!allAbut) continue;
+      const groupId = grp[0].item.plankInfo?.groupId ?? nextPlankGroupId++;
       grp.forEach((entry, pIdx) => {
         entry.item.plankInfo = {
           index: pIdx + 1,
           total: grp.length,
-          parentName: 'Tabletop',
+          parentName: entry.item.plankInfo?.parentName ?? 'Panel',
+          groupId,
         };
       });
     }
@@ -1041,6 +1132,26 @@ export function extractTimberMembers(
     0.5 * (minAll[2] + maxAll[2]),
   ];
   const assemblyHeightMm = Math.max(1, maxAll[2] - minAll[2]);
+
+  // Pre-classify roles to distinguish leg-and-apron furniture (tables/chairs/stands)
+  // from panel-walled casework (storage chests, cabinets, bookcases).
+  const prelimRoles: MemberRole[] = prelim.map((item) => {
+    let role: MemberRole = item.plankInfo ? 'panel' : classifyRole(item.obb.axes, item.obb.dimsMm);
+    if (
+      role === 'leg' &&
+      Math.abs(item.obb.axes[0][2]) < 0.94 &&
+      item.obb.bboxMm.min[2] > minAll[2] + assemblyHeightMm * 0.25 &&
+      item.obb.dimsMm[0] < assemblyHeightMm * 0.75
+    ) {
+      role = 'rail';
+    }
+    return role;
+  });
+  const prelimLegCount = prelimRoles.filter((r) => r === 'leg').length;
+  const prelimVertPanelCount = prelim.filter(
+    (item, idx) => prelimRoles[idx] === 'panel' && Math.abs(item.obb.axes[2][2]) < 0.5,
+  ).length;
+  const isCasework = prelimVertPanelCount >= 3 || (prelimVertPanelCount >= 2 && prelimLegCount < 2);
 
   // Assign semantic names (Leg_FL, Leg_FR, Leg_BL, Leg_BR, Apron_Front, etc.)
   let legCounter = 1;
@@ -1060,18 +1171,10 @@ export function extractTimberMembers(
   };
 
   const members: TimberMember[] = prelim.map((item, index) => {
-    const { mesh, obb, plankInfo } = item;
-    let role = plankInfo ? 'panel' : classifyRole(obb.axes, obb.dimsMm);
-    // An elevated angled member (>20° from vertical, lifted >25% off the floor) is a brace/rail, not a floor leg
-    if (
-      role === 'leg' &&
-      Math.abs(obb.axes[0][2]) < 0.94 &&
-      obb.bboxMm.min[2] > minAll[2] + assemblyHeightMm * 0.25 &&
-      obb.dimsMm[0] < assemblyHeightMm * 0.75
-    ) {
-      role = 'rail';
-    }
+    const { mesh, obb, plankInfo, hintName } = item;
+    const role = prelimRoles[index];
     const { face1, face2 } = chooseReferenceFaces(role, obb.centerMm, obb.axes, assemblyCenterMm);
+    const parsedHint = parseHintName(hintName);
 
     let id: string;
     let title: string;
@@ -1098,54 +1201,99 @@ export function extractTimberMembers(
       legCounter++;
       void legCounter;
     } else if (role === 'rail') {
-      const isAngledBrace = Math.abs(obb.axes[0][2]) >= 0.25;
-      const relZ = (obb.centerMm[2] - minAll[2]) / assemblyHeightMm;
-      const tierPrefix = isAngledBrace ? 'Brace' : relZ >= 0.62 ? 'Apron' : 'Stretcher';
-      const dx = obb.centerMm[0] - assemblyCenterMm[0];
-      const dy = obb.centerMm[1] - assemblyCenterMm[1];
-      // Check whether the rail runs along X (Front/Back) or along Y (Left/Right)
-      const runsAlongX = Math.abs(obb.axes[0][0]) >= Math.abs(obb.axes[0][1]);
-      let sideSuffix: string;
-      if (runsAlongX) {
-        sideSuffix = Math.abs(dy) < (maxAll[1] - minAll[1]) * 0.15 ? 'Center' : dy < 0 ? 'Front' : 'Back';
+      if (isCasework && parsedHint) {
+        id = uniqueId(parsedHint.id);
+        title = `${parsedHint.title} (${id})`;
       } else {
-        sideSuffix = Math.abs(dx) < (maxAll[0] - minAll[0]) * 0.15 ? 'Center' : dx < 0 ? 'Left' : 'Right';
-      }
-      id = uniqueId(`${tierPrefix}_${sideSuffix}`);
-      title = isAngledBrace
-        ? `${sideSuffix} Angled Brace (${id})`
-        : `${sideSuffix} ${tierPrefix} Rail (${id})`;
-      railCounter++;
-      void railCounter;
-    } else {
-      if (plankInfo) {
-        id = uniqueId(`Top_Plank_${plankInfo.index}`);
-        title = `Tabletop Plank ${plankInfo.index} of ${plankInfo.total} (${id})`;
-      } else if (Math.abs(obb.axes[2][2]) < 0.5) {
-        // Vertical cabinet/bookcase side or divider panel
+        const isAngledBrace = Math.abs(obb.axes[0][2]) >= 0.25;
+        const relZ = (obb.centerMm[2] - minAll[2]) / assemblyHeightMm;
+        const tierPrefix = isAngledBrace
+          ? 'Brace'
+          : isCasework
+            ? 'Rail'
+            : relZ >= 0.62
+              ? 'Apron'
+              : 'Stretcher';
         const dx = obb.centerMm[0] - assemblyCenterMm[0];
         const dy = obb.centerMm[1] - assemblyCenterMm[1];
-        let baseName: string;
-        let pretty: string;
-        if (Math.abs(obb.axes[2][0]) >= Math.abs(obb.axes[2][1])) {
-          if (Math.abs(dx) < (maxAll[0] - minAll[0]) * 0.15) {
-            baseName = 'Divider_Center';
-            pretty = 'Center Divider Panel';
-          } else if (dx < 0) {
-            baseName = 'Side_Left';
-            pretty = 'Left Side Panel';
-          } else {
-            baseName = 'Side_Right';
-            pretty = 'Right Side Panel';
-          }
+        // Check whether the rail runs along X (Front/Back) or along Y (Left/Right)
+        const runsAlongX = Math.abs(obb.axes[0][0]) >= Math.abs(obb.axes[0][1]);
+        let sideSuffix: string;
+        if (runsAlongX) {
+          sideSuffix = Math.abs(dy) < (maxAll[1] - minAll[1]) * 0.15 ? 'Center' : dy < 0 ? 'Front' : 'Back';
         } else {
-          baseName = dy < 0 ? 'Panel_Front' : 'Panel_Back';
-          pretty = dy < 0 ? 'Front Panel' : 'Back Panel';
+          sideSuffix = Math.abs(dx) < (maxAll[0] - minAll[0]) * 0.15 ? 'Center' : dx < 0 ? 'Left' : 'Right';
         }
+        id = uniqueId(`${tierPrefix}_${sideSuffix}`);
+        title = isAngledBrace
+          ? `${sideSuffix} Angled Brace (${id})`
+          : isCasework
+            ? `${sideSuffix} Rail (${id})`
+            : `${sideSuffix} ${tierPrefix} Rail (${id})`;
+      }
+      railCounter++;
+      void railCounter;
+    } else if (Math.abs(obb.axes[2][2]) < 0.5) {
+      // Vertical cabinet/chest/bookcase side, front, back, or divider panel
+      const dx = obb.centerMm[0] - assemblyCenterMm[0];
+      const dy = obb.centerMm[1] - assemblyCenterMm[1];
+      let baseName: string;
+      let pretty: string;
+      if (Math.abs(obb.axes[2][0]) >= Math.abs(obb.axes[2][1])) {
+        if (Math.abs(dx) < (maxAll[0] - minAll[0]) * 0.15) {
+          baseName = 'Divider_Center';
+          pretty = 'Center Divider Panel';
+        } else if (dx < 0) {
+          baseName = 'Side_Left';
+          pretty = 'Left Side Panel';
+        } else {
+          baseName = 'Side_Right';
+          pretty = 'Right Side Panel';
+        }
+      } else {
+        baseName = dy < 0 ? 'Panel_Front' : 'Panel_Back';
+        pretty = dy < 0 ? 'Front Panel' : 'Back Panel';
+      }
+      if (plankInfo) {
+        const pBase = isCasework && parsedHint ? parsedHint.id : baseName;
+        const pPretty = isCasework && parsedHint ? parsedHint.title : pretty;
+        plankInfo.parentName = pPretty;
+        id = uniqueId(`${pBase}_Plank_${plankInfo.index}`);
+        title = `${pPretty} Plank ${plankInfo.index} of ${plankInfo.total} (${id})`;
+      } else if (isCasework && parsedHint) {
+        id = uniqueId(parsedHint.id);
+        title = `${parsedHint.title} (${id})`;
+      } else {
         id = uniqueId(baseName);
         title = `${pretty} (${id})`;
+      }
+    } else {
+      // Horizontal panel (tabletop, lid, bottom, or shelf)
+      const relZ = (obb.centerMm[2] - minAll[2]) / assemblyHeightMm;
+      if (isCasework) {
+        const fallbackBase = relZ >= 0.7 ? 'Top_Panel' : relZ < 0.35 ? 'Bottom_Panel' : `Shelf_${panelCounter++}`;
+        const fallbackPretty = relZ >= 0.7 ? 'Top Panel' : relZ < 0.35 ? 'Bottom Panel' : 'Shelf Panel';
+        const pBase = parsedHint ? parsedHint.id : fallbackBase;
+        const pPretty = parsedHint ? parsedHint.title : fallbackPretty;
+        if (plankInfo) {
+          plankInfo.parentName = pPretty;
+          id = uniqueId(`${pBase}_Plank_${plankInfo.index}`);
+          title = `${pPretty} Plank ${plankInfo.index} of ${plankInfo.total} (${id})`;
+        } else {
+          id = uniqueId(pBase);
+          title = `${pPretty} (${id})`;
+        }
+      } else if (plankInfo) {
+        if (relZ < 0.45) {
+          plankInfo.parentName = 'Shelf';
+          id = uniqueId(`Shelf_Plank_${plankInfo.index}`);
+          title = `Shelf Plank ${plankInfo.index} of ${plankInfo.total} (${id})`;
+        } else {
+          plankInfo.parentName = 'Tabletop';
+          id = uniqueId(`Top_Plank_${plankInfo.index}`);
+          title = `Tabletop Plank ${plankInfo.index} of ${plankInfo.total} (${id})`;
+        }
       } else {
-        const relZ = (obb.centerMm[2] - minAll[2]) / assemblyHeightMm;
         const kind = relZ >= 0.7 ? 'Tabletop' : 'Shelf';
         id = uniqueId(panelCounter === 1 && kind === 'Tabletop' ? 'Tabletop' : `${kind}_${panelCounter}`);
         title = `${kind} Panel (${id})`;
@@ -1735,6 +1883,7 @@ export function decomposeSolidIntoPlanks(
   wasm: ManifoldToplevel,
   soupsMetres: ArrayLike<number>[],
   rawOptions: TimberPlankOptions = {},
+  hintNames: (string | undefined)[] = [],
 ): TimberPlankBreakdownOutcome {
   const options: Required<TimberPlankOptions> = {
     ...DEFAULT_TIMBER_PLANK_OPTIONS,
@@ -1749,24 +1898,76 @@ export function decomposeSolidIntoPlanks(
   options.dowelLengthMm = Math.max(10, options.dowelLengthMm);
   options.clearanceMm = Math.max(0, Math.min(2, options.clearanceMm));
 
-  const inputManifolds: Manifold[] = [];
-  for (const soup of soupsMetres) {
-    const m = soupToManifoldMm(wasm, soup);
-    if (m) inputManifolds.push(m);
+  const inputPieces: { manifold: Manifold; hintName?: string }[] = [];
+  for (let i = 0; i < soupsMetres.length; i++) {
+    const m = soupToManifoldMm(wasm, soupsMetres[i]);
+    if (m) inputPieces.push({ manifold: m, hintName: hintNames[i] });
   }
-  if (!inputManifolds.length) {
+  if (!inputPieces.length) {
     return { ok: false, error: 'Selected body has no valid watertight 3D solid geometry to decompose into timber planks.' };
   }
 
-  const outerSolid =
-    inputManifolds.length === 1 ? inputManifolds[0] : wasm.Manifold.union(inputManifolds);
-  if (inputManifolds.length > 1) {
-    for (const m of inputManifolds) m.delete();
+  // Detect whether the input is ALREADY a multi-body paneled/board assembly
+  // (e.g. a storage chest, cabinet, or case made of individual 10–40 mm boards
+  // with overhanging lids, recessed plinths, cleats, and battens). Merging such
+  // an assembly into one bounding box and boolean-slicing an outer shell would
+  // shred recessed walls into sub-mm slivers and delete interior/bottom boards!
+  let isAlreadyPaneled = false;
+  let originalVolumeMm3 = 0;
+  const bbox: { min: Vec3; max: Vec3 } = {
+    min: [Infinity, Infinity, Infinity],
+    max: [-Infinity, -Infinity, -Infinity],
+  };
+  const pieceMetrics: {
+    obb: ReturnType<typeof computeMemberObb>;
+    vol: number;
+    boardLike: boolean;
+  }[] = [];
+
+  if (inputPieces.length >= 2) {
+    const maxBoardThickMm = Math.max(45, options.boardThicknessMm * 2.2);
+    let boardLikeCount = 0;
+    let boardLikeVol = 0;
+    for (const ip of inputPieces) {
+      const mesh = manifoldToMeshMm(ip.manifold);
+      const obb = computeMemberObb(mesh.positionsMm, mesh.faces);
+      const hull = ip.manifold.hull();
+      const solidity = mesh.volumeMm3 / Math.max(1e-6, hull.volume());
+      hull.delete();
+      const thickMm = obb.dimsMm[2];
+      const boardLike = thickMm >= 3 && thickMm <= maxBoardThickMm && solidity >= 0.72;
+      if (boardLike) {
+        boardLikeCount++;
+        boardLikeVol += mesh.volumeMm3;
+      }
+      originalVolumeMm3 += mesh.volumeMm3;
+      for (let k = 0; k < 3; k++) {
+        if (obb.bboxMm.min[k] < bbox.min[k]) bbox.min[k] = obb.bboxMm.min[k];
+        if (obb.bboxMm.max[k] > bbox.max[k]) bbox.max[k] = obb.bboxMm.max[k];
+      }
+      pieceMetrics.push({ obb, vol: mesh.volumeMm3, boardLike });
+    }
+    isAlreadyPaneled =
+      boardLikeCount >= Math.ceil(inputPieces.length * 0.8) &&
+      boardLikeVol >= originalVolumeMm3 * 0.8;
+  }
+
+  let outerSolid: Manifold | null = null;
+  if (!isAlreadyPaneled) {
+    outerSolid =
+      inputPieces.length === 1
+        ? inputPieces[0].manifold
+        : wasm.Manifold.union(inputPieces.map((ip) => ip.manifold));
+    if (inputPieces.length > 1) {
+      for (const ip of inputPieces) ip.manifold.delete();
+    }
+    originalVolumeMm3 = outerSolid.volume();
+    const b = outerSolid.boundingBox();
+    bbox.min = [b.min[0], b.min[1], b.min[2]];
+    bbox.max = [b.max[0], b.max[1], b.max[2]];
   }
 
   const warnings: string[] = [];
-  const originalVolumeMm3 = outerSolid.volume();
-  const bbox = outerSolid.boundingBox();
   const spanX = bbox.max[0] - bbox.min[0];
   const spanY = bbox.max[1] - bbox.min[1];
   const spanZ = bbox.max[2] - bbox.min[2];
@@ -1780,6 +1981,7 @@ export function decomposeSolidIntoPlanks(
     id: string;
     name: string;
     wallFace: ShellWallFace;
+    parentBoardId?: string;
     upNormal: Vec3;
     grainAxis: GrainAxis;
     widthAxis: GrainAxis;
@@ -1793,12 +1995,13 @@ export function decomposeSolidIntoPlanks(
   try {
     const wallT = options.wallThicknessMm;
     const canHollow =
+      !isAlreadyPaneled &&
       options.hollowInterior &&
       spanX > 2 * wallT + 8 &&
       spanY > 2 * wallT + 8 &&
       spanZ > 2 * wallT + 8;
 
-    if (options.hollowInterior && !canHollow) {
+    if (!isAlreadyPaneled && options.hollowInterior && !canHollow) {
       warnings.push(
         `Part (${Math.round(spanX)}×${Math.round(spanY)}×${Math.round(spanZ)} mm) is too thin for a ${wallT} mm hollow shell; using laminated board layers instead.`,
       );
@@ -1818,6 +2021,7 @@ export function decomposeSolidIntoPlanks(
       grainAxis: GrainAxis,
       widthAxis: GrainAxis,
       cornerJoints: PlankJointSummary[],
+      parentBoardId?: string,
     ) => {
       const wBox = wallSolid.boundingBox();
       const wIdx = axisIdx(widthAxis);
@@ -1842,6 +2046,22 @@ export function decomposeSolidIntoPlanks(
         warnings.push(
           `${baseLabel} (${Math.round(gSpan)} mm long) exceeds max board length (${options.maxBoardLengthMm} mm) -> spliced into ${nG} lengths.`,
         );
+      }
+
+      if (nW === 1 && nG === 1) {
+        const piece = wallSolid.translate([0, 0, 0]);
+        rawPlanks.push({
+          id: baseId,
+          name: isAlreadyPaneled ? baseLabel : `${baseLabel} Plank`,
+          wallFace,
+          parentBoardId,
+          upNormal,
+          grainAxis,
+          widthAxis,
+          solid: piece,
+          joints: cornerJoints.map((j) => ({ ...j })),
+        });
+        return;
       }
 
       for (let iw = 0; iw < nW; iw++) {
@@ -1889,6 +2109,7 @@ export function decomposeSolidIntoPlanks(
             id,
             name,
             wallFace,
+            parentBoardId,
             upNormal,
             grainAxis,
             widthAxis,
@@ -1899,7 +2120,84 @@ export function decomposeSolidIntoPlanks(
       }
     };
 
-    if (canHollow) {
+    if (isAlreadyPaneled) {
+      warnings.push(
+        `Input already consists of ${inputPieces.length} individual boards; preserved real board geometry instead of hollow-shell slicing.`,
+      );
+      const axisNames: GrainAxis[] = ['x', 'y', 'z'];
+      const usedBoardIds = new Set<string>();
+      const uniqueBoardId = (base: string): string => {
+        if (!usedBoardIds.has(base)) {
+          usedBoardIds.add(base);
+          return base;
+        }
+        let k = 2;
+        while (usedBoardIds.has(`${base}_${k}`)) k++;
+        const next = `${base}_${k}`;
+        usedBoardIds.add(next);
+        return next;
+      };
+
+      for (let i = 0; i < inputPieces.length; i++) {
+        const ip = inputPieces[i];
+        const { obb } = pieceMetrics[i];
+
+        // Pick 3 distinct world axes closest to the board's [grain, width, thickness] OBB axes
+        const pickAxis = (v: Vec3, excluded: number[]): 0 | 1 | 2 => {
+          let best: 0 | 1 | 2 = 0;
+          let bestAbs = -1;
+          for (const k of [0, 1, 2] as const) {
+            if (excluded.includes(k)) continue;
+            if (Math.abs(v[k]) > bestAbs) {
+              bestAbs = Math.abs(v[k]);
+              best = k;
+            }
+          }
+          return best;
+        };
+        const tIdx = pickAxis(obb.axes[2], []);
+        const gIdx = pickAxis(obb.axes[0], [tIdx]);
+        const wIdx = ([0, 1, 2].find((k) => k !== tIdx && k !== gIdx) ?? 1) as 0 | 1 | 2;
+
+        const outSign = obb.centerMm[tIdx] - assemblyCenterMm[tIdx] >= -1e-3 ? 1 : -1;
+        const upNormal: Vec3 = [0, 0, 0];
+        upNormal[tIdx] = outSign;
+        const wallFace: ShellWallFace =
+          tIdx === 2
+            ? outSign >= 0 ? '+z' : '-z'
+            : tIdx === 0
+              ? outSign >= 0 ? '+x' : '-x'
+              : outSign >= 0 ? '+y' : '-y';
+
+        const parsedHint = parseHintName(ip.hintName);
+        const fallbackLabel =
+          wallFace === '+z'
+            ? 'Top Board'
+            : wallFace === '-z'
+              ? 'Bottom Board'
+              : wallFace === '-x'
+                ? 'Left Side Board'
+                : wallFace === '+x'
+                  ? 'Right Side Board'
+                  : wallFace === '-y'
+                    ? 'Front Board'
+                    : 'Back Board';
+        const baseId = uniqueBoardId(parsedHint ? parsedHint.id : `Board_${i + 1}`);
+        const baseLabel = parsedHint ? parsedHint.title : `${fallbackLabel} ${i + 1}`;
+
+        subdivideIntoPlanks(
+          ip.manifold,
+          baseId,
+          baseLabel,
+          wallFace,
+          upNormal,
+          axisNames[gIdx],
+          axisNames[wIdx],
+          [],
+          baseId,
+        );
+      }
+    } else if (canHollow && outerSolid) {
       // Subtract interior void core
       const innerVoid = aabbBoxManifold(
         wasm,
@@ -1954,7 +2252,7 @@ export function decomposeSolidIntoPlanks(
       }
 
       if (shellSolid !== outerSolid) shellSolid.delete();
-    } else {
+    } else if (outerSolid) {
       // Solid laminated layer breakdown along Z (or thinnest axis)
       const boardT = options.boardThicknessMm;
       const nLayers = Math.max(1, Math.ceil((spanZ - 0.2) / boardT));
@@ -2034,7 +2332,10 @@ export function decomposeSolidIntoPlanks(
           let longAxis: 0 | 1 | 2 = 0;
           let thickAxis: 0 | 1 | 2 = 2;
 
-          if (pA.wallFace === pB.wallFace) {
+          const sameParentWall = isAlreadyPaneled
+            ? pA.parentBoardId !== undefined && pA.parentBoardId === pB.parentBoardId
+            : pA.wallFace === pB.wallFace;
+          if (sameParentWall) {
             // Same wall or layer: edge seam across widthAxis
             const wIdx = axisIdx(pA.widthAxis);
             const gIdx = axisIdx(pA.grainAxis);
@@ -2316,7 +2617,13 @@ export function decomposeSolidIntoPlanks(
       `# Timber Plank Breakdown & Bill of Materials`,
       ``,
       `- **Joint Style:** ${options.jointType.toUpperCase()}${options.jointType === 'finger' ? ` (${options.fingerWidthMm} mm fingers)` : ''}`,
-      `- **Construction:** ${canHollow ? `Hollow 6-Wall Shell (${options.wallThicknessMm} mm walls)` : `Solid Laminated Planks (${options.boardThicknessMm} mm layers)`}`,
+      `- **Construction:** ${
+        isAlreadyPaneled
+          ? `Preserved Multi-Board Assembly (${inputPieces.length} input boards)`
+          : canHollow
+            ? `Hollow 6-Wall Shell (${options.wallThicknessMm} mm walls)`
+            : `Solid Laminated Planks (${options.boardThicknessMm} mm layers)`
+      }`,
       `- **Max Board Stock:** ${options.maxBoardLengthMm} × ${options.maxBoardWidthMm} × ${options.boardThicknessMm} mm`,
       `- **Alignment Dowels:** ${options.jointType !== 'glue' && options.dowelDiaMm > 0 && totalDowelPins > 0 ? `${totalDowelPins}× Ø${options.dowelDiaMm}×${options.dowelLengthMm} mm fluted beech/birch dowels` : 'None'}`,
       `- **Total Planks:** ${planks.length} (${(totalVolumeMm3 / 1000).toFixed(1)} cm³ timber)`,
@@ -2346,7 +2653,11 @@ export function decomposeSolidIntoPlanks(
     };
   } finally {
     for (const rp of rawPlanks) rp.solid.delete();
-    outerSolid.delete();
+    if (outerSolid) {
+      outerSolid.delete();
+    } else {
+      for (const ip of inputPieces) ip.manifold.delete();
+    }
   }
 }
 

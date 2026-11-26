@@ -11,15 +11,19 @@
 // dialogs make it; the MCP server writes it to disk or sends it straight to
 // the Etch tab, so the drawing never passes through the agent.
 
+import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
+import type { SceneGraph, SceneNode } from '../../types/scene';
 import { DEFAULT_CONTOUR_OPTIONS, type ContourSliceResult } from '../../utils/contourSliceExporter';
 import { DEFAULT_SHEET_UNFOLD_OPTIONS, exportSheetUnfold, type SheetUnfoldOptions } from '../../utils/sheetUnfoldExporter';
-import type { LaserCutResult } from '../../utils/laserCutExporter';
+import { getNodeWorldTransform, type LaserCutResult } from '../../utils/laserCutExporter';
 import { layoutCutOutset, layoutKerf, layoutMargin } from '../../utils/sheetCutRecipe';
 import type { EtchSheetSpec } from '../../utils/etchHandoff';
 import { etchLayoutOptions } from '../../utils/etchSceneHandoff';
 import { ExportWorkerClient } from '../../utils/exportWorkerClient';
-import { mcpMoldSubject } from '../../utils/moldSubject';
+import { mcpMoldSubject, type MoldSubject } from '../../utils/moldSubject';
+import { isPourTooling, withoutTooling } from '../../utils/pourTooling';
+import { isNodeRotationBaked } from '../../utils/sceneTree';
 import { findNodeInScene, describeFiles } from './bridgeUtils';
 import type { McpCommands } from './types';
 
@@ -29,6 +33,89 @@ const SHEET_MODES = ['papercraft', 'sheet_metal', 'soft_goods'] as const;
 const JOINT_MODES = ['finger', 'slot', 'glue'] as const;
 
 const fileSafe = (s: string) => s.toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'cut';
+
+function hasOwnPositiveGeoms(node: SceneNode): boolean {
+  return (node.geoms || []).some((g) => g.role !== 'collision' && g.csg !== 'difference');
+}
+
+function liftCutNode(node: SceneNode, world: THREE.Matrix4): SceneNode {
+  const pos = new THREE.Vector3();
+  const q = new THREE.Quaternion();
+  world.decompose(pos, q, new THREE.Vector3());
+  const { euler: _euler, ...rest } = node;
+  const geoms = isNodeRotationBaked(node)
+    ? node.geoms.map(({ baseVertices: _bv, baseRenderVertices: _brv, ...g }) => g)
+    : node.geoms;
+  return { ...rest, geoms, pos: [pos.x, pos.y, pos.z], quat: [q.w, q.x, q.y, q.z] };
+}
+
+/**
+ * Resolves the cut subject while preventing parent-subtree leakage when explicit
+ * `masterId` bodies are named (e.g. a wood lid panel carrying child steel hinges
+ * or a brass hasp).
+ *
+ * - `includeChildren === true`: preserves full subtrees (existing `mcpMoldSubject` behavior).
+ * - `includeChildren === false`: strips unrequested children even for whole-scene or container nodes.
+ * - `includeChildren === undefined` (default):
+ *   - With explicit `masterId`: strips unrequested children from bodies that have their own
+ *     geometry (while still picking any child that was also explicitly listed in `masterId`),
+ *     and keeps children for empty container/group bodies that have no geometry of their own.
+ *   - Without `masterId` (whole scene): includes the whole scene tree as usual.
+ */
+function resolveCutSubject(
+  scene: SceneGraph,
+  masterId: unknown,
+  resolve: (id: string) => SceneNode | null,
+  includeChildren: boolean | undefined,
+): MoldSubject | { error: string } {
+  const base = mcpMoldSubject(scene, masterId, resolve, 'cut');
+  if ('error' in base) return base;
+
+  const named = typeof masterId === 'string'
+    ? masterId.split(',').map((x) => x.trim()).filter(Boolean)
+    : [];
+
+  if (named.length === 0) {
+    if (includeChildren === false) {
+      const stripped = base.scene.nodes.map((n) => ({ ...n, children: [] }));
+      return { ...base, scene: { ...base.scene, nodes: stripped } };
+    }
+    return base;
+  }
+
+  if (includeChildren === true) return base;
+
+  const wanted = new Set(named.map((id) => resolve(id)!.id));
+  const picked: SceneNode[] = [];
+  const real = (n: SceneNode) => !n.simulation && !isPourTooling(n);
+
+  const walk = (nodes: SceneNode[], parent?: THREE.Matrix4) => {
+    for (const n of nodes) {
+      if (!real(n)) continue;
+      const world = getNodeWorldTransform(n, parent);
+      if (wanted.has(n.id)) {
+        const keepSubtree = includeChildren === undefined && !hasOwnPositiveGeoms(n) && (n.children?.length ?? 0) > 0;
+        const liftedNode = parent ? liftCutNode(n, world) : n;
+        if (keepSubtree) {
+          picked.push(withoutTooling(liftedNode));
+        } else {
+          picked.push({ ...liftedNode, children: [] });
+          if (n.children?.length) walk(n.children, world);
+        }
+      } else if (n.children?.length) {
+        walk(n.children, world);
+      }
+    }
+  };
+  walk(scene.nodes);
+
+  if (!picked.length) return base;
+  return {
+    scene: { ...scene, nodes: picked },
+    ids: picked.map((n) => n.id),
+    label: picked.length <= 2 ? picked.map((n) => n.name).join(' and ') : `${picked[0].name} and ${picked.length - 1} more`,
+  };
+}
 
 function checkPos(v: unknown, name: string): { ok: true; value: number | undefined } | { ok: false; error: string } {
   if (v === undefined || v === null) return { ok: true, value: undefined };
@@ -60,7 +147,17 @@ export const cutCommands: McpCommands = {
     if (msg.masterId !== undefined && msg.masterId !== null && typeof msg.masterId !== 'string') {
       return { ok: false, error: 'masterId must be a string.' };
     }
-    const subject = mcpMoldSubject(store.sceneGraph, msg.masterId, (id) => findNodeInScene(store.sceneGraph.nodes, (toId ? toId(id) : id) as string), 'cut');
+    const rawIncludeChildren = msg.includeChildren !== undefined ? msg.includeChildren : msg.include_children;
+    if (rawIncludeChildren !== undefined && rawIncludeChildren !== null && typeof rawIncludeChildren !== 'boolean') {
+      return { ok: false, error: 'includeChildren must be a boolean.' };
+    }
+    const includeChildren = typeof rawIncludeChildren === 'boolean' ? rawIncludeChildren : undefined;
+    const subject = resolveCutSubject(
+      store.sceneGraph,
+      msg.masterId,
+      (id) => findNodeInScene(store.sceneGraph.nodes, (toId ? toId(id) : id) as string),
+      includeChildren,
+    );
     if ('error' in subject) return { ok: false, error: subject.error };
     const state = useStore.getState();
     const machine: 'laser' | 'cnc' = msg.machine === 'laser'

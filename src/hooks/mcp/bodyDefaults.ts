@@ -298,13 +298,23 @@ export function resolveUpdatedGeoms(
   return { ok: true, geoms: resolvedList };
 }
 
-export const fillJointDefaults = (rawJ: RawJoint, bodyName: string, idx: number): SceneJoint => fillJoint(withoutNulls(rawJ), bodyName, idx);
+export const fillJointDefaults = (
+  rawJ: RawJoint,
+  bodyName: string,
+  idx: number,
+  defaultType: SceneJoint['type'] = 'free',
+): SceneJoint => fillJoint(withoutNulls(rawJ), bodyName, idx, defaultType);
 
-const fillJoint = (j: RawJoint, bodyName: string, idx: number): SceneJoint => ({
+const fillJoint = (
+  j: RawJoint,
+  bodyName: string,
+  idx: number,
+  defaultType: SceneJoint['type'] = 'free',
+): SceneJoint => ({
   // As for geoms: springref and the crumple fields were dropped by a whitelist.
   ...(j as SceneJoint),
   name:    j.name    ?? `${bodyName}_joint_${idx}`,
-  type:    j.type    ?? 'free',
+  type:    j.type    ?? defaultType,
   ...(j.axis     !== undefined ? { axis: j.axis }         : {}),
   ...(j.pos      !== undefined ? { pos: j.pos }           : {}),
   ...(j.damping  !== undefined ? { damping: j.damping }   : {}),
@@ -482,8 +492,10 @@ export const fillBodyDefaults = (
   const logical = b.isPulleyRope === true || (b.cloth != null && typeof b.cloth === 'object') || generated;
   // A nested body with no joints given is fixed rigidly to its parent.
   const defaultJoints: RawJoint[] = (b.isCurve === true || isFixed || nested || logical) ? [] : [{ type: 'free' }];
+  // MuJoCo forbids free joints on nested bodies (and a joint with an axis is a
+  // 1-DOF hinge/slide), so omitted joint.type defaults to 'hinge' there.
   const resolvedJoints = (b.joints ?? defaultJoints)
-    .map((j: RawJoint, i: number) => fillJointDefaults(j, name, i));
+    .map((j: RawJoint, i: number) => fillJointDefaults(j, name, i, nested || j.axis !== undefined ? 'hinge' : 'free'));
   const moves = resolvedJoints.length > 0 || parentMoves === true;
 
   // Declarative lattice spec on body (`lattice: { sizeMm?, empty?, subdiv?, thicknessMm?, ops?: [...] }`)

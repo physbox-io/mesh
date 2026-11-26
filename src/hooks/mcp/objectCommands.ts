@@ -5,6 +5,7 @@
 
 import { scriptSyntaxError, scriptWarnings } from '../../utils/scriptCheck';
 import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
+import { framingPatch } from '../../store/sceneFraming';
 import { freeJointPose, touchesPose } from '../../utils/livePose';
 import { compileSCAD } from '../../utils/openscad';
 import { updateOrCreateNotecard } from '../../utils/noteCards';
@@ -18,7 +19,7 @@ import { Vector3 } from 'three';
 import { checkIncomingBody, normalizeAcousticFields } from '../../utils/incomingBodyCheck';
 import type { SceneNode, SceneGeom, SceneJoint, HardwarePartKind } from '../../types/scene';
 import type { RawNode } from '../../utils/sceneNodes';
-import { HARDWARE_PARTS } from '../../utils/hardwareParts';
+import { HARDWARE_PARTS, documentWorldMatrix } from '../../utils/hardwareParts';
 import { withoutNulls } from '../../utils/withoutNulls';
 import { jointAxisWarnings } from '../../utils/jointAxisCheck';
 import {
@@ -107,6 +108,7 @@ export const objectCommands: McpCommands = {
     if (!isPlainObject(raw)) {
       return { ok: false, error: 'Missing body: pass one body descriptor, the same shape as an element of physics_build_scene\'s bodies array' };
     }
+    const wasEmpty = (store.sceneGraph.nodes?.length ?? 0) === 0;
     let parent: { id: string; moves: boolean } | null;
     try {
       parent = resolveParent(store.sceneGraph.nodes, msg.parent);
@@ -154,6 +156,13 @@ export const objectCommands: McpCommands = {
     const landed = findNodeInScene(useStore.getState().sceneGraph.nodes, node.id);
     if (landed?.csgError) {
       return { ok: false, error: `Boolean failed: ${landed.csgError}`, id: node.id };
+    }
+    // When adding the first body to an empty scene, frame the camera cleanly
+    // around it (matching physics_build_scene) instead of leaving the viewport
+    // wherever a previous scene left it.
+    if (wasEmpty && landed) {
+      const patch = framingPatch(useStore.getState().sceneGraph, null);
+      if (patch.cameraOverride) useStore.setState(patch);
     }
     // Applied either way; a script that does not compile is said so here.
     const added = scriptWarnings(landed ? [landed] : [node]);
@@ -700,6 +709,7 @@ export const objectCommands: McpCommands = {
     return { ok: true, id: node.id, cutsApplied: results.length, cuts: results };
   },
   ADD_HARDWARE: async (msg, { store, toId }) => {
+    const wasEmpty = (store.sceneGraph.nodes?.length ?? 0) === 0;
     // `partId`, not `id`: `id` is the request's own, so a part named that way
     // was never seen, and every call read the request id as a part's.
     const { kind, size, lengthMm, washer, into: rawInto, group, at, fixTo: rawFixTo, partId: rawExisting, between: rawBetween } = msg as Msg<{
@@ -707,16 +717,18 @@ export const objectCommands: McpCommands = {
       fixTo?: unknown; partId?: unknown; between?: unknown;
     }>;
     const resolveId = (v: unknown) => (toId ? toId(v) : v);
-    const existing = typeof rawExisting === 'string' && rawExisting ? String(resolveId(rawExisting)) : undefined;
+    const requestedId = typeof rawExisting === 'string' && rawExisting.trim() ? rawExisting.trim() : undefined;
+    const existing = requestedId ? String(resolveId(requestedId)) : undefined;
     const into = typeof rawInto === 'string' && rawInto ? String(resolveId(rawInto)) : undefined;
     const fixTo = typeof rawFixTo === 'string' && rawFixTo ? String(resolveId(rawFixTo)) : undefined;
     const between = Array.isArray(rawBetween)
       ? rawBetween.map((v) => (typeof v === 'string' ? String(resolveId(v)) : v))
       : undefined;
 
+    const existingNode = existing ? findNodeInScene(store.sceneGraph.nodes, existing) : null;
     // A part already in the scene: only fix a body to its moving piece.
-    if (existing && (!kind || fixTo)) {
-      const part = findNodeInScene(store.sceneGraph.nodes, existing);
+    if (existing && (!kind || (fixTo && existingNode))) {
+      const part = existingNode;
       const piece = part && (part.hardwarePart?.piece ? part : movingPieceOf(part));
       if (!piece) return { ok: false, error: `'${existing}' has no moving piece to fix a body to` };
       if (!fixTo) return { ok: false, error: 'Give fixTo: the body to weld to its moving piece' };
@@ -728,12 +740,14 @@ export const objectCommands: McpCommands = {
     }
     const partKind = kind as HardwarePartKind;
     const info = HARDWARE_PARTS[partKind];
-    // Accept ASCII equivalents like '10x30' for Unicode sizes like 'Ø10×30'.
+    // Accept ASCII equivalents like '10x30' for Unicode sizes like 'Ø10×30', and unitless numbers like '75' for '75mm'.
     const normalizeSize = (raw: string) => raw.trim().replace(/^[Øø]/u, '').replace(/[xX×]/gu, '×').toLowerCase();
+    const stripMm = (raw: string) => normalizeSize(raw).replace(/mm$/u, '');
     const resolvedSize = size !== undefined
       ? (info.sizes.includes(String(size))
         ? String(size)
-        : info.sizes.find((s) => normalizeSize(s) === normalizeSize(String(size))))
+        : info.sizes.find((s) => normalizeSize(s) === normalizeSize(String(size)))
+          ?? info.sizes.find((s) => stripMm(s) === stripMm(String(size))))
       : undefined;
     if (size !== undefined && !resolvedSize) {
       return { ok: false, error: `${info.label} comes in ${info.sizes.join(', ')}; got '${size}'` };
@@ -749,6 +763,7 @@ export const objectCommands: McpCommands = {
     }
     if (into && !findNodeInScene(store.sceneGraph.nodes, into)) return { ok: false, error: `No object with id '${rawInto}'` };
     let id: string | null;
+    let usedJoinProfiles = false;
     const housing = into && group ? findNodeInScene(store.sceneGraph.nodes, into)?.geoms?.find((g) => g.hardware?.group === group)?.hardware?.kind === 'lm_housing' : false;
     if (housing) {
       // A housing takes no part of its own: it rides the rod on its line.
@@ -771,14 +786,41 @@ export const objectCommands: McpCommands = {
       };
     }
     // Extrusion: a joining piece goes where two profiles meet, a carriage onto its V-slot.
-    const joinKind = kind === 'corner_bracket' || kind === 'joint_plate' || kind === 'end_tap' ? kind : null;
-    if (joinKind) {
-      if (!Array.isArray(between) || between.length !== 2 || typeof between[0] !== 'string' || typeof between[1] !== 'string') {
+    // A corner_bracket can also be placed standalone at `at` or mounted onto timber/non-extrusion panels.
+    const strictJoinKind = kind === 'joint_plate' || kind === 'end_tap' ? kind : null;
+    const betweenPair = Array.isArray(between) && between.length === 2 && typeof between[0] === 'string' && typeof between[1] === 'string'
+      ? [between[0], between[1]] as [string, string]
+      : null;
+    const betweenNodes = betweenPair
+      ? [findNodeInScene(store.sceneGraph.nodes, betweenPair[0]), findNodeInScene(store.sceneGraph.nodes, betweenPair[1])] as const
+      : null;
+    const bothExtrusions = !!(betweenNodes?.[0]?.hardwarePart?.kind === 'extrusion' && betweenNodes?.[1]?.hardwarePart?.kind === 'extrusion');
+
+    if (strictJoinKind || (kind === 'corner_bracket' && bothExtrusions)) {
+      if (!betweenPair) {
         return { ok: false, error: `A ${info.label.toLowerCase()} joins two profiles: give their ids as between: [a, b]` };
       }
-      const joined = store.joinProfiles(between[0], between[1], joinKind, resolvedSize);
+      const joined = store.joinProfiles(betweenPair[0], betweenPair[1], (strictJoinKind ?? 'corner_bracket'), resolvedSize);
       if ('problem' in joined) return { ok: false, error: joined.problem };
       id = joined.id;
+      usedJoinProfiles = true;
+    } else if (kind === 'corner_bracket' && betweenPair) {
+      if (!betweenNodes?.[0]) return { ok: false, error: `No object with id '${betweenPair[0]}'` };
+      if (!betweenNodes?.[1]) return { ok: false, error: `No object with id '${betweenPair[1]}'` };
+      const placed = isFiniteVec3(at);
+      let pos: number[];
+      if (placed) {
+        pos = at.map((v) => v / 1000);
+      } else {
+        const mA = documentWorldMatrix(store.sceneGraph, betweenNodes[0].id);
+        const mB = documentWorldMatrix(store.sceneGraph, betweenNodes[1].id);
+        const pA = mA ? new Vector3().setFromMatrixPosition(mA) : new Vector3(...(betweenNodes[0].pos as [number, number, number]));
+        const pB = mB ? new Vector3().setFromMatrixPosition(mB) : new Vector3(...(betweenNodes[1].pos as [number, number, number]));
+        const mid = pA.add(pB).multiplyScalar(0.5);
+        pos = [mid.x, mid.y, mid.z];
+      }
+      const mountTarget = into ?? betweenNodes[0].id;
+      id = store.addHardwarePart(partKind, pos, mountTarget, { exact: true, mount: true });
     } else if (kind === 'vslot_carriage') {
       if (!into) return { ok: false, error: 'A V-slot carriage runs on a profile: give its id as into' };
       const placed = store.addCarriage(into);
@@ -795,9 +837,47 @@ export const objectCommands: McpCommands = {
       id = store.addHardwarePart(partKind, pos, into ?? null, { exact: placed, mount: !!into });
     }
     if (!id) return { ok: false, error: 'The part could not be added' };
+    // Honor user-supplied `id` (`partId` on the wire) when creating new hardware.
+    if (requestedId && id !== requestedId) {
+      const currentScene = useStore.getState().sceneGraph;
+      const taken = collectNodeIds(currentScene.nodes);
+      // Exclude the freshly generated node (and its piece children) from collision checks.
+      const oldId = id;
+      for (const tid of [...taken]) {
+        if (tid === oldId || tid.startsWith(`${oldId}_`)) taken.delete(tid);
+      }
+      let finalId = requestedId;
+      if (taken.has(finalId)) {
+        let n = 2;
+        while (taken.has(`${requestedId}_${n}`)) n++;
+        finalId = `${requestedId}_${n}`;
+      }
+      const cloned = structuredClone(currentScene);
+      const target = findNodeInScene(cloned.nodes, oldId);
+      if (target) {
+        const renameStr = (s: string) => (s === oldId ? finalId : s.startsWith(`${oldId}_`) ? `${finalId}${s.slice(oldId.length)}` : s);
+        const renameSubtree = (n: SceneNode) => {
+          n.id = renameStr(n.id);
+          if (n.coupleTargetId) n.coupleTargetId = renameStr(n.coupleTargetId);
+          if (n.weldTargetId) n.weldTargetId = renameStr(n.weldTargetId);
+          for (const g of n.geoms || []) {
+            if (g.name) g.name = renameStr(g.name);
+          }
+          for (const j of n.joints || []) {
+            if (j.name) j.name = renameStr(j.name);
+          }
+          for (const c of n.children || []) {
+            if (c.hardwarePart?.piece) renameSubtree(c);
+          }
+        };
+        renameSubtree(target);
+        useStore.setState({ sceneGraph: cloned, selectedNodeId: finalId });
+        id = finalId;
+      }
+    }
     // Sized before anything is fixed to it: fixed first, a body rode the
     // default size's moving piece where the new size's no longer was.
-    if (!joinKind && kind !== 'vslot_carriage' && (resolvedSize !== undefined || lengthMm !== undefined || washer !== undefined)) {
+    if (!usedJoinProfiles && kind !== 'vslot_carriage' && (resolvedSize !== undefined || lengthMm !== undefined || washer !== undefined)) {
       useStore.getState().setHardwarePart(id, {
         ...(resolvedSize !== undefined ? { size: resolvedSize } : {}),
         ...(typeof lengthMm === 'number' ? { lengthMm } : {}),
@@ -815,6 +895,18 @@ export const objectCommands: McpCommands = {
     const part = findNodeInScene(useStore.getState().sceneGraph.nodes, id);
     const spec = part?.hardwarePart;
     if (!part || !spec) return { ok: false, error: 'The part could not be added' };
+    if (wasEmpty) {
+      const patch = framingPatch(useStore.getState().sceneGraph, null);
+      if (patch.cameraOverride) useStore.setState(patch);
+    }
+    const innerPiece = part.children.find((c) => c.hardwarePart?.piece === 'inner');
+    const innerKey = spec.kind === 'stepper'
+      ? 'shaftId'
+      : (spec.kind as string) === 'butt_hinge'
+        ? 'leafId'
+        : (spec.kind as string) === 'hasp_latch'
+          ? 'strapId'
+          : 'innerRaceId';
     return {
       ok: true, id, name: part.name, kind: spec.kind, size: spec.size,
       ...(spec.lengthMm !== undefined ? { lengthMm: spec.lengthMm } : {}),
@@ -822,8 +914,7 @@ export const objectCommands: McpCommands = {
       ...(spec.seat ? { seatedIn: spec.seat === 'bore' ? 'bearing bore' : spec.seat } : {}),
       ...(spec.fastens ? { fastens: spec.fastens } : {}),
       ...(part.weldTargetId ? { weldedTo: part.weldTargetId } : {}),
-      ...(part.children.some((c) => c.hardwarePart?.piece === 'inner')
-        ? { [spec.kind === 'stepper' ? 'shaftId' : 'innerRaceId']: part.children.find((c) => c.hardwarePart?.piece === 'inner')!.id } : {}),
+      ...(innerPiece ? { [innerKey]: innerPiece.id } : {}),
       ...(part.children.some((c) => c.hardwarePart?.piece === 'carriage')
         ? { carriageId: part.children.find((c) => c.hardwarePart?.piece === 'carriage')!.id } : {}),
       posMm: part.pos.map((v) => Math.round(v * 1e6) / 1000),

@@ -16,7 +16,9 @@ import * as THREE from 'three';
 import { useStore } from '../store/useStore';
 import { compileCsgNodes } from '../hooks/useCsgCompile';
 import { generateCastPattern } from './castPatternExporter';
+import { resolveCsgGeoms } from './csg';
 import { bodyEdges, bodyUp, whyNotRoundable } from './edgeRoundBase';
+import { analyzeMesh, weldByPosition } from './meshIntegrity';
 import { nodeWorldMatrix } from './combineBodies';
 import {
   bodySolids,
@@ -104,6 +106,51 @@ async function findPartingZAsync(scene: SceneGraph, partingFromBaseMm: number | 
 
 const round2 = (m: number) => Math.round(m * 1e5) / 100;
 
+/**
+ * Checks whether all rendered mesh geoms of a body are watertight.
+ * Returns null when watertight (or when the body has only analytical primitives),
+ * otherwise a short diagnostic string describing the integrity failure.
+ */
+export function meshWatertightIssue(node: SceneNode | null | undefined): string | null {
+  if (!node) return null;
+  for (const g of resolveCsgGeoms(node, 'render')) {
+    if (g.role === 'collision' || (g.role === 'visual' && !g.csgDerived)) continue;
+    const faces = g.faces;
+    const pos = g.renderVertices || g.vertices;
+    if (!faces?.length || !pos?.length) continue;
+    const welded = weldByPosition(pos, faces);
+    const m = analyzeMesh(welded.positions, welded.faces);
+    if (m && !m.closed) {
+      const parts: string[] = [];
+      if (m.nonManifoldEdges) parts.push(`${m.nonManifoldEdges} non-manifold edges`);
+      if (m.boundaryEdges) parts.push(`${m.boundaryEdges} boundary edges`);
+      if (m.degenerateTriangles) parts.push(`${m.degenerateTriangles} degenerate triangles`);
+      return parts.join(', ') || 'mesh not closed';
+    }
+  }
+  return null;
+}
+
+/**
+ * Drops newly-added circular rim edges from a planned feature list while keeping
+ * pre-existing roundings untouched. Returns the filtered list and how many
+ * circular rims were dropped.
+ */
+export function stripAddedCircleEdges(
+  planned: EdgeRoundFeature[],
+  existingCount: number,
+): { features: EdgeRoundFeature[]; dropped: number } {
+  const kept: EdgeRoundFeature[] = planned.slice(0, existingCount);
+  let dropped = 0;
+  for (let i = existingCount; i < planned.length; i++) {
+    const f = planned[i];
+    const edges = f.edges.filter((e) => e.kind !== 'circle');
+    dropped += f.edges.length - edges.length;
+    if (edges.length > 0) kept.push(edges.length === f.edges.length ? f : { ...f, edges });
+  }
+  return { features: kept, dropped };
+}
+
 export async function runCastPrep(opts: CastPrepOptions): Promise<CastPrepReport> {
   const store = () => useStore.getState();
   if (store().castPrepBusy) return { ok: false, error: 'Prepare for casting is already running.', treated: 0, draftDeg: 0, edges: null, sharpEdges: 0, skipped: [] };
@@ -141,6 +188,8 @@ export async function runCastPrep(opts: CastPrepOptions): Promise<CastPrepReport
     const sharpAtMm: [number, number, number][] = [];
     if (opts.edges) {
       const features: Record<string, EdgeRoundFeature[]> = {};
+      const existingCounts: Record<string, number> = {};
+      const wasWatertight = new Map<string, boolean>();
       const failed: { id: string; reason: string }[] = [];
       const roundable = ids.filter((id) => whyNotRoundable(findNode(store().sceneGraph.nodes, id)) === null);
       for (let i = 0; i < roundable.length; i++) {
@@ -148,15 +197,17 @@ export async function runCastPrep(opts: CastPrepOptions): Promise<CastPrepReport
         const nodes = store().sceneGraph.nodes;
         const node = findNode(nodes, id);
         if (!node) continue;
+        wasWatertight.set(id, meshWatertightIssue(node) === null);
         store().setCastPrepBusy(`Finding edges · ${i + 1}/${roundable.length}`);
         try {
           const found = await bodyEdges(node, bodyUp(nodes, id));
           const world = nodeWorldMatrix(nodes, id);
+          const existing = node.edgeRounds ?? [];
           const plan = planEdgeRounds(
             found.edges,
             found.smallestDimension,
             opts.edgeSizeMm,
-            node.edgeRounds ?? [],
+            existing,
             // The parting face is rammed flat on the board: a break there would
             // leave sand overhanging it.
             sand && world ? (e) => e.edge.convex && edgeOnPlane(e, world, partingZ) : undefined,
@@ -171,7 +222,10 @@ export async function runCastPrep(opts: CastPrepOptions): Promise<CastPrepReport
           }
           chamfer = Math.max(chamfer, plan.chamfer);
           fillet = Math.max(fillet, plan.fillet);
-          if (plan.broken > 0) features[id] = plan.features;
+          if (plan.broken > 0) {
+            features[id] = plan.features;
+            existingCounts[id] = existing.length;
+          }
         } catch (err) {
           failed.push({ id, reason: `Edges left sharp: ${err instanceof Error ? err.message : String(err)}` });
         }
@@ -181,9 +235,39 @@ export async function runCastPrep(opts: CastPrepOptions): Promise<CastPrepReport
         store().setCastPrepBusy('Breaking edges…');
         store().writeCastPrepEdges(features);
         await compileCsgNodes(true);
+
+        const retryWithoutCircles: Record<string, EdgeRoundFeature[]> = {};
+        const retryDroppedCounts: Record<string, number> = {};
         for (const id of Object.keys(features)) {
-          const err = findNode(store().sceneGraph.nodes, id)?.csgError;
-          if (err) failed.push({ id, reason: `Edges left sharp: ${err}` });
+          const node = findNode(store().sceneGraph.nodes, id);
+          const err = node?.csgError;
+          const wtErr = !err && wasWatertight.get(id) ? meshWatertightIssue(node) : null;
+          if (!err && !wtErr) continue;
+
+          const existingCount = existingCounts[id] ?? 0;
+          const stripped = stripAddedCircleEdges(features[id], existingCount);
+          if (stripped.dropped > 0 && stripped.features.length > existingCount) {
+            retryWithoutCircles[id] = stripped.features;
+            retryDroppedCounts[id] = stripped.dropped;
+          } else {
+            failed.push({ id, reason: `Edges left sharp: ${err ?? `rounding broke watertightness (${wtErr})`}` });
+          }
+        }
+
+        if (Object.keys(retryWithoutCircles).length > 0) {
+          store().setCastPrepBusy('Refining edge breaks…');
+          store().writeCastPrepEdges(retryWithoutCircles);
+          await compileCsgNodes(true);
+          for (const id of Object.keys(retryWithoutCircles)) {
+            const node = findNode(store().sceneGraph.nodes, id);
+            const err = node?.csgError;
+            const wtErr = !err && wasWatertight.get(id) ? meshWatertightIssue(node) : null;
+            if (err || wtErr) {
+              failed.push({ id, reason: `Edges left sharp: ${err ?? `rounding broke watertightness (${wtErr})`}` });
+            } else {
+              sharpEdges += retryDroppedCounts[id] ?? 0;
+            }
+          }
         }
       }
       store().revertCastPrepEdges(failed);

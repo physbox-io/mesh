@@ -36,6 +36,72 @@ describe('fillBodyDefaults pos', () => {
   });
 });
 
+describe('fillBodyDefaults nested joint type defaults', () => {
+  it('defaults omitted joint.type on a nested child body with axis to hinge instead of free', () => {
+    const parent = fillBodyDefaults({
+      name: 'chest',
+      static: true,
+      geoms: [{ type: 'box', size: [0.1, 0.06, 0.05] }],
+      children: [{
+        name: 'lid',
+        pos: [0, -0.06, 0.05],
+        joints: [{ axis: [1, 0, 0], limited: true, range: [0, 1.8] }],
+        geoms: [{ type: 'box', size: [0.1, 0.06, 0.01] }],
+      }],
+    });
+    expect(parent.children[0].joints).toHaveLength(1);
+    expect(parent.children[0].joints[0].type).toBe('hinge');
+    expect(parent.children[0].joints[0].axis).toEqual([1, 0, 0]);
+  });
+
+  it('defaults omitted joint.type on a nested child body without axis to hinge', () => {
+    const parent = fillBodyDefaults({
+      name: 'base',
+      static: true,
+      geoms: [{ type: 'box', size: [0.05, 0.05, 0.05] }],
+      children: [{
+        name: 'arm',
+        joints: [{ pos: [0, 0, 0.02] }],
+        geoms: [{ type: 'box', size: [0.02, 0.02, 0.05] }],
+      }],
+    });
+    expect(parent.children[0].joints[0].type).toBe('hinge');
+  });
+
+  it('still rejects an explicit free joint on a nested child body', () => {
+    expect(() => fillBodyDefaults({
+      name: 'base',
+      geoms: [{ type: 'box', size: [0.05, 0.05, 0.05] }],
+      children: [{
+        name: 'bad_child',
+        joints: [{ type: 'free' }],
+        geoms: [{ type: 'box', size: [0.02, 0.02, 0.02] }],
+      }],
+    })).toThrow(/free joint.*only allowed at the top level/i);
+  });
+
+  it('preserves explicit slide joint on a nested child and defaults top-level axis joint to hinge', () => {
+    const parent = fillBodyDefaults({
+      name: 'rail',
+      static: true,
+      geoms: [{ type: 'box', size: [0.1, 0.02, 0.02] }],
+      children: [{
+        name: 'carriage',
+        joints: [{ type: 'slide', axis: [1, 0, 0] }],
+        geoms: [{ type: 'box', size: [0.02, 0.02, 0.02] }],
+      }],
+    });
+    expect(parent.children[0].joints[0].type).toBe('slide');
+
+    const topHinge = fillBodyDefaults({
+      name: 'door',
+      joints: [{ axis: [0, 0, 1] }],
+      geoms: [{ type: 'box', size: [0.05, 0.01, 0.1] }],
+    });
+    expect(topHinge.joints[0].type).toBe('hinge');
+  });
+});
+
 describe('resolveUpdatedGeoms partial geom updates (Item 1)', () => {
   const pumpkinTarget: SceneNode = {
     name: 'pumpkin',

@@ -39,9 +39,31 @@ import {
 } from './mechanismParts';
 import { nodeLocalQuat, quatMultiply, quatRotateVec, type QuatWXYZ } from './sceneTree';
 import { adjustedFields, type MechanismAdjustment } from './mechanismAdjustments';
+import {
+  buildCantileverPawl,
+  buildCompliantGripper,
+  buildMonolithicPrintNodes,
+  buildParallelFlexureStage,
+  type CantileverPawlBuildInput,
+  type CompliantGripperInput,
+  type ParallelFlexureStageBuildInput,
+} from './flexure';
 
-export const MECHANISM_FAMILIES = ['gear', 'gear_pair', 'rack_pinion', 'gt2_belt', 'leadscrew', 'cam_follower', 'four_bar'] as const;
+export const MECHANISM_FAMILIES = [
+  'gear',
+  'gear_pair',
+  'rack_pinion',
+  'gt2_belt',
+  'leadscrew',
+  'cam_follower',
+  'four_bar',
+  'compliant_gripper',
+  'parallel_flexure',
+  'cantilever_pawl',
+] as const;
 export type MechanismFamilyName = (typeof MECHANISM_FAMILIES)[number];
+
+export const COMPLIANT_MECHANISM_FAMILIES = ['compliant_gripper', 'parallel_flexure', 'cantilever_pawl'] as const;
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export type MechanismRequest = Record<string, any> & {
@@ -180,6 +202,10 @@ export function buildMechanism(req: MechanismRequest, scene: SceneNode[]): Mecha
   if (!MECHANISM_FAMILIES.includes(family)) return { error: `Unknown mechanism family '${family}'. One of: ${MECHANISM_FAMILIES.join(', ')}.` };
   const origin = vec3(req.origin);
   const actuate = req.actuate !== false;
+  const idPrefix = typeof req.idPrefix === 'string' && req.idPrefix
+    ? req.idPrefix.replace(/[^A-Za-z0-9_-]/g, '_')
+    : undefined;
+  const isCompliant = (COMPLIANT_MECHANISM_FAMILIES as readonly string[]).includes(family);
   const arborId = typeof req.arborId === 'string' ? req.arborId : undefined;
   const offset = (num(req.axialOffsetMm) ?? 0) / 1000;
   const arbor = arborId ? worldPose(scene, arborId) : null;
@@ -265,10 +291,106 @@ export function buildMechanism(req: MechanismRequest, scene: SceneNode[]): Mecha
       metrics = { ...fb.metrics };
       break;
     }
+    case 'compliant_gripper': {
+      const gripperInput: CompliantGripperInput = {
+        ...(typeof req.filament === 'string' ? { filament: req.filament } : {}),
+        ...(num(req.jawOpeningMm) !== undefined ? { jawOpeningMm: num(req.jawOpeningMm) } : {}),
+        ...(num(req.jawLengthMm) !== undefined ? { jawLengthMm: num(req.jawLengthMm) } : {}),
+        ...(num(req.jawThicknessMm) !== undefined ? { jawThicknessMm: num(req.jawThicknessMm) } : {}),
+        ...((num(req.beamThicknessMm) ?? num(req.thicknessMm)) !== undefined
+          ? { beamThicknessMm: num(req.beamThicknessMm) ?? num(req.thicknessMm) }
+          : {}),
+        ...((num(req.beamLengthMm) ?? num(req.lengthMm)) !== undefined
+          ? { beamLengthMm: num(req.beamLengthMm) ?? num(req.lengthMm) }
+          : {}),
+        ...((num(req.beamWidthMm) ?? num(req.widthMm)) !== undefined
+          ? { beamWidthMm: num(req.beamWidthMm) ?? num(req.widthMm) }
+          : {}),
+        ...(num(req.beamsPerJaw) !== undefined ? { beamsPerJaw: num(req.beamsPerJaw) } : {}),
+        ...(num(req.beamSpacingMm) !== undefined ? { beamSpacingMm: num(req.beamSpacingMm) } : {}),
+        ...(num(req.strokeMm) !== undefined ? { strokeMm: num(req.strokeMm) } : {}),
+        ...(origin ? { origin } : {}),
+        ...(idPrefix ? { idPrefix } : {}),
+      };
+      const gripper = buildCompliantGripper(gripperInput);
+      created = req.monolithicPrint === true ? buildMonolithicPrintNodes(gripper.nodes) : gripper.nodes;
+      metrics = {
+        evaluation: gripper.evaluation,
+        totalFlexureCount: gripper.totalFlexureCount,
+        pinchForceAtStrokeN: gripper.pinchForceAtStrokeN,
+        parasiticShiftMm: gripper.parasiticShiftMm,
+        warnings: gripper.warnings,
+      };
+      break;
+    }
+    case 'parallel_flexure': {
+      const stageInput: ParallelFlexureStageBuildInput = {
+        ...(typeof req.filament === 'string' ? { filament: req.filament } : {}),
+        ...(num(req.thicknessMm) !== undefined ? { thicknessMm: num(req.thicknessMm) } : {}),
+        ...(num(req.lengthMm) !== undefined ? { lengthMm: num(req.lengthMm) } : {}),
+        ...(num(req.widthMm) !== undefined ? { widthMm: num(req.widthMm) } : {}),
+        ...(num(req.numBeams) !== undefined ? { numBeams: num(req.numBeams) } : {}),
+        ...(num(req.beamSpacingMm) !== undefined ? { beamSpacingMm: num(req.beamSpacingMm) } : {}),
+        ...(num(req.deflectionMm) !== undefined ? { deflectionMm: num(req.deflectionMm) } : {}),
+        ...(num(req.stageDepthMm) !== undefined ? { stageDepthMm: num(req.stageDepthMm) } : {}),
+        ...(origin ? { origin } : {}),
+        ...(idPrefix ? { idPrefix } : {}),
+      };
+      const stage = buildParallelFlexureStage(stageInput);
+      created = req.monolithicPrint === true ? buildMonolithicPrintNodes(stage.nodes) : stage.nodes;
+      metrics = {
+        evaluation: stage.evaluation,
+        totalFlexureCount: stage.evaluation.numBeams,
+        parasiticShiftMm: stage.evaluation.parasiticShiftMm,
+        restoringForceN: stage.evaluation.restoringForceN,
+        warnings: stage.evaluation.warnings,
+      };
+      break;
+    }
+    case 'cantilever_pawl': {
+      const pawlInput: CantileverPawlBuildInput = {
+        ...(typeof req.filament === 'string' ? { filament: req.filament } : {}),
+        ...(num(req.thicknessMm) !== undefined ? { thicknessMm: num(req.thicknessMm) } : {}),
+        ...(num(req.lengthMm) !== undefined ? { lengthMm: num(req.lengthMm) } : {}),
+        ...(num(req.widthMm) !== undefined ? { widthMm: num(req.widthMm) } : {}),
+        ...(num(req.deflectionMm) !== undefined ? { deflectionMm: num(req.deflectionMm) } : {}),
+        ...(num(req.rampAngleDeg) !== undefined ? { rampAngleDeg: num(req.rampAngleDeg) } : {}),
+        ...(num(req.frictionCoeff) !== undefined ? { frictionCoeff: num(req.frictionCoeff) } : {}),
+        ...(num(req.catchHeightMm) !== undefined ? { catchHeightMm: num(req.catchHeightMm) } : {}),
+        ...(origin ? { origin } : {}),
+        ...(idPrefix ? { idPrefix } : {}),
+      };
+      const pawl = buildCantileverPawl(pawlInput);
+      created = req.monolithicPrint === true ? buildMonolithicPrintNodes(pawl.nodes) : pawl.nodes;
+      metrics = {
+        evaluation: pawl.evaluation,
+        totalFlexureCount: 1,
+        tipForceN: pawl.evaluation.tipForceN,
+        engageForceN: pawl.evaluation.engageForceN,
+        warnings: pawl.evaluation.warnings,
+      };
+      break;
+    }
   }
 
-  if (typeof req.idPrefix === 'string' && req.idPrefix) {
-    applyIdPrefix(onArbor ? [onArbor, ...created] : created, req.idPrefix.replace(/[^A-Za-z0-9_-]/g, '_'));
+  if (idPrefix && !isCompliant) {
+    applyIdPrefix(onArbor ? [onArbor, ...created] : created, idPrefix);
+  }
+  if (isCompliant && req.actuate === true) {
+    walk(created, (n) => {
+      n.joints = (n.joints || []).map((j) => (
+        j.type === 'hinge' || j.type === 'slide'
+          ? {
+              ...j,
+              actuator: {
+                type: 'motor' as const,
+                ctrlValue: num(req.speed) ?? 0,
+                forceLimit: num(req.torqueLimitNm) ?? 10,
+              },
+            }
+          : j
+      ));
+    });
   }
   applyActuation(created, req);
   if ('screwId' in metrics) {

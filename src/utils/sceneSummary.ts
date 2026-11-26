@@ -392,6 +392,68 @@ const inertialOf = (model: ModelMirror | null, node: SceneNode): Record<string, 
  * dozens of convex pieces (already counted in `collidesAs`); listing each at
  * full precision was most of a 40 KB summary. `full` lists them anyway.
  */
+/**
+ * Counts logical socket holes from exact socket collider geoms.
+ *
+ * `printSplit` decomposes each cylindrical socket bore into a contiguous run of
+ * `LINING_SIDES` (16) identical-size wall boxes followed by a square floor cap
+ * box of matching thickness, plus surrounding face slabs — so 9 logical sockets
+ * can emit 200+ collider geoms. Recognizing each wall-run + cap sequence reports
+ * the true logical socket count while falling back to distinct `contactGroup`s
+ * (or raw geom count) for hand-authored socket colliders.
+ */
+function countLogicalSockets(socketGeoms: SceneGeom[]): number {
+  if (socketGeoms.length === 0) return 0;
+
+  let bores = 0;
+  let i = 0;
+  while (i < socketGeoms.length) {
+    const g = socketGeoms[i];
+    if (g.type === 'box' && g.size && g.size.length >= 3) {
+      const [sx, sy, sz] = g.size;
+      const grp = g.contactGroup;
+      let runEnd = i + 1;
+      while (runEnd < socketGeoms.length) {
+        const nxt = socketGeoms[runEnd];
+        if (
+          nxt.type === 'box' &&
+          nxt.contactGroup === grp &&
+          nxt.size &&
+          nxt.size.length >= 3 &&
+          Math.abs(nxt.size[0] - sx) < 1e-7 &&
+          Math.abs(nxt.size[1] - sy) < 1e-7 &&
+          Math.abs(nxt.size[2] - sz) < 1e-7
+        ) {
+          runEnd++;
+        } else {
+          break;
+        }
+      }
+      const runLen = runEnd - i;
+      if (runLen >= 8 && runEnd < socketGeoms.length) {
+        const cap = socketGeoms[runEnd];
+        if (
+          cap.type === 'box' &&
+          cap.contactGroup === grp &&
+          cap.size &&
+          cap.size.length >= 3 &&
+          Math.abs(cap.size[0] - cap.size[1]) < 1e-6 &&
+          Math.abs(cap.size[2] - sx) < 1e-6
+        ) {
+          bores++;
+          i = runEnd + 1;
+          continue;
+        }
+      }
+    }
+    i++;
+  }
+
+  if (bores > 0) return bores;
+  const groups = new Set(socketGeoms.map((g) => g.contactGroup).filter((g) => g !== undefined));
+  return groups.size > 0 ? groups.size : socketGeoms.length;
+}
+
 function geomListing(node: SceneNode, full: boolean): Record<string, unknown> {
   const geoms = node.geoms || [];
   // A split section carries dozens of exact pin and socket colliders.
@@ -399,9 +461,13 @@ function geomListing(node: SceneNode, full: boolean): Record<string, unknown> {
   const listed = geoms.filter((g) => !g.contactClass);
   const out: Record<string, unknown> = {};
   if (exact.length) {
+    const pinGeoms = exact.filter((g) => g.contactClass === 'pin');
+    const socketGeoms = exact.filter((g) => g.contactClass === 'socket');
+    const sockets = countLogicalSockets(socketGeoms);
     out.exactColliders = {
-      pins: exact.filter((g) => g.contactClass === 'pin').length,
-      sockets: exact.filter((g) => g.contactClass === 'socket').length,
+      pins: pinGeoms.length,
+      sockets,
+      ...(socketGeoms.length !== sockets ? { socketGeoms: socketGeoms.length } : {}),
     };
   }
   if (full) {

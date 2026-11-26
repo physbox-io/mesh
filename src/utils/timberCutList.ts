@@ -886,6 +886,17 @@ export function buildTimberCutPlan(
   const isGlueMode = breakdown.options.jointMode === 'butt';
   const isDowelMode = breakdown.options.jointMode === 'dowel';
   const isDadoMode = breakdown.options.jointMode === 'dado';
+  const legCount = breakdown.parts.filter((p) => p.member.role === 'leg').length;
+  const vertPanelCount = breakdown.parts.filter(
+    (p) => p.member.role === 'panel' && Math.abs(p.member.axes[2][2]) < 0.5,
+  ).length;
+  const isEnclosedCase = vertPanelCount >= 3 || (vertPanelCount >= 2 && legCount < 2);
+  const hasAprons = breakdown.parts.some(
+    (p) => p.member.role === 'rail' && p.member.id.startsWith('Apron_'),
+  );
+  const hasTopPanel = breakdown.parts.some(
+    (p) => p.member.role === 'panel' && Math.abs(p.member.axes[2][2]) >= 0.7,
+  );
   const hardwareBom: { item: string; quantity: number; note: string }[] = [
     {
       item: 'PVA Wood Glue (e.g. Titebond II / III)',
@@ -894,7 +905,9 @@ export function buildTimberCutPlan(
         ? 'Apply an even coat to mating ends and edges and clamp square.'
         : isDowelMode
           ? 'Apply a thin even coat to dowel holes, fluted pins, and mating joint faces.'
-          : 'Apply a thin coat to tenon cheeks and mortise walls (attach tabletop with expansion clips, not glue).',
+          : !isEnclosedCase && hasTopPanel && hasAprons
+            ? 'Apply a thin coat to tenon cheeks and mortise walls (attach tabletop with expansion clips, not glue).'
+            : 'Apply a thin coat to mating joinery faces and clamp square.',
     },
   ];
   const totalZClips = breakdown.parts.reduce((acc, p) => acc + p.zClipSlots.length, 0);
@@ -907,7 +920,7 @@ export function buildTimberCutPlan(
       quantity: totalZClips,
       note: `Hooks into the ${zClipWidthMm} mm apron kerf slots so the solid tabletop can expand/contract across the grain without cracking.`,
     });
-  } else if (breakdown.parts.some((p) => p.member.role === 'panel' && Math.abs(p.member.axes[2][2]) >= 0.7)) {
+  } else if (!isEnclosedCase && legCount >= 1 && hasAprons && hasTopPanel) {
     hardwareBom.push({
       item: 'Figure-8 Desktop Expansion Washers + Wood Screws',
       quantity: 4,
@@ -1131,14 +1144,23 @@ export function buildTimberCutPlan(
 
   const birdsEyeMapMarkdown = buildBirdsEyeMapMarkdown(breakdown.parts);
 
-  const glueUpGuideMarkdown = [
-    `## Assembly & Squaring Checklist`,
-    ``,
-    `1. **Dry-fit:** Assemble the frame without glue and verify joint seating and squareness.`,
-    `2. **Side sub-assemblies:** Glue and clamp the **Left Frame** (\`Leg_FL\` + \`Leg_BL\` + left rails) and **Right Frame** (\`Leg_FR\` + \`Leg_BR\` + right rails) flat; allow to cure.`,
-    `3. **Cross rails & squaring:** Join the cured side frames with the **Front** and **Back** rails; verify corner-to-corner diagonals ($D_1 = D_2$ within $1\\text{ mm}$).`,
-    `4. **Tabletop / seat:** Edge-glue planks if split, then secure the top to the aprons using **Z-Clip / Figure-8 expansion fasteners** (do not glue solid wood tops directly to aprons).`,
-  ].join('\n');
+  const glueUpGuideMarkdown = isEnclosedCase
+    ? [
+        `## Assembly & Squaring Checklist`,
+        ``,
+        `1. **Edge-glue panels:** Glue and clamp any multi-plank panels flat; allow to cure and scrape squeeze-out.`,
+        `2. **Dry-fit carcase:** Assemble sides, front/back, bottom, and any cleats/battens without glue to verify squareness and fit.`,
+        `3. **Glue & square carcase:** Glue the carcase joints and clamp across both diagonals ($D_1 = D_2$ within $1\\text{ mm}$).`,
+        `4. **Base & lid/top:** Attach plinth/base rails and fit the top/lid panel (hinged or fastened per hardware spec).`,
+      ].join('\n')
+    : [
+        `## Assembly & Squaring Checklist`,
+        ``,
+        `1. **Dry-fit:** Assemble the frame without glue and verify joint seating and squareness.`,
+        `2. **Side sub-assemblies:** Glue and clamp the **Left Frame** (\`Leg_FL\` + \`Leg_BL\` + left rails) and **Right Frame** (\`Leg_FR\` + \`Leg_BR\` + right rails) flat; allow to cure.`,
+        `3. **Cross rails & squaring:** Join the cured side frames with the **Front** and **Back** rails; verify corner-to-corner diagonals ($D_1 = D_2$ within $1\\text{ mm}$).`,
+        `4. **Tabletop / seat:** Edge-glue planks if split, then secure the top to the aprons using **Z-Clip / Figure-8 expansion fasteners** (do not glue solid wood tops directly to aprons).`,
+      ].join('\n');
 
   const bomLines: string[] = [
     `# Shop Build Guide & Part-by-Part Instructions`,

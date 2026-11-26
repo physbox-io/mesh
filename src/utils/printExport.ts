@@ -94,7 +94,15 @@ export interface PrintExportOptions {
 
 export interface PrintExportResult {
   files: { name: string; bytes: Uint8Array }[];
-  parts: { id: string; name: string; triangles: number; sizeMm: [number, number, number] }[];
+  parts: {
+    id: string;
+    name: string;
+    triangles: number;
+    /** Exported dimensions [X, Y, Z] in mm (plated orientation when `plated` is true). */
+    sizeMm: [number, number, number];
+    /** Posed/plated dimensions [X, Y, Z] in mm when plated or carrying a printPose. */
+    printedSizeMm?: [number, number, number];
+  }[];
   plated: boolean;
   warnings: string[];
   /** Ids asked for that the scene does not have. */
@@ -144,7 +152,7 @@ function classifyMoldPiece(label: string): { role: MoldPieceRole; halfLabel: str
   return { role: 'other', halfLabel: '' };
 }
 
-function moldPrintableParts(node: SceneNode, bodyMatrix: THREE.Matrix4): PrintPart[] {
+function moldPrintableParts(node: SceneNode, bodyMatrix: THREE.Matrix4, includePaint = true): PrintPart[] {
   interface MoldPieceEntry {
     geomName: string;
     displayName: string;
@@ -161,7 +169,7 @@ function moldPrintableParts(node: SceneNode, bodyMatrix: THREE.Matrix4): PrintPa
   for (const geom of resolveCsgGeoms(node, 'render')) {
     if (geom.role === 'collision') continue;
     const frame = getGeomFrame(geom);
-    const piece = colouredGeomTriangles(geom, frame.halfLen, new THREE.Matrix4().multiplyMatrices(bodyMatrix, frame.matrix));
+    const piece = colouredGeomTriangles(geom, frame.halfLen, new THREE.Matrix4().multiplyMatrices(bodyMatrix, frame.matrix), { includePaint });
     if (!piece || !piece.tris.length) continue;
     const displayName = moldGeomDisplayName(node, geom.name);
     const { role, halfLabel } = classifyMoldPiece(displayName);
@@ -276,7 +284,7 @@ function moldPrintableParts(node: SceneNode, bodyMatrix: THREE.Matrix4): PrintPa
 }
 
 /** Every body's printable triangles, one part a body, world-placed. */
-export function printableParts(scene: SceneGraph, ids?: string[], moldParts = false): { parts: PrintPart[]; warnings: string[]; missing: string[] } {
+export function printableParts(scene: SceneGraph, ids?: string[], moldParts = false, includePaint = true): { parts: PrintPart[]; warnings: string[]; missing: string[] } {
   const want = ids?.length ? new Set(ids) : null;
   const found = new Set<string>();
   const parts: PrintPart[] = [];
@@ -288,7 +296,7 @@ export function printableParts(scene: SceneGraph, ids?: string[], moldParts = fa
     const bodyMatrix = getNodeWorldTransform(node, parentMatrix);
     if (node.simulation) {
       if (inside && moldParts && node.simulation.kind === 'mold') {
-        parts.push(...moldPrintableParts(node, bodyMatrix));
+        parts.push(...moldPrintableParts(node, bodyMatrix, includePaint));
         return;
       }
       if (inside) warnings.push(`${node.name || node.id}: a simulated cut, so it is left out.`);
@@ -301,7 +309,7 @@ export function printableParts(scene: SceneGraph, ids?: string[], moldParts = fa
       for (const geom of resolveCsgGeoms(node, 'render')) {
         if (geom.role === 'collision') continue;
         const frame = getGeomFrame(geom);
-        const piece = colouredGeomTriangles(geom, frame.halfLen, new THREE.Matrix4().multiplyMatrices(bodyMatrix, frame.matrix));
+        const piece = colouredGeomTriangles(geom, frame.halfLen, new THREE.Matrix4().multiplyMatrices(bodyMatrix, frame.matrix), { includePaint });
         if (!piece) continue;
         const colour = linear(geom.rgba);
         const key = colour.map((c) => c.toFixed(4)).join(',');
@@ -372,16 +380,45 @@ function stlBytes(mm: Float32Array, name: string): Uint8Array {
 
 const safeName = (name: string) => name.toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'part';
 
+/** 4-bit-per-channel colour bucket matching threeMfExporter's palette quantiser. */
+const colourBucketKey = (c: number[]): number =>
+  (Math.round(Math.fround(c[0] ?? 0) * 15) << 8) |
+  (Math.round(Math.fround(c[1] ?? 0) * 15) << 4) |
+  Math.round(Math.fround(c[2] ?? 0) * 15);
+
+function sizeFromMmSets(sets: ArrayLike<number>[]): [number, number, number] {
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (const s of sets) {
+    for (let i = 0; i + 2 < s.length; i += 3) {
+      for (let k = 0; k < 3; k++) {
+        const v = s[i + k];
+        if (v < min[k]) min[k] = v;
+        if (v > max[k]) max[k] = v;
+      }
+    }
+  }
+  if (!Number.isFinite(min[0])) return [0, 0, 0];
+  return [0, 1, 2].map((k) => +(max[k] - min[k]).toFixed(2)) as [number, number, number];
+}
+
 export function exportPrintFiles(scene: SceneGraph, options: PrintExportOptions): PrintExportResult {
-  const { parts, warnings, missing } = printableParts(scene, options.ids, options.moldParts);
+  const { parts, warnings, missing } = printableParts(scene, options.ids, options.moldParts, options.format !== 'stl');
   const base = safeName(options.baseName ?? 'model');
-  const summary = parts.map((p) => {
+  const summary: PrintExportResult['parts'] = parts.map((p) => {
     const b = bounds(p.tris);
+    const worldSize = [0, 1, 2].map((k) => +((b.max[k] - b.min[k]) * 1000).toFixed(2)) as [number, number, number];
+    let printedSizeMm: [number, number, number] | undefined;
+    if (p.turn) {
+      const pb = bounds(rotatePoints(p.turn, p.tris));
+      printedSizeMm = [0, 1, 2].map((k) => +((pb.max[k] - pb.min[k]) * 1000).toFixed(2)) as [number, number, number];
+    }
     return {
       id: p.id,
       name: p.name,
       triangles: p.tris.length / 9,
-      sizeMm: [0, 1, 2].map((k) => +((b.max[k] - b.min[k]) * 1000).toFixed(2)) as [number, number, number],
+      sizeMm: options.separate && printedSizeMm ? printedSizeMm : worldSize,
+      ...(printedSizeMm ? { printedSizeMm } : {}),
     };
   });
   if (!parts.length) return { files: [], parts: summary, plated: false, warnings, missing };
@@ -410,6 +447,7 @@ export function exportPrintFiles(scene: SceneGraph, options: PrintExportOptions)
     }
   }
 
+  const partIndex = new Map(parts.map((p, idx) => [p, idx]));
   const groups = options.separate ? parts.map((p) => [p]) : [parts];
   const filaments: NonNullable<PrintExportResult['filaments']> = [];
   const used = new Map<string, number>();
@@ -417,13 +455,17 @@ export function exportPrintFiles(scene: SceneGraph, options: PrintExportOptions)
     let mm: Float32Array[];
     if (plated) {
       const placed = layoutSetsOnBed(group.map((p) => p.volumes.map((v) => (p.turn ? rotatePoints(p.turn, v.tris) : v.tris))), bed!, margin);
-      if (bed!.heightMm !== undefined) {
-        placed.forEach((entry, i) => {
-          if (entry.exceedsHeight) {
-            warnings.push(`${group[i].name}: height (${entry.heightMm.toFixed(1)} mm) exceeds the printer's max Z height (${bed!.heightMm} mm).`);
-          }
-        });
-      }
+      placed.forEach((entry, i) => {
+        const sIdx = partIndex.get(group[i]);
+        if (sIdx !== undefined) {
+          const platedSize = sizeFromMmSets(entry.sets);
+          summary[sIdx].sizeMm = platedSize;
+          summary[sIdx].printedSizeMm = platedSize;
+        }
+        if (bed!.heightMm !== undefined && entry.exceedsHeight) {
+          warnings.push(`${group[i].name}: height (${entry.heightMm.toFixed(1)} mm) exceeds the printer's max Z height (${bed!.heightMm} mm).`);
+        }
+      });
       mm = placed.flatMap((p) => p.sets);
     } else {
       // A file of its own stands a section the way it prints; together, the
@@ -455,7 +497,16 @@ export function exportPrintFiles(scene: SceneGraph, options: PrintExportOptions)
       object: p.id,
       objectName: p.name,
     })));
-    const result = exportThreeMf(meshes, { maxExtruders: options.filaments });
+    const distinctBodyColours = new Set(meshes.map((m) => colourBucketKey(m.baseColor))).size;
+    const maxExtruders = options.filaments !== undefined
+      ? options.filaments
+      : Math.min(32, Math.max(5, distinctBodyColours));
+    const result = exportThreeMf(meshes, { maxExtruders });
+    if (distinctBodyColours > result.palette.length) {
+      warnings.push(
+        `3MF export quantized ${distinctBodyColours} distinct body colours into ${result.palette.length} filament slot${result.palette.length === 1 ? '' : 's'} (limit: ${maxExtruders}).`,
+      );
+    }
     filaments.push(result.palette);
     return { name: `${name}.3mf`, bytes: result.data };
   });

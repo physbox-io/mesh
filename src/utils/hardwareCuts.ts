@@ -27,6 +27,179 @@ import { SNAP_SIZES, snapHookProfileMm, snapWindowMm } from './snapFits';
 
 export { HEX_NUTS, CLEARANCE_HOLES, COUNTERBORES, INSERTS, BEARINGS } from './hardwareSizes';
 
+/**
+ * ISO 10642 / DIN 74-1 90° conical countersinks for metric flat-head screws:
+ * [head diameter, nominal 90° cone depth to clearance hole], mm.
+ */
+export const COUNTERSINKS: Record<string, [number, number]> = {
+  M2: [4.4, 1.0], 'M2.5': [5.5, 1.3], M3: [6.6, 1.6], M4: [8.6, 2.05], M5: [10.4, 2.45],
+  M6: [12.6, 3.0], M8: [16.6, 3.8], M10: [20.8, 4.9], M12: [25.0, 5.75], M14: [28.0, 6.25],
+  M16: [31.0, 6.75], M20: [37.5, 7.75], M24: [41.0, 7.5],
+};
+
+export const COUNTERSINK_INFO: HardwareKindInfo = {
+  label: 'Countersink',
+  sizes: BOLTS,
+  defaultSize: 'M3',
+  bores: ['clearance', 'tapped'],
+  defaultBore: 'clearance',
+  defaultFitMm: 0,
+  hint: 'A conical recess (90° ISO metric by default, or 82° for imperial flat-head screws) that sinks a flat-head screw flush, with a clearance or tapped hole below.',
+};
+
+export interface CountersinkSpec {
+  group: string;
+  size: string;
+  at: number[];
+  normal: number[];
+  bore?: HardwareBore;
+  fitMm?: number;
+  /** Included cone angle in degrees (default 90° for ISO metric; 82° for US flat-head). */
+  angleDeg?: number;
+}
+
+/**
+ * Builds a closed, outward-wound Z-up manifold cone mesh for a countersink
+ * cutter in its local frame: a cylindrical overshoot collar from z = 0 to
+ * z = +overM at radius rTopM, tapering linearly to radius rBotM at z = -depthM.
+ */
+export function countersinkConeMesh(
+  rTopM: number,
+  rBotM: number,
+  depthM: number,
+  overM = 0.001,
+  segments = 32,
+): { positions: number[]; faces: number[] } {
+  const n = Math.max(8, Math.round(segments));
+  const positions: number[] = [];
+  const push = (x: number, y: number, z: number) => {
+    positions.push(+x.toFixed(7), +y.toFixed(7), +z.toFixed(7));
+  };
+  // 0: top cap centre
+  push(0, 0, overM);
+  // 1..n: top overshoot ring (z = +overM, r = rTopM)
+  for (let i = 0; i < n; i++) {
+    const a = (2 * Math.PI * i) / n;
+    push(rTopM * Math.cos(a), rTopM * Math.sin(a), overM);
+  }
+  // n+1..2n: surface mouth ring (z = 0, r = rTopM)
+  for (let i = 0; i < n; i++) {
+    const a = (2 * Math.PI * i) / n;
+    push(rTopM * Math.cos(a), rTopM * Math.sin(a), 0);
+  }
+  // 2n+1..3n: bottom ring (z = -depthM, r = rBotM)
+  for (let i = 0; i < n; i++) {
+    const a = (2 * Math.PI * i) / n;
+    push(rBotM * Math.cos(a), rBotM * Math.sin(a), -depthM);
+  }
+  // 3n+1: bottom cap centre
+  push(0, 0, -depthM);
+
+  const topCenter = 0;
+  const topStart = 1;
+  const surfStart = 1 + n;
+  const botStart = 1 + 2 * n;
+  const botCenter = 1 + 3 * n;
+  const faces: number[] = [];
+
+  for (let i = 0; i < n; i++) {
+    const next = (i + 1) % n;
+    // Top cap (+Z outward)
+    faces.push(topCenter, topStart + i, topStart + next);
+    // Cylindrical overshoot collar
+    faces.push(surfStart + i, surfStart + next, topStart + next);
+    faces.push(surfStart + i, topStart + next, topStart + i);
+    // Conical frustum wall
+    faces.push(botStart + i, botStart + next, surfStart + next);
+    faces.push(botStart + i, surfStart + next, surfStart + i);
+    // Bottom cap (-Z outward)
+    faces.push(botCenter, botStart + next, botStart + i);
+  }
+  return { positions, faces };
+}
+
+/**
+ * Builds the conical countersink head mesh (baked into the body frame at
+ * `spec.at` along `spec.normal`) and the matching shank cylinder cut spec.
+ */
+export function countersinkCutGeoms(spec: CountersinkSpec, nodeId: string): {
+  head: SceneGeom;
+  shank: SceneGeom;
+  size: string;
+  bore: HardwareBore;
+  angleDeg: number;
+  headDiameterMm: number;
+  depthMm: number;
+  fitMm: number;
+} {
+  const size = COUNTERSINK_INFO.sizes.includes(spec.size) ? spec.size : COUNTERSINK_INFO.defaultSize;
+  const bore: HardwareBore = spec.bore && COUNTERSINK_INFO.bores?.includes(spec.bore)
+    ? spec.bore
+    : 'clearance';
+  const fitMm = Math.max(0, spec.fitMm ?? COUNTERSINK_INFO.defaultFitMm);
+  const angleDeg = spec.angleDeg !== undefined && Number.isFinite(spec.angleDeg) ? spec.angleDeg : 90;
+  const [baseHeadDiaMm] = COUNTERSINKS[size];
+  const headDiameterMm = baseHeadDiaMm + fitMm;
+  const threadInfo = bore === 'tapped' ? metricThread(size) : undefined;
+  const shankDiaMm = threadInfo ? threadInfo[1] : CLEARANCE_HOLES[size];
+  // Nominal depth of the 90°/82° cone from headDiameterMm down to shankDiaMm.
+  const halfRad = ((angleDeg / 2) * Math.PI) / 180;
+  const tanHalf = Math.tan(halfRad);
+  const nominalDepthMm = Math.max(0.2, (headDiameterMm - shankDiaMm) / (2 * tanHalf));
+  // Extend the cone slightly past the shank diameter so the cone and shank
+  // cylinder overlap cleanly in CSG without a zero-thickness tangent seam.
+  const rTopM = m(headDiameterMm / 2);
+  const rBotMm = Math.max(0.1, Math.min(shankDiaMm * 0.4, headDiameterMm * 0.25));
+  const rBotM = m(rBotMm);
+  const coneDepthM = Math.max(m(nominalDepthMm), (rTopM - rBotM) / tanHalf);
+  const overM = 0.001;
+
+  const { positions: localPos, faces } = countersinkConeMesh(rTopM, rBotM, coneDepthM, overM, 32);
+  const n = new THREE.Vector3(...(spec.normal as [number, number, number])).normalize();
+  const turn = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
+  const origin = new THREE.Vector3(...(spec.at as [number, number, number]));
+  const zup: number[] = [];
+  const v = new THREE.Vector3();
+  for (let i = 0; i < localPos.length; i += 3) {
+    v.set(localPos[i], localPos[i + 1], localPos[i + 2]).applyQuaternion(turn).add(origin);
+    zup.push(+v.x.toFixed(7), +v.y.toFixed(7), +v.z.toFixed(7));
+  }
+  const yup: number[] = [];
+  for (let i = 0; i < zup.length; i += 3) yup.push(zup[i], zup[i + 2], -zup[i + 1]);
+
+  const head: SceneGeom = {
+    name: `${nodeId}_${spec.group}_head`,
+    type: 'mesh',
+    size: [1],
+    csg: 'difference',
+    rgba: [0.9, 0.25, 0.35, 1],
+    renderVertices: zup,
+    vertices: yup,
+    faces,
+  };
+  const shank: SceneGeom = {
+    name: `${nodeId}_${spec.group}_shank`,
+    type: 'cylinder',
+    size: [m(shankDiaMm / 2), 0],
+    csg: 'difference',
+    cutAt: spec.at.map((c) => +c.toFixed(6)),
+    cutNormal: [...spec.normal],
+    cutDepth: 0,
+    rgba: [0.9, 0.25, 0.35, 1],
+    ...(threadInfo ? { thread: { pitch: m(threadInfo[2]) } } : {}),
+  };
+  return {
+    head,
+    shank,
+    size,
+    bore,
+    angleDeg,
+    headDiameterMm: +headDiameterMm.toFixed(3),
+    depthMm: +nominalDepthMm.toFixed(3),
+    fitMm,
+  };
+}
+
 export interface HardwareKindInfo {
   label: string;
   /** What the panel's Size menu offers. */

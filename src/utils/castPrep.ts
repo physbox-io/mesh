@@ -26,6 +26,7 @@ import { resolveCsgGeoms, statedBooleanMass } from './csg';
 import { appendBaseGeomTriangles } from './geomSurface';
 import { getGeomFrame, getNodeWorldTransform } from './laserCutExporter';
 import { maxSizeFor, sameEdge, suggestedSize, type EdgeCandidate } from './featureEdges';
+import { normalizeRoundEdge } from './edgeRound';
 import { isBoughtIn } from './boughtIn';
 
 // ---------------------------------------------------------------------------
@@ -236,6 +237,13 @@ export function edgeTargets(smallestDimension: number, sizeMm: number | 'auto'):
  * `skip` can leave out more (the ones on the parting plane, which must stay
  * sharp or the sand overhangs the break).
  */
+/**
+ * Minimum flat land kept on each side of a rounding (0.1 mm per side = 0.2 mm
+ * between two opposing roundings on the same face) so counterbore shelves and
+ * thin walls never pinch down to a 0.01 mm sliver at OpenSCAD's weld grid.
+ */
+const EDGE_FIT_CLEARANCE = 0.0001;
+
 export function planEdgeRounds(
   edges: EdgeCandidate[],
   smallestDimension: number,
@@ -248,12 +256,14 @@ export function planEdgeRounds(
   let broken = 0, sharp = 0, chamfer = 0, fillet = 0;
   const sharpAt: number[][] = [];
 
-  for (const e of edges) {
+  for (const raw of edges) {
+    const fixedEdge = normalizeRoundEdge(raw.edge);
+    const e = fixedEdge === raw.edge ? raw : { ...raw, edge: fixedEdge };
     if (existing.some((f) => f.edges.some((x) => sameEdge(x, e.edge)))) continue;
     if (skip(e)) continue;
     const mode: 'chamfer' | 'fillet' = e.edge.convex ? 'chamfer' : 'fillet';
     const want = mode === 'chamfer' ? target.chamfer : target.fillet;
-    const fits = maxSizeFor([e], mode);
+    const fits = Math.max(0, maxSizeFor([e], mode) - EDGE_FIT_CLEARANCE);
     const size = Math.floor(Math.min(want, fits) * 1e4 + 1e-6) / 1e4;
     if (!(size >= MIN_EDGE_BREAK)) {
       sharp++;
@@ -419,13 +429,26 @@ function zupToYupFlat(zup: number[]): number[] {
   return out;
 }
 
+/** Authored positive solid geoms of a body (excluding derived meshes, cutters, visuals, and planes). */
+function authoredSolids(node: SceneNode): SceneGeom[] {
+  return (node.geoms || []).filter(
+    (g) => !g.csgDerived && g.csg !== 'difference' && g.role !== 'visual' && g.type !== 'plane',
+  );
+}
+
 /** The total mass a body's authored solid geoms state, if they state one. */
 function sourceMass(node: SceneNode): number | undefined {
-  const masses = (node.geoms || [])
-    .filter((g) => !g.csgDerived && g.csg !== 'difference' && g.role !== 'visual' && g.type !== 'plane')
-    .map((g) => g.mass);
+  const masses = authoredSolids(node).map((g) => g.mass);
   if (masses.length === 0 || masses.some((m) => m === undefined)) return undefined;
   return masses.reduce((a, b) => a! + b!, 0);
+}
+
+/** The density (kg/m³) stated on a body's authored solid geoms (or body itself), if any. */
+function sourceDensity(node: SceneNode): number | undefined {
+  const fromGeom = authoredSolids(node).find((g) => typeof g.density === 'number' && Number.isFinite(g.density))?.density;
+  if (fromGeom !== undefined) return fromGeom;
+  const bodyDensity = (node as { density?: unknown }).density;
+  return typeof bodyDensity === 'number' && Number.isFinite(bodyDensity) ? bodyDensity : undefined;
 }
 
 /** Fields of a source geom that describe how it was BUILT, which a baked mesh no longer is. */
@@ -557,10 +580,35 @@ export function draftBodyGeoms(node: SceneNode, world: THREE.Matrix4, p: DraftPa
     if (geom.csgDerived) {
       // A boolean's mesh hands colliding and weight to its colliders, which
       // are about to go. The baked mesh is the body now, so it takes both back:
-      // the boolean's stated mass, or the source primitives', or its volume's.
+      // the boolean's stated mass, or the source primitives' mass/density, plus
+      // any physical/material properties that csgDerived omitted.
       delete baked.role;
       const mass = statedBooleanMass(node) ?? sourceMass(node);
-      if (mass !== undefined) baked.mass = mass; else delete baked.mass;
+      if (mass !== undefined) {
+        baked.mass = mass;
+      } else {
+        delete baked.mass;
+        const density = sourceDensity(node);
+        if (density !== undefined) baked.density = density;
+      }
+      const template = authoredSolids(node)[0];
+      if (template) {
+        if (baked.friction === undefined && template.friction) baked.friction = [...template.friction];
+        if (baked.condim === undefined && template.condim !== undefined) baked.condim = template.condim;
+        if (baked.solref === undefined && template.solref) baked.solref = [...template.solref];
+        if (baked.solimp === undefined && template.solimp) baked.solimp = [...template.solimp];
+        if (baked.contype === undefined && template.contype !== undefined) baked.contype = template.contype;
+        if (baked.conaffinity === undefined && template.conaffinity !== undefined) baked.conaffinity = template.conaffinity;
+        if (baked.margin === undefined && template.margin !== undefined) baked.margin = template.margin;
+        if (baked.gap === undefined && template.gap !== undefined) baked.gap = template.gap;
+        if (baked.glow === undefined && template.glow !== undefined) baked.glow = template.glow;
+        if (baked.dentYieldNs === undefined && template.dentYieldNs !== undefined) baked.dentYieldNs = template.dentYieldNs;
+        if (baked.dentDepthPerNs === undefined && template.dentDepthPerNs !== undefined) baked.dentDepthPerNs = template.dentDepthPerNs;
+        if (baked.dentRadius === undefined && template.dentRadius !== undefined) baked.dentRadius = template.dentRadius;
+        if (baked.dentMaxDepth === undefined && template.dentMaxDepth !== undefined) baked.dentMaxDepth = template.dentMaxDepth;
+        if (baked.pierceImpulseNs === undefined && template.pierceImpulseNs !== undefined) baked.pierceImpulseNs = template.pierceImpulseNs;
+        if (baked.deformCollision === undefined && template.deformCollision !== undefined) baked.deformCollision = template.deformCollision;
+      }
     }
     baked.type = 'mesh';
     baked.dynamic = true;

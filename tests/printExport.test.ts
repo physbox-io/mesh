@@ -226,10 +226,14 @@ describe('the plate', () => {
     // The section's core is its own volume, as off the plate: two for it, one for the cube
     expect(components).toBe(3);
     expect(result.filaments?.[0].length).toBe(2);
-    // The section stands on its side: 10 mm (its X) is now its height
+    // The section stands on its side: 20 mm (its X) is now its height
     const zs = [...model.matchAll(/<vertex x="[^"]+" y="[^"]+" z="([^"]+)"/g)].map((m) => +m[1]);
     expect(Math.min(...zs)).toBeCloseTo(0, 4);
     expect(Math.max(...zs)).toBeCloseTo(20, 3);
+    // Summary sizeMm and printedSizeMm reflect the plated orientation (Z = 20 mm, not un-rotated 10 mm).
+    expect(result.parts[0].sizeMm[2]).toBeCloseTo(20, 2);
+    expect(result.parts[0].printedSizeMm?.[2]).toBeCloseTo(20, 2);
+    expect(result.parts[0].sizeMm.slice(0, 2).sort((a, b) => a - b)).toEqual([10, 40]);
   });
 
   it('plates sections inside the margin they were split with, and says when the bed has changed', () => {
@@ -255,6 +259,8 @@ describe('the plate', () => {
     for (let t = 0; t < view.getUint32(80, true); t++) for (let c = 0; c < 3; c++) zs.push(view.getFloat32(84 + t * 50 + 12 + c * 12 + 8, true));
     // Stood on its side: the 20 mm X is its height, as on the plate.
     expect(Math.max(...zs) - Math.min(...zs)).toBeCloseTo(20, 3);
+    expect(result.parts[0].sizeMm[2]).toBeCloseTo(20, 2);
+    expect(result.parts[0].printedSizeMm?.[2]).toBeCloseTo(20, 2);
   });
 
   it('with separate, one plate file a body, each stood the way it prints', () => {
@@ -538,5 +544,191 @@ describe("a generated mold's printed parts", () => {
     expect(verts).toBe(8);
     expect(tris).toBe(12);
     expect(verts).toBeLessThan(tris);
+  });
+
+  it('does not explode flat-walled painted meshes on STL or 3MF export and keeps 3MF watertight', async () => {
+    const {
+      paintMeshResolution, subdivideMeshForPaint, emptyCanvas, layerFromCanvas,
+    } = await import('../src/utils/vertexPaint');
+
+    // A 120 × 120 × 40 mm flat-walled mesh box (12 triangles) whose top face
+    // (+Z = +0.02) is painted blue on a red body — the same PaintLayer shape
+    // `sectionPaint` leaves on multi-colour Split for Print sections.
+    const hx = 0.06, hy = 0.06, hz = 0.02;
+    const renderVertices = [
+      -hx, -hy, -hz,  hx, -hy, -hz,  hx,  hy, -hz, -hx,  hy, -hz,
+      -hx, -hy,  hz,  hx, -hy,  hz,  hx,  hy,  hz, -hx,  hy,  hz,
+    ];
+    const faces = [
+      0, 2, 1, 0, 3, 2, // bottom (-Z)
+      4, 5, 6, 4, 6, 7, // top (+Z)
+      0, 1, 5, 0, 5, 4,
+      1, 2, 6, 1, 6, 5,
+      2, 3, 7, 2, 7, 6,
+      3, 0, 4, 3, 4, 7,
+    ];
+    const res = paintMeshResolution(renderVertices);
+    const fullSub = subdivideMeshForPaint(renderVertices, faces, res);
+    const fullTriCount = fullSub.faces.length / 3;
+    // Sanity check: the raw paint subdivision IS huge (>10k tris on this box).
+    expect(fullTriCount).toBeGreaterThan(10_000);
+
+    const canvas = emptyCanvas(fullSub.positions.length / 3, res);
+    for (let v = 0; v < canvas.count; v++) {
+      // Paint the top face (+Z) blue.
+      if (Math.abs(fullSub.positions[v * 3 + 2] - hz) < 1e-5) {
+        canvas.data.set([0.1, 0.2, 0.9, 1], v * 4);
+      }
+    }
+    const paint = layerFromCanvas(canvas)!;
+
+    const paintedScene: SceneGraph = {
+      nodes: [{
+        id: 'section1', name: 'section1', type: 'body', pos: [0, 0, 0.02], joints: [], children: [],
+        geoms: [{
+          name: 'section1_mesh', type: 'mesh', rgba: [0.8, 0.1, 0.1, 1],
+          dynamic: true, renderVertices, faces, paint,
+        }],
+      }],
+    };
+
+    // 1. Monochrome STL must skip paint subdivision completely: exact 12 triangles.
+    const stlRes = exportPrintFiles(paintedScene, { format: 'stl' });
+    expect(stlRes.parts[0].triangles).toBe(12);
+    const stlView = new DataView(stlRes.files[0].bytes.buffer, stlRes.files[0].bytes.byteOffset, stlRes.files[0].bytes.byteLength);
+    expect(stlView.getUint32(80, true)).toBe(12);
+
+    // 2. 3MF must coarsen uniform flat faces (far below the full paint mesh),
+    //    preserve both colours, and stay a closed 2-manifold (zero T-junctions).
+    const threeMfRes = exportPrintFiles(paintedScene, { format: '3mf' });
+    expect(threeMfRes.filaments?.[0].length).toBe(2);
+    const model = new TextDecoder().decode((unzipSync(threeMfRes.files[0].bytes) as Record<string, Uint8Array>)['3D/3dmodel.model']);
+    const triMatches = [...model.matchAll(/<triangle v1="(\d+)" v2="(\d+)" v3="(\d+)"([^>]*)\/>/g)];
+    expect(triMatches.length).toBeLessThan(fullTriCount / 10);
+    expect(model).toMatch(/paint_color="8"/);
+
+    // Verify closed 2-manifold (every directed edge has an exact reverse partner).
+    const edgeCounts = new Map<string, number>();
+    for (const m of triMatches) {
+      const vs = [+m[1], +m[2], +m[3]];
+      for (let e = 0; e < 3; e++) {
+        const a = vs[e], b = vs[(e + 1) % 3];
+        const key = `${a}->${b}`;
+        edgeCounts.set(key, (edgeCounts.get(key) ?? 0) + 1);
+      }
+    }
+    for (const [key, count] of edgeCounts) {
+      expect(count, `duplicate directed edge ${key}`).toBe(1);
+      const [a, b] = key.split('->');
+      expect(edgeCounts.get(`${b}->${a}`), `open/T-junction edge ${key}`).toBe(1);
+    }
+
+    // 3. A mesh whose paint is below the 0.5 print threshold collapses all the
+    //    way back to the exact original 12 triangles in 3MF as well.
+    const faintCanvas = emptyCanvas(fullSub.positions.length / 3, res);
+    faintCanvas.data.set([0.1, 0.2, 0.9, 0.2], 0);
+    const faintScene: SceneGraph = {
+      nodes: [{
+        id: 'section2', name: 'section2', type: 'body', pos: [0, 0, 0.02], joints: [], children: [],
+        geoms: [{
+          name: 'section2_mesh', type: 'mesh', rgba: [0.8, 0.1, 0.1, 1],
+          dynamic: true, renderVertices, faces, paint: layerFromCanvas(faintCanvas)!,
+        }],
+      }],
+    };
+    const faintRes = exportPrintFiles(faintScene, { format: '3mf' });
+    expect(faintRes.parts[0].triangles).toBe(12);
+  });
+
+  it('preserves all 6+ distinct body colours by default and warns when filaments explicitly caps them', () => {
+    const colours: [number, number, number, number][] = [
+      [1, 0, 0, 1],
+      [0, 1, 0, 1],
+      [0, 0, 1, 1],
+      [1, 1, 0, 1],
+      [1, 0, 1, 1],
+      [0, 1, 1, 1],
+    ];
+    const sixColourScene: SceneGraph = {
+      nodes: colours.map((rgba, i) => ({
+        id: `b${i}`,
+        name: `Body ${i + 1}`,
+        type: 'body',
+        pos: [i * 0.03, 0, 0.01],
+        joints: [],
+        children: [],
+        geoms: [{ name: `g${i}`, type: 'box', size: [0.005, 0.005, 0.005], rgba }],
+      })),
+    };
+
+    const uncapped = exportPrintFiles(sixColourScene, { format: '3mf' });
+    expect(uncapped.filaments?.[0]).toHaveLength(6);
+    expect(uncapped.warnings.some((w) => /quantized/i.test(w))).toBe(false);
+
+    const capped = exportPrintFiles(sixColourScene, { format: '3mf', filaments: 4 });
+    expect(capped.filaments?.[0]).toHaveLength(4);
+    expect(capped.warnings.some((w) => /quantized 6 distinct body colours into 4 filament slots/i.test(w))).toBe(true);
+  });
+});
+
+describe('SPLIT_FOR_PRINT MCP metadata and naming', () => {
+  it('exposes consistent 1-based section/cut/joint numbers alongside 0-based indices and supports name / scene-name defaults', async () => {
+    const { useStore } = await import('../src/store/useStore');
+    const longScene: SceneGraph = {
+      name: 'Victorian Dollhouse',
+      nodes: [
+        body('floor1', [0, 0, 0.02], [0.15, 0.05, 0.02]),
+        body('wall1', [0, 0, 0.06], [0.15, 0.05, 0.02]),
+      ],
+    };
+    const fakeStore = {
+      sceneGraph: longScene,
+      selectedNodeId: 'floor1',
+      printBed: { widthMm: 200, depthMm: 200, heightMm: 200 },
+      filament: 'pla',
+    } as unknown as PhysicsState;
+    const ctx = { store: fakeStore, toId: (v: unknown) => v };
+
+    // 1. Consistent 1-based numbering alongside 0-based indices (preview, no apply)
+    const preview = await castCommands.SPLIT_FOR_PRINT({
+      bodyId: 'floor1',
+      joinery: 'peg',
+      bedMm: [200, 200, 200],
+    }, ctx) as {
+      ok: boolean;
+      sections: { index: number; sectionNumber: number }[];
+      cuts: { index: number; cutNumber: number }[];
+      joints: { between: number[]; betweenSections: number[]; pegsOn?: number; pegsOnSection?: number }[];
+    };
+    expect(preview.ok).toBe(true);
+    expect(preview.sections.map((s) => [s.index, s.sectionNumber])).toEqual([[0, 1], [1, 2]]);
+    expect(preview.cuts.map((c) => [c.index, c.cutNumber])).toEqual([[0, 1]]);
+    expect(preview.joints[0].between).toEqual([0, 1]);
+    expect(preview.joints[0].betweenSections).toEqual([1, 2]);
+    expect(preview.joints[0].pegsOnSection).toBe((preview.joints[0].pegsOn ?? -1) + 1);
+
+    // 2. Invalid empty name rejected
+    const badName = await castCommands.SPLIT_FOR_PRINT({ bodyId: 'floor1', name: '   ' }, ctx) as { ok: boolean };
+    expect(badName.ok).toBe(false);
+
+    // 3. Naming behavior on apply: explicit `name`, `withIds` scene-name fallback, and single-body default
+    const calls: { names?: string[] }[] = [];
+    const origSplit = useStore.getState().splitBodyForPrint;
+    useStore.setState({
+      splitBodyForPrint: ((_id, secs, _absorbed, opts) => {
+        calls.push({ names: opts?.names });
+        return secs.map((_, i) => `id_${i}`);
+      }) as PhysicsState['splitBodyForPrint'],
+    });
+    try {
+      await castCommands.SPLIT_FOR_PRINT({ bodyId: 'floor1', name: 'Custom Shell', apply: true }, ctx);
+      await castCommands.SPLIT_FOR_PRINT({ bodyId: 'floor1', withIds: ['wall1'], apply: true }, ctx);
+      await castCommands.SPLIT_FOR_PRINT({ bodyId: 'floor1', apply: true }, ctx);
+    } finally {
+      useStore.setState({ splitBodyForPrint: origSplit });
+    }
+    expect(calls[0].names).toEqual(['Custom Shell_part1', 'Custom Shell_part2']);
+    expect(calls[1].names).toEqual(['Victorian Dollhouse_part1', 'Victorian Dollhouse_part2']);
+    expect(calls[2].names).toBeUndefined();
   });
 });

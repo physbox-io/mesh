@@ -278,6 +278,14 @@ export interface WallSpanSample {
   spanZ0: Float32Array;
   /** Exit Z of every closed solid span, in the soup's units. */
   spanZ1: Float32Array;
+  /** Entry face outward unit normal of every closed solid span. */
+  spanEnNx: Float32Array;
+  spanEnNy: Float32Array;
+  spanEnNz: Float32Array;
+  /** Exit face outward unit normal of every closed solid span. */
+  spanExNx: Float32Array;
+  spanExNy: Float32Array;
+  spanExNz: Float32Array;
   /** Minimum valid wall span thickness in each column (Infinity if no valid wall span). */
   minWall: Float32Array;
   /** Midpoint Z of that thinnest valid wall span. */
@@ -329,6 +337,12 @@ export function sampleWallSpans(
       spanStart,
       spanZ0: new Float32Array(0),
       spanZ1: new Float32Array(0),
+      spanEnNx: new Float32Array(0),
+      spanEnNy: new Float32Array(0),
+      spanEnNz: new Float32Array(0),
+      spanExNx: new Float32Array(0),
+      spanExNy: new Float32Array(0),
+      spanExNz: new Float32Array(0),
       minWall,
       minWallMid,
       minWallZ0,
@@ -381,6 +395,12 @@ export function sampleWallSpans(
   const order: number[] = [];
   const rawZ0: number[] = [];
   const rawZ1: number[] = [];
+  const rawEnNx: number[] = [];
+  const rawEnNy: number[] = [];
+  const rawEnNz: number[] = [];
+  const rawExNx: number[] = [];
+  const rawExNy: number[] = [];
+  const rawExNz: number[] = [];
 
   for (let row = 0; row < safeRows; row++) {
     const nudgeY = row < midRow ? NUDGE : row > midRow ? -NUDGE : 0;
@@ -454,10 +474,12 @@ export function sampleWallSpans(
           depth--;
           if (depth === 0 && z > enteredAt) {
             anySpan = true;
+            const exX = hitNx[idx], exY = hitNy[idx], exZ = hitNz[idx];
             rawZ0.push(enteredAt);
             rawZ1.push(z);
+            rawEnNx.push(enX); rawEnNy.push(enY); rawEnNz.push(enZ);
+            rawExNx.push(exX); rawExNy.push(exY); rawExNz.push(exZ);
             const thick = z - enteredAt;
-            const exX = hitNx[idx], exY = hitNy[idx], exZ = hitNz[idx];
             // A real wall has entry and exit faces aligned with the ray axis
             // and opposing each other (not a grazing surface crest or sharp ridge).
             const dot = enX * exX + enY * exY + enZ * exZ;
@@ -489,6 +511,12 @@ export function sampleWallSpans(
     spanStart,
     spanZ0: Float32Array.from(rawZ0),
     spanZ1: Float32Array.from(rawZ1),
+    spanEnNx: Float32Array.from(rawEnNx),
+    spanEnNy: Float32Array.from(rawEnNy),
+    spanEnNz: Float32Array.from(rawEnNz),
+    spanExNx: Float32Array.from(rawExNx),
+    spanExNy: Float32Array.from(rawExNy),
+    spanExNz: Float32Array.from(rawExNz),
     minWall,
     minWallMid,
     minWallZ0,

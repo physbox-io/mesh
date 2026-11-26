@@ -25,7 +25,7 @@
  * a ball — takes that off, leaving the ball's eighth a CAD fillet would.
  */
 import type { EdgeRoundFeature, RoundEdge, SceneNode } from '../types/scene';
-import { sameEdge } from './featureEdges';
+import { sameEdge, type EdgeCandidate } from './featureEdges';
 
 type Vec3 = [number, number, number];
 
@@ -45,6 +45,31 @@ const norm = (a: number[]): Vec3 => {
 };
 
 const fmt = (n: number) => (Number.isFinite(n) ? +n.toFixed(7) : 0);
+
+/**
+ * Repairs circular rims whose flat-face tangent `t1` (and thus `convex`) was
+ * flipped by a flat-face triangle wrapping around the rim's curvature.
+ *
+ * On any 2-manifold solid where a flat face (outward normal `n1`) meets a
+ * perpendicular cylindrical wall (direction into wall `t2` along `±n1`), the
+ * rim is convex iff `t2 · n1 < 0` (the wall goes into the solid, opposite the
+ * flat face's normal) and concave iff `t2 · n1 > 0` (the wall rises out of the
+ * flat face). `t1` must agree with `convex` via `sign(t1 · n2) === sign(t2 · n1)`.
+ */
+export function normalizeRoundEdge(edge: RoundEdge): RoundEdge {
+  if (edge.kind !== 'circle') return edge;
+  const wallVsPlane = dot(edge.t2, edge.n1);
+  if (Math.abs(wallVsPlane) <= 0.1) return edge;
+  const trueConvex = wallVsPlane < 0;
+  const planeVsWall = dot(edge.t1, edge.n2);
+  const t1Flipped = Math.abs(planeVsWall) > 0.1 && (planeVsWall < 0) !== trueConvex;
+  if (edge.convex === trueConvex && !t1Flipped) return edge;
+  return {
+    ...edge,
+    convex: trueConvex,
+    t1: t1Flipped ? [(-edge.t1[0]) || 0, (-edge.t1[1]) || 0, (-edge.t1[2]) || 0] : edge.t1,
+  };
+}
 
 /** The angle between the faces, through the side the sliver sits in. */
 export function wedgeAngle(edge: RoundEdge): number {
@@ -122,7 +147,8 @@ function matrixRows(cols: [number[], number[], number[]], origin: number[]): str
 const OVERRUN = 1e-5;
 
 /** One edge's sliver as a positioned OpenSCAD solid. */
-export function edgeSolidScad(edge: RoundEdge, mode: 'fillet' | 'chamfer', size: number, fn: number): string {
+export function edgeSolidScad(rawEdge: RoundEdge, mode: 'fillet' | 'chamfer', size: number, fn: number): string {
+  const edge = normalizeRoundEdge(rawEdge);
   const section = crossSection(edge, mode, size, arcSegmentsFor(edge, fn));
   if (edge.kind === 'line') {
     const dir = norm(sub(edge.b, edge.a));
@@ -208,25 +234,44 @@ export function cornerPatchesScad(feature: EdgeRoundFeature, fn: number): string
  * millimetres of the outside edge sharp, which reads as finished; the notches
  * do not.
  */
+type ConcaveFiller = { edge: RoundEdge; mode: 'fillet' | 'chamfer'; size: number };
+
 function stopShortOfFillers(
   edge: RoundEdge,
-  concave: { edge: Extract<RoundEdge, { kind: 'line' }>; mode: 'fillet' | 'chamfer'; size: number }[],
+  concave: ConcaveFiller[],
 ): RoundEdge {
   if (edge.kind !== 'line' || !edge.stops?.length || concave.length === 0) return edge;
   const stops = edge.stops.map((stop) => {
     let lift = 0;
+    const stopN = norm(stop.normal);
     for (const c of concave) {
-      // The fillet lies along the stop's face, and passes through the stop.
-      const onFace = dot(c.edge.n1, stop.normal) > 0.999 ? c.edge.t2 : dot(c.edge.n2, stop.normal) > 0.999 ? c.edge.t1 : null;
-      if (!onFace) continue;
-      const ab = sub(c.edge.b, c.edge.a);
-      const t = Math.max(0, Math.min(1, dot(sub(stop.point, c.edge.a), ab) / Math.max(dot(ab, ab), 1e-18)));
-      const nearest = add(c.edge.a, scale(ab, t));
-      if (len(sub(stop.point, nearest)) > 1e-6) continue;
-      // How far the fillet climbs the other face, measured off the stop's face.
-      lift = Math.max(lift, setbackOf(c.edge, c.mode, c.size) * Math.abs(dot(onFace, stop.normal)));
+      if (c.edge.kind === 'line') {
+        // The fillet lies along the stop's face, and passes through the stop.
+        const onFace = dot(c.edge.n1, stopN) > 0.999 ? c.edge.t2 : dot(c.edge.n2, stopN) > 0.999 ? c.edge.t1 : null;
+        if (!onFace) continue;
+        const ab = sub(c.edge.b, c.edge.a);
+        const t = Math.max(0, Math.min(1, dot(sub(stop.point, c.edge.a), ab) / Math.max(dot(ab, ab), 1e-18)));
+        const nearest = add(c.edge.a, scale(ab, t));
+        if (len(sub(stop.point, nearest)) > 1e-6) continue;
+        // How far the fillet climbs the other face, measured off the stop's face.
+        lift = Math.max(lift, setbackOf(c.edge, c.mode, c.size) * Math.abs(dot(onFace, stopN)));
+      } else {
+        // Circular concave rim (boss foot or counterbore floor) lying on the stop's face.
+        const axis = norm(c.edge.axis);
+        if (dot(norm(c.edge.n1), stopN) <= 0.999) continue;
+        const rel = sub(stop.point, c.edge.centre);
+        const axial = dot(rel, axis);
+        if (Math.abs(axial) > 1e-4) continue;
+        const radial = len(sub(rel, scale(axis, axial)));
+        const setback = setbackOf(c.edge, c.mode, c.size);
+        const outward = dot(c.edge.t1, norm(c.edge.ref)) >= 0;
+        const rMin = outward ? c.edge.radius - 1e-5 : c.edge.radius - setback - 1e-5;
+        const rMax = outward ? c.edge.radius + setback + 1e-5 : c.edge.radius + 1e-5;
+        if (radial < rMin || radial > rMax) continue;
+        lift = Math.max(lift, setback * Math.abs(dot(norm(c.edge.t2), stopN)));
+      }
     }
-    return lift > 0 ? { ...stop, point: add(stop.point, scale(norm(stop.normal), lift)) } : stop;
+    return lift > 0 ? { ...stop, point: add(stop.point, scale(stopN, lift)) } : stop;
   });
   return { ...edge, stops };
 }
@@ -242,22 +287,24 @@ export function edgeRoundSolids(features: EdgeRoundFeature[] | undefined, fn: nu
   const cutters: string[] = [];
   const fillers: string[] = [];
   const filletsBySize = new Map<number, RoundEdge[]>();
-  const concave: { edge: Extract<RoundEdge, { kind: 'line' }>; mode: 'fillet' | 'chamfer'; size: number }[] = [];
+  const concave: ConcaveFiller[] = [];
   for (const feature of features || []) {
     if (!Number.isFinite(feature.size) || !(feature.size > 0)) continue;
-    for (const edge of feature.edges) {
-      if (edge.kind === 'line' && !edge.convex) concave.push({ edge, mode: feature.mode, size: feature.size });
+    for (const rawEdge of feature.edges) {
+      const edge = normalizeRoundEdge(rawEdge);
+      if (!edge.convex) concave.push({ edge, mode: feature.mode, size: feature.size });
     }
   }
   for (const feature of features || []) {
     if (!Number.isFinite(feature.size) || !(feature.size > 0)) continue;
-    for (const edge of feature.edges) {
+    for (const rawEdge of feature.edges) {
+      const edge = normalizeRoundEdge(rawEdge);
       const solid = edgeSolidScad(edge.convex ? stopShortOfFillers(edge, concave) : edge, feature.mode, feature.size, fn);
       (edge.convex ? cutters : fillers).push(solid);
     }
     if (feature.mode === 'fillet') {
       const key = Math.round(feature.size * 1e7);
-      filletsBySize.set(key, [...(filletsBySize.get(key) ?? []), ...feature.edges]);
+      filletsBySize.set(key, [...(filletsBySize.get(key) ?? []), ...feature.edges.map(normalizeRoundEdge)]);
     }
   }
   for (const [key, edges] of filletsBySize) {
@@ -355,4 +402,68 @@ export function keepFoundEdges(features: EdgeRoundFeature[], found: RoundEdge[])
     if (edges.length > 0) kept.push(edges.length === f.edges.length ? f : { ...f, edges });
   }
   return { features: lost ? kept : features, lost };
+}
+
+export type ClampedRoundingPlan =
+  | { ok: true; groups: { size: number; edges: RoundEdge[] }[]; clampedCount: number; skippedCount: number }
+  | { ok: false; maxFit: number };
+
+const MIN_CLAMPED_ROUND_SIZE_M = 1e-5; // 0.01 mm
+
+/**
+ * Plans rounding sizes for a selection of edges, clamping tight/short facet
+ * edges individually when a multi-edge selection has ample room on the main
+ * edges. Each resulting group has its own uniform size so OpenSCAD subtracts
+ * (or unions) watertight closed solids without one tiny facet rejecting the
+ * whole loop.
+ *
+ * Rejects when a single picked edge cannot fit `requestedSize`, or when no
+ * edge in the selection can fit `requestedSize`.
+ */
+export function planClampedRoundings(
+  picked: EdgeCandidate[],
+  mode: 'fillet' | 'chamfer',
+  requestedSize: number,
+): ClampedRoundingPlan {
+  if (picked.length === 0) return { ok: false, maxFit: 0 };
+  const fits = picked.map((e) => {
+    const half = ((e.angleDeg * Math.PI) / 180) / 2;
+    return mode === 'chamfer' ? e.maxSetback : e.maxSetback * Math.tan(half);
+  });
+  let minFit = Infinity;
+  let maxFit = -Infinity;
+  for (const f of fits) {
+    if (f < minFit) minFit = f;
+    if (f > maxFit) maxFit = f;
+  }
+  if (!Number.isFinite(minFit)) return { ok: false, maxFit: 0 };
+  if (requestedSize <= minFit + 1e-9) {
+    return { ok: true, groups: [{ size: requestedSize, edges: picked.map((e) => e.edge) }], clampedCount: 0, skippedCount: 0 };
+  }
+  if (picked.length === 1 || requestedSize > maxFit + 1e-9) {
+    return { ok: false, maxFit: minFit };
+  }
+
+  const buckets = new Map<number, { size: number; edges: RoundEdge[] }>();
+  let clampedCount = 0;
+  let skippedCount = 0;
+  for (let i = 0; i < picked.length; i++) {
+    const edgeMax = fits[i];
+    let size: number;
+    if (edgeMax >= requestedSize - 1e-9) {
+      size = requestedSize;
+    } else if (edgeMax >= MIN_CLAMPED_ROUND_SIZE_M) {
+      size = Math.floor(edgeMax * 1e5) / 1e5;
+      clampedCount++;
+    } else {
+      skippedCount++;
+      continue;
+    }
+    const key = Math.round(size * 1e7);
+    const bucket = buckets.get(key);
+    if (bucket) bucket.edges.push(picked[i].edge);
+    else buckets.set(key, { size, edges: [picked[i].edge] });
+  }
+  if (buckets.size === 0) return { ok: false, maxFit: minFit };
+  return { ok: true, groups: [...buckets.values()], clampedCount, skippedCount };
 }

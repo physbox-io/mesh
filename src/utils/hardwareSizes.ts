@@ -110,3 +110,45 @@ export const GLANDS: Record<string, { face: [number, number]; radial: [number, n
 
 /** Where a static seal works: squeeze as a share of the cord, how full its groove may be, how far it may be stretched. */
 export const SEAL_LIMITS = { squeezeMin: 0.15, squeezeMax: 0.3, fillMax: 0.85, stretchMax: 0.05 } as const;
+
+// ---------------------------------------------------------------------------
+// Woodworking & cabinetry hardware
+// ---------------------------------------------------------------------------
+
+/** Butt hinges: [height, openWidth, leafThickness, pinDiameter], mm. */
+export const BUTT_HINGES: Record<string, [number, number, number, number]> = {
+  '38mm': [38, 30, 1.5, 4.0],
+  '50mm': [50, 38, 1.8, 5.0],
+  '65mm': [65, 44, 2.0, 5.5],
+  '75mm': [75, 50, 2.2, 6.0],
+  '100mm': [100, 70, 2.8, 7.5],
+};
+
+/** Hasp & staple latches: [strapLength, plateWidth, thickness, stapleProjection], mm. */
+export const HASP_LATCHES: Record<string, [number, number, number, number]> = {
+  '50mm': [50, 22, 2.0, 16],
+  '75mm': [75, 28, 2.4, 20],
+  '100mm': [100, 34, 2.8, 24],
+  '125mm': [125, 40, 3.2, 28],
+};
+
+/** Chest / cabinet handles & drawer pulls by centre-to-centre spacing: [cc, projection, barDiameter, baseDiameter], mm. */
+export const HANDLES: Record<string, [number, number, number, number]> = {
+  '96mm': [96, 28, 10, 16],
+  '128mm': [128, 32, 12, 18],
+  '160mm': [160, 36, 12, 20],
+  '192mm': [192, 40, 14, 22],
+};
+
+/** Flat-head countersunk wood screws: [shankDiameter, headDiameter, headHeight], mm. */
+export const WOOD_SCREWS: Record<string, [number, number, number]> = {
+  '#6': [3.5, 6.8, 2.0],
+  '#8': [4.2, 8.2, 2.5],
+  '#10': [4.8, 9.6, 2.9],
+  '#12': [5.5, 11.0, 3.3],
+  M4: [4.0, 7.5, 2.2],
+  M5: [5.0, 9.2, 2.5],
+};
+
+/** Standard wood screw overall lengths, mm. */
+export const WOOD_SCREW_LENGTHS = [12, 16, 20, 25, 30, 35, 40, 45, 50, 60, 75, 100] as const;

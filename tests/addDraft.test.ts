@@ -49,4 +49,34 @@ describe('Add Draft', () => {
     expect(r.drafted).toEqual([]);
     expect(scene.nodes[0].geoms[0].type).toBe('box');
   });
+
+  it('preserves custom density when drafting a CSG body', () => {
+    const verts = [
+      -0.01, -0.01, -0.01, 0.01, -0.01, -0.01, 0.01, 0.01, -0.01, -0.01, 0.01, -0.01,
+      -0.01, -0.01, 0.01, 0.01, -0.01, 0.01, 0.01, 0.01, 0.01, -0.01, 0.01, 0.01,
+    ];
+    const faces = [
+      0, 2, 1, 0, 3, 2, // bottom
+      4, 5, 6, 4, 6, 7, // top
+      0, 1, 5, 0, 5, 4, // -y
+      2, 3, 7, 2, 7, 6, // +y
+      0, 4, 7, 0, 7, 3, // -x
+      1, 2, 6, 1, 6, 5, // +x
+    ];
+    const scene = {
+      nodes: [{
+        id: 'bronze', name: 'bronze', type: 'body', pos: [0, 0, 0.01], joints: [], children: [], csgEnabled: true,
+        geoms: [
+          { name: 'src', type: 'box', size: [0.01, 0.01, 0.01], density: 8800, rgba: [0.8, 0.5, 0.2, 1] },
+          { name: 'cut', type: 'cylinder', size: [0.003, 0.012], csg: 'difference' },
+          { name: 'bronze_csg', type: 'mesh', size: [1], role: 'visual', mass: 0, csgDerived: 'visual', renderVertices: verts, vertices: [], faces },
+        ],
+      }],
+    } as unknown as SceneGraph;
+    const r = addDraftToBodies(scene, ['bronze'], 2, 'add');
+    expect(r.drafted.map((d) => d.id)).toEqual(['bronze']);
+    expect(scene.nodes[0].geoms).toHaveLength(1);
+    expect(scene.nodes[0].geoms[0].mass).toBeUndefined();
+    expect(scene.nodes[0].geoms[0].density).toBe(8800);
+  });
 });

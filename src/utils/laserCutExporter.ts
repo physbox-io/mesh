@@ -2841,11 +2841,16 @@ function detectJoints(
       const offB = mB.dEdge + reachB;
       const onB = mB.dEdge - reachB - proud;
       // A panel sitting entirely past its neighbour's near face is not a joint.
-      if (offA < -MIN_FEATURE_MM || offB < -MIN_FEATURE_MM) continue;
+      // Check contact against the model's own slabs (with the same 0.6 mm tolerance
+      // used for edge-to-line matching) so sibling bodies touching edge-to-edge or
+      // cut from slightly thinner stock still form joints.
+      const modelOffA = mA.dEdge + (tB / 2) * invSin;
+      const modelOffB = mB.dEdge + (tA / 2) * invSin;
+      if (modelOffA < -0.6 || modelOffB < -0.6) continue;
 
       const lo = Math.max(mA.s0, mB.s0);
       const hi = Math.min(mA.s1, mB.s1);
-      if (hi - lo < Math.max(6, 3 * Math.max(tA, tB))) continue;
+      if (hi - lo < Math.max(6, 1.5 * Math.max(tA, tB))) continue;
 
       // A mortise has to be a closed hole, so the female panel needs material
       // beyond the tenon's slab. Either side may qualify; prefer whichever has
@@ -3233,7 +3238,7 @@ function buildJointWork(
     const lo = j.lo + owner.insetLo;
     const hi = j.hi - owner.insetHi;
     const span = hi - lo;
-    if (span < Math.max(6, 3 * Math.max(tA, tB))) return;
+    if (span < Math.max(6, 1.5 * Math.max(tA, tB))) return;
 
     // Cell count and parity are chosen together so the end cells land on the
     // panels that need to own their corners. An odd count gives both ends to the

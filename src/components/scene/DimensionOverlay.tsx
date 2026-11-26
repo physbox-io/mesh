@@ -20,7 +20,6 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
-import { Html } from '@react-three/drei';
 import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
 import { isDrawingView, SQUARE_TO_VIEW, VIEW_AXES, type DrawingView } from '../../utils/cameraViews';
@@ -730,6 +729,110 @@ export function liveList(found: BodyDimensions[], locations: LocationDim[], pare
 
 const NOOP_RAYCAST = () => null;
 
+const LABEL_FONT_FAMILY = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
+const LABEL_FONT_SIZE_PX = 10;
+const LABEL_HEIGHT_PX = 14;
+const LABEL_PAD_X_PX = 4;
+const LABEL_RADIUS_PX = 2;
+const LABEL_CANVAS_SCALE = 3;
+
+export interface LabelSpriteData {
+  texture: THREE.CanvasTexture;
+  widthPx: number;
+  heightPx: number;
+}
+
+/**
+ * Maps a dimension label's anchor to `THREE.Sprite.center` UV coordinates
+ * (where `(0, 0)` is bottom-left and `(1, 1)` is top-right).
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function labelAnchorCenter(anchor: 'centre' | 'left' | 'right'): [number, number] {
+  if (anchor === 'left') return [0, 0.5];
+  if (anchor === 'right') return [1, 0.5];
+  return [0.5, 0.5];
+}
+
+function drawRoundedRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number,
+) {
+  if (typeof ctx.roundRect === 'function') {
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, r);
+    return;
+  }
+  const radius = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + w - radius, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+  ctx.lineTo(x + w, y + h - radius);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+  ctx.lineTo(x + radius, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+}
+
+/**
+ * Renders a dimension figure into a crisp supersampled WebGL `CanvasTexture`
+ * pill so labels appear identically in the interactive viewport AND in
+ * `gl.domElement.toDataURL()` screenshots (HTML overlays are omitted by WebGL
+ * canvas capture).
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function createDimensionLabelTexture(
+  text: string,
+  { location, dark, scale = LABEL_CANVAS_SCALE }: { location: boolean; dark: boolean; scale?: number },
+): LabelSpriteData | null {
+  if (typeof document === 'undefined') return null;
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+
+  const font = `600 ${LABEL_FONT_SIZE_PX}px ${LABEL_FONT_FAMILY}`;
+  ctx.font = font;
+  const measured = ctx.measureText(text).width;
+  const textWidthPx = Number.isFinite(measured) && measured > 0 ? measured : text.length * 6.5;
+  const widthPx = Math.max(14, Math.ceil(textWidthPx + LABEL_PAD_X_PX * 2));
+  const heightPx = LABEL_HEIGHT_PX;
+
+  canvas.width = Math.max(1, Math.ceil(widthPx * scale));
+  canvas.height = Math.max(1, Math.ceil(heightPx * scale));
+
+  // Resizing a canvas resets its 2D context state, so apply scale and styles after.
+  ctx.scale(scale, scale);
+  drawRoundedRect(ctx, 0.5, 0.5, widthPx - 1, heightPx - 1, LABEL_RADIUS_PX);
+  ctx.fillStyle = dark ? 'rgba(15, 23, 42, 0.92)' : 'rgba(255, 255, 255, 0.92)';
+  ctx.fill();
+  ctx.lineWidth = 0.75;
+  ctx.strokeStyle = dark ? 'rgba(148, 163, 184, 0.25)' : 'rgba(15, 23, 42, 0.14)';
+  ctx.stroke();
+
+  ctx.font = font;
+  ctx.fillStyle = location
+    ? (dark ? '#22d3ee' : '#0e7490')
+    : (dark ? '#fbbf24' : '#b45309');
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, widthPx / 2, heightPx / 2 + 0.5);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+
+  return { texture, widthPx, heightPx };
+}
+
 export function DimensionOverlay() {
   const view = useStore((s) => (s.dimsEnabled && isDrawingView(s.cameraView) ? s.cameraView : null));
   if (!view) return null;
@@ -877,6 +980,19 @@ function DimensionOverlayActive({ view }: { view: DrawingView }) {
   }, [drawing, found, setCut]);
   useEffect(() => () => setCut(null, null), [setCut]);
 
+  const [dark, setDark] = useState(
+    () => typeof document !== 'undefined' && document.documentElement.classList.contains('dark'),
+  );
+  useEffect(() => {
+    if (typeof document === 'undefined' || typeof MutationObserver === 'undefined') return;
+    const root = document.documentElement;
+    const sync = () => setDark(root.classList.contains('dark'));
+    sync();
+    const obs = new MutationObserver(sync);
+    obs.observe(root, { attributes: true, attributeFilter: ['class'] });
+    return () => obs.disconnect();
+  }, []);
+
   const geometries = useMemo(() => {
     const make = (array: Float32Array | undefined) => {
       const g = new THREE.BufferGeometry();
@@ -891,6 +1007,22 @@ function DimensionOverlayActive({ view }: { view: DrawingView }) {
     };
   }, [drawing]);
   useEffect(() => () => Object.values(geometries).forEach((g) => g.dispose()), [geometries]);
+
+  const labelSprites = useMemo(() => {
+    const map = new Map<string, LabelSpriteData>();
+    if (!drawing) return map;
+    for (const label of drawing.labels) {
+      const cacheKey = `${label.location ? 'L' : 'D'}:${label.text}`;
+      if (map.has(cacheKey)) continue;
+      const sprite = createDimensionLabelTexture(label.text, { location: label.location, dark });
+      if (sprite) map.set(cacheKey, sprite);
+    }
+    return map;
+  }, [drawing, dark]);
+  useEffect(() => () => {
+    for (const s of labelSprites.values()) s.texture.dispose();
+  }, [labelSprites]);
+
   useEffect(() => () => setLiveDimensions([]), []);
 
   if (!drawing) return null;
@@ -906,26 +1038,29 @@ function DimensionOverlayActive({ view }: { view: DrawingView }) {
           </mesh>
         </group>
       ))}
-      {drawing.labels.map((label) => (
-        <Html
-          key={label.key}
-          position={label.at}
-          // drei's `center` is a transform on the same element `style` styles,
-          // so a label anchored at one edge sets its own instead.
-          center={label.anchor === 'centre'}
-          // Under the viewport's floating panels (z-10), not over them.
-          zIndexRange={[9, 1]}
-          style={label.anchor === 'left'
-            ? { pointerEvents: 'none', transform: 'translate(0, -50%)' }
-            : label.anchor === 'right'
-              ? { pointerEvents: 'none', transform: 'translate(-100%, -50%)' }
-              : { pointerEvents: 'none' }}
-        >
-          <span className={`px-1 rounded-sm bg-white/90 dark:bg-slate-900/90 text-[10px] font-mono font-semibold tabular-nums whitespace-nowrap shadow-xs ${label.location ? 'text-cyan-700 dark:text-cyan-400' : 'text-amber-700 dark:text-amber-400'}`}>
-            {label.text}
-          </span>
-        </Html>
-      ))}
+      {drawing.labels.map((label) => {
+        const sprite = labelSprites.get(`${label.location ? 'L' : 'D'}:${label.text}`);
+        if (!sprite) return null;
+        const [cx, cy] = labelAnchorCenter(label.anchor);
+        return (
+          <sprite
+            key={label.key}
+            position={label.at}
+            center={[cx, cy]}
+            scale={[sprite.widthPx * mpp, sprite.heightPx * mpp, 1]}
+            raycast={NOOP_RAYCAST}
+            renderOrder={999}
+          >
+            <spriteMaterial
+              map={sprite.texture}
+              transparent
+              depthTest={false}
+              depthWrite={false}
+              toneMapped={false}
+            />
+          </sprite>
+        );
+      })}
     </group>
   );
 }

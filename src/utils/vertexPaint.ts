@@ -203,24 +203,74 @@ export function paintMeshResolution(positions: ArrayLike<number>): number[] {
   return [Math.max(100, Math.round(edge * 1e6))];
 }
 
-/**
- * Deterministically subdivides triangles of `(positions, faces)` whose edges
- * exceed `res[0]` micrometres, up to `MAX_MESH_PAINT_VERTICES`.
- *
- * When `res` is empty (legacy saved paint layers) or all edges are already
- * short enough (dense sculpt meshes), the original arrays are returned without
- * splitting so existing vertex indices stay unchanged.
- */
-export function subdivideMeshForPaint(
+/** One pass of `subdivideMeshForPaint`, recorded for adaptive coarsening on export. */
+export interface MeshPaintSubdivPass {
+  inFaces: Uint32Array;
+  /** Prefix sum (length `inFaces.length / 3 + 1`): children of triangle `t` sit at `childStart[t]..childStart[t+1]-1`. */
+  childStart: Uint32Array;
+  midpoints: Map<number, number>;
+}
+
+/** Result of `subdivideMeshForPaintWithTree`, including the pass hierarchy. */
+export interface MeshPaintSubdivision {
+  positions: Float32Array;
+  faces: Uint32Array;
+  canon: Int32Array;
+  passes: MeshPaintSubdivPass[];
+}
+
+function splitTriangleByMidpoints(
+  a: number,
+  b: number,
+  c: number,
+  m0: number | undefined,
+  m1: number | undefined,
+  m2: number | undefined,
+  dist2: (u: number, v: number) => number,
+  out: number[],
+): void {
+  const count = (m0 !== undefined ? 1 : 0) + (m1 !== undefined ? 1 : 0) + (m2 !== undefined ? 1 : 0);
+  if (count === 0) {
+    out.push(a, b, c);
+  } else if (count === 3) {
+    out.push(
+      a, m0!, m2!,
+      m0!, b, m1!,
+      m2!, m1!, c,
+      m0!, m1!, m2!,
+    );
+  } else if (count === 1) {
+    // Rotate (a, b, c) so the single split edge is (u, v) with midpoint m.
+    let u = a, v = b, w = c, m = m0!;
+    if (m1 !== undefined) { u = b; v = c; w = a; m = m1; }
+    else if (m2 !== undefined) { u = c; v = a; w = b; m = m2; }
+    out.push(u, m, w, m, v, w);
+  } else {
+    // Two split edges: rotate so the UNSPLIT edge is (w, u), and the split
+    // edges are (u, v) at mUV and (v, w) at mVW.
+    let u = a, v = b, w = c, mUV = m0!, mVW = m1!;
+    if (m0 === undefined) { u = b; v = c; w = a; mUV = m1!; mVW = m2!; }
+    else if (m1 === undefined) { u = c; v = a; w = b; mUV = m2!; mVW = m0!; }
+    out.push(mUV, v, mVW);
+    if (dist2(mUV, w) <= dist2(u, mVW)) {
+      out.push(u, mUV, w, mUV, mVW, w);
+    } else {
+      out.push(u, mUV, mVW, u, mVW, w);
+    }
+  }
+}
+
+function runMeshPaintSubdivision(
   positions: ArrayLike<number>,
   faces: ArrayLike<number>,
   res: number[],
-): { positions: Float32Array; faces: Uint32Array } {
+  recordTree: boolean,
+): MeshPaintSubdivision {
   const toF32 = () => (positions instanceof Float32Array ? positions : new Float32Array(positions));
   const toU32 = () => (faces instanceof Uint32Array ? faces : new Uint32Array(faces));
   const initVerts = Math.floor((positions?.length ?? 0) / 3);
   if (!res?.length || res[0] <= 0 || initVerts < 3 || !faces || faces.length < 3 || initVerts >= MAX_MESH_PAINT_VERTICES) {
-    return { positions: toF32(), faces: toU32() };
+    return { positions: toF32(), faces: toU32(), canon: new Int32Array(0), passes: [] };
   }
 
   const maxEdge = res[0] / 1e6;
@@ -239,7 +289,7 @@ export function subdivideMeshForPaint(
     }
   }
   if (!needsSplit) {
-    return { positions: toF32(), faces: toU32() };
+    return { positions: toF32(), faces: toU32(), canon: new Int32Array(0), passes: [] };
   }
 
   const posBuf = new Float32Array(MAX_MESH_PAINT_VERTICES * 3);
@@ -275,6 +325,7 @@ export function subdivideMeshForPaint(
   };
 
   let curFaces = Uint32Array.from(faces);
+  const passes: MeshPaintSubdivPass[] = [];
 
   for (let pass = 0; pass < MAX_MESH_SUBDIV_PASSES && vCount < MAX_MESH_PAINT_VERTICES; pass++) {
     const midpoints = new Map<number, number>();
@@ -300,42 +351,20 @@ export function subdivideMeshForPaint(
 
     if (midpoints.size === 0) break;
 
+    const inTriCount = Math.floor(curFaces.length / 3);
+    const childStart = recordTree ? new Uint32Array(inTriCount + 1) : null;
     const nextFaces: number[] = [];
-    for (let t = 0; t + 2 < curFaces.length; t += 3) {
-      const a = curFaces[t], b = curFaces[t + 1], c = curFaces[t + 2];
+    for (let t = 0; t < inTriCount; t++) {
+      if (childStart) childStart[t] = nextFaces.length / 3;
+      const a = curFaces[t * 3], b = curFaces[t * 3 + 1], c = curFaces[t * 3 + 2];
       const m0 = midpoints.get(edgeKey(a, b));
       const m1 = midpoints.get(edgeKey(b, c));
       const m2 = midpoints.get(edgeKey(c, a));
-      const count = (m0 !== undefined ? 1 : 0) + (m1 !== undefined ? 1 : 0) + (m2 !== undefined ? 1 : 0);
-
-      if (count === 0) {
-        nextFaces.push(a, b, c);
-      } else if (count === 3) {
-        nextFaces.push(
-          a, m0!, m2!,
-          m0!, b, m1!,
-          m2!, m1!, c,
-          m0!, m1!, m2!,
-        );
-      } else if (count === 1) {
-        // Rotate (a, b, c) so the single split edge is (u, v) with midpoint m.
-        let u = a, v = b, w = c, m = m0!;
-        if (m1 !== undefined) { u = b; v = c; w = a; m = m1; }
-        else if (m2 !== undefined) { u = c; v = a; w = b; m = m2; }
-        nextFaces.push(u, m, w, m, v, w);
-      } else {
-        // Two split edges: rotate so the UNSPLIT edge is (w, u), and the split
-        // edges are (u, v) at mUV and (v, w) at mVW.
-        let u = a, v = b, w = c, mUV = m0!, mVW = m1!;
-        if (m0 === undefined) { u = b; v = c; w = a; mUV = m1!; mVW = m2!; }
-        else if (m1 === undefined) { u = c; v = a; w = b; mUV = m2!; mVW = m0!; }
-        nextFaces.push(mUV, v, mVW);
-        if (dist2(mUV, w) <= dist2(u, mVW)) {
-          nextFaces.push(u, mUV, w, mUV, mVW, w);
-        } else {
-          nextFaces.push(u, mUV, mVW, u, mVW, w);
-        }
-      }
+      splitTriangleByMidpoints(a, b, c, m0, m1, m2, dist2, nextFaces);
+    }
+    if (childStart) {
+      childStart[inTriCount] = nextFaces.length / 3;
+      passes.push({ inFaces: curFaces, childStart, midpoints });
     }
     curFaces = new Uint32Array(nextFaces);
   }
@@ -343,7 +372,173 @@ export function subdivideMeshForPaint(
   return {
     positions: posBuf.subarray(0, vCount * 3).slice(),
     faces: curFaces,
+    canon: recordTree ? canon.subarray(0, vCount).slice() : new Int32Array(0),
+    passes,
   };
+}
+
+/**
+ * Deterministically subdivides triangles of `(positions, faces)` whose edges
+ * exceed `res[0]` micrometres, up to `MAX_MESH_PAINT_VERTICES`.
+ *
+ * When `res` is empty (legacy saved paint layers) or all edges are already
+ * short enough (dense sculpt meshes), the original arrays are returned without
+ * splitting so existing vertex indices stay unchanged.
+ */
+export function subdivideMeshForPaint(
+  positions: ArrayLike<number>,
+  faces: ArrayLike<number>,
+  res: number[],
+): { positions: Float32Array; faces: Uint32Array } {
+  const { positions: outPos, faces: outFaces } = runMeshPaintSubdivision(positions, faces, res, false);
+  return { positions: outPos, faces: outFaces };
+}
+
+/**
+ * Same subdivision as `subdivideMeshForPaint`, also returning the pass
+ * hierarchy so export can collapse uniformly coloured regions back to coarse
+ * triangles without introducing T-junctions.
+ */
+export function subdivideMeshForPaintWithTree(
+  positions: ArrayLike<number>,
+  faces: ArrayLike<number>,
+  res: number[],
+): MeshPaintSubdivision {
+  return runMeshPaintSubdivision(positions, faces, res, true);
+}
+
+/**
+ * Adaptively coarsens a subdivided painted mesh for 3MF export: collapses any
+ * subdivision subtree whose vertices all share one colour, while splitting
+ * adjacent uniform triangles conformingly along shared boundary midpoints so
+ * the output stays watertight (zero T-junctions) and preserves exact colour
+ * boundaries.
+ */
+export function coarsenPaintedMesh(
+  sub: MeshPaintSubdivision,
+  colors: Float32Array,
+): Uint32Array {
+  const numPasses = sub.passes.length;
+  if (numPasses === 0) return sub.faces;
+
+  const vCount = Math.floor(sub.positions.length / 3);
+  const vColor = new Int32Array(vCount);
+  for (let v = 0; v < vCount; v++) {
+    const r = Math.min(255, Math.max(0, Math.round(colors[v * 3] * 255)));
+    const g = Math.min(255, Math.max(0, Math.round(colors[v * 3 + 1] * 255)));
+    const b = Math.min(255, Math.max(0, Math.round(colors[v * 3 + 2] * 255)));
+    vColor[v] = (r << 16) | (g << 8) | b;
+  }
+
+  // Bottom-up uniformity pass: -1 means mixed colours inside this triangle's subtree.
+  const levelColor: Int32Array[] = new Array(numPasses + 1);
+  const leafCount = Math.floor(sub.faces.length / 3);
+  const leafColor = new Int32Array(leafCount);
+  for (let t = 0; t < leafCount; t++) {
+    const ca = vColor[sub.faces[t * 3]];
+    const cb = vColor[sub.faces[t * 3 + 1]];
+    const cc = vColor[sub.faces[t * 3 + 2]];
+    leafColor[t] = (ca === cb && cb === cc) ? ca : -1;
+  }
+  levelColor[numPasses] = leafColor;
+
+  for (let p = numPasses - 1; p >= 0; p--) {
+    const pass = sub.passes[p];
+    const parentCount = Math.floor(pass.inFaces.length / 3);
+    const childColors = levelColor[p + 1];
+    const pColor = new Int32Array(parentCount);
+    for (let t = 0; t < parentCount; t++) {
+      const start = pass.childStart[t];
+      const end = pass.childStart[t + 1];
+      const first = childColors[start];
+      if (first === -1) { pColor[t] = -1; continue; }
+      let same = true;
+      for (let c = start + 1; c < end; c++) {
+        if (childColors[c] !== first) { same = false; break; }
+      }
+      pColor[t] = same ? first : -1;
+    }
+    levelColor[p] = pColor;
+  }
+
+  const pos = sub.positions;
+  const canon = sub.canon;
+  const dist2 = (u: number, v: number): number => {
+    const u3 = u * 3, v3 = v * 3;
+    const dx = pos[u3] - pos[v3];
+    const dy = pos[u3 + 1] - pos[v3 + 1];
+    const dz = pos[u3 + 2] - pos[v3 + 2];
+    return dx * dx + dy * dy + dz * dz;
+  };
+  const edgeKey = (u: number, v: number): number => {
+    const cu = canon[u], cv = canon[v];
+    return cu < cv ? (cu << 16) | cv : (cv << 16) | cu;
+  };
+
+  // Top-down conforming emission: only mixed triangles initiate splits; uniform
+  // neighbours split conformingly only along edges actually split by a mixed
+  // neighbour, guaranteeing zero T-junctions.
+  const rootFaces = sub.passes[0].inFaces;
+  const rootCount = Math.floor(rootFaces.length / 3);
+  let activeFaces: number[] = Array.from(rootFaces);
+  let activeTreeIdx: number[] = Array.from({ length: rootCount }, (_, i) => i);
+  const outFaces: number[] = [];
+
+  for (let p = 0; p < numPasses && activeTreeIdx.length > 0; p++) {
+    const pass = sub.passes[p];
+    const pColor = levelColor[p];
+    const nextFacesSrc = p + 1 < numPasses ? sub.passes[p + 1].inFaces : sub.faces;
+    const activeMidpoints = new Map<number, number>();
+
+    for (let i = 0; i < activeTreeIdx.length; i++) {
+      const treeIdx = activeTreeIdx[i];
+      if (treeIdx < 0 || pColor[treeIdx] !== -1) continue;
+      const a = activeFaces[i * 3], b = activeFaces[i * 3 + 1], c = activeFaces[i * 3 + 2];
+      const k0 = edgeKey(a, b);
+      const m0 = pass.midpoints.get(k0);
+      if (m0 !== undefined) activeMidpoints.set(k0, m0);
+      const k1 = edgeKey(b, c);
+      const m1 = pass.midpoints.get(k1);
+      if (m1 !== undefined) activeMidpoints.set(k1, m1);
+      const k2 = edgeKey(c, a);
+      const m2 = pass.midpoints.get(k2);
+      if (m2 !== undefined) activeMidpoints.set(k2, m2);
+    }
+
+    if (activeMidpoints.size === 0) break;
+
+    const nextActiveFaces: number[] = [];
+    const nextActiveTreeIdx: number[] = [];
+    for (let i = 0; i < activeTreeIdx.length; i++) {
+      const treeIdx = activeTreeIdx[i];
+      const a = activeFaces[i * 3], b = activeFaces[i * 3 + 1], c = activeFaces[i * 3 + 2];
+      if (treeIdx >= 0 && pColor[treeIdx] === -1) {
+        const start = pass.childStart[treeIdx];
+        const end = pass.childStart[treeIdx + 1];
+        for (let ch = start; ch < end; ch++) {
+          nextActiveFaces.push(nextFacesSrc[ch * 3], nextFacesSrc[ch * 3 + 1], nextFacesSrc[ch * 3 + 2]);
+          nextActiveTreeIdx.push(ch);
+        }
+      } else {
+        const m0 = activeMidpoints.get(edgeKey(a, b));
+        const m1 = activeMidpoints.get(edgeKey(b, c));
+        const m2 = activeMidpoints.get(edgeKey(c, a));
+        if (m0 === undefined && m1 === undefined && m2 === undefined) {
+          outFaces.push(a, b, c);
+        } else {
+          const before = nextActiveFaces.length;
+          splitTriangleByMidpoints(a, b, c, m0, m1, m2, dist2, nextActiveFaces);
+          const added = (nextActiveFaces.length - before) / 3;
+          for (let k = 0; k < added; k++) nextActiveTreeIdx.push(-1);
+        }
+      }
+    }
+    activeFaces = nextActiveFaces;
+    activeTreeIdx = nextActiveTreeIdx;
+  }
+
+  for (let i = 0; i < activeFaces.length; i++) outFaces.push(activeFaces[i]);
+  return new Uint32Array(outFaces);
 }
 
 /** Builds a subdivided Three.js BufferGeometry for painting a mesh geom. */

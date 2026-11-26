@@ -40,10 +40,14 @@ export interface HardwarePartInfo {
 }
 
 export const STEEL = 7850; // kg/m³
+export const BRASS = 8500; // kg/m³
 export const BRIGHT: [number, number, number, number] = [0.74, 0.76, 0.79, 1];
 export const BLACK_OXIDE: [number, number, number, number] = [0.17, 0.17, 0.19, 1];
 export const SHIELD: [number, number, number, number] = [0.36, 0.38, 0.42, 1];
 export const NITRILE: [number, number, number, number] = [0.08, 0.08, 0.09, 1];
+export const BRASS_COLOR: [number, number, number, number] = [0.78, 0.62, 0.24, 1];
+export const ANTIQUE_BRASS: [number, number, number, number] = [0.56, 0.43, 0.20, 1];
+export const DARK_BRONZE: [number, number, number, number] = [0.24, 0.20, 0.16, 1];
 export const RUBBER = 1250; // kg/m³
 export const mm = (v: number) => +(v / 1000).toFixed(7);
 
@@ -180,5 +184,55 @@ export function boxGeom(name: string, half: number[], pos: number[], rgba: numbe
   return {
     name, type: 'box', size: half.map((v) => +v.toFixed(7)), pos: pos.map((v) => +v.toFixed(7)), rgba: [...rgba],
     mass: +(8 * half[0] * half[1] * half[2] * density).toFixed(7), dynamic: true, ...extra,
+  };
+}
+
+/**
+ * A closed, outward-wound frustum (truncated cone) standing on +Z from -h/2
+ * (radius `rBottom`) to +h/2 (radius `rTop`), metres. Used for countersunk
+ * flat screw heads and tapered screw tips.
+ */
+export function frustumMesh(rBottom: number, rTop: number, h: number, segments = 24) {
+  const hh = h / 2;
+  const renderVertices: number[] = [0, 0, -hh, 0, 0, hh];
+  for (let i = 0; i < segments; i++) {
+    const t = (i / segments) * Math.PI * 2;
+    const c = Math.cos(t), s = Math.sin(t);
+    renderVertices.push(rBottom * c, rBottom * s, -hh, rTop * c, rTop * s, hh);
+  }
+  const faces: number[] = [];
+  for (let i = 0; i < segments; i++) {
+    const j = (i + 1) % segments;
+    const bCurr = 2 + i * 2;
+    const tCurr = bCurr + 1;
+    const bNext = 2 + j * 2;
+    const tNext = bNext + 1;
+    faces.push(0, bNext, bCurr); // bottom cap, looking -Z
+    faces.push(1, tCurr, tNext); // top cap, looking +Z
+    faces.push(bCurr, bNext, tNext, bCurr, tNext, tCurr); // side, looking outward
+  }
+  const vertices: number[] = [];
+  for (let i = 0; i < renderVertices.length; i += 3) {
+    vertices.push(renderVertices[i], renderVertices[i + 2], -renderVertices[i + 1]);
+  }
+  return {
+    vertices: vertices.map((v) => +v.toFixed(7)),
+    renderVertices: renderVertices.map((v) => +v.toFixed(7)),
+    faces,
+  };
+}
+
+/** A closed frustum geom centred at `z` along +Z, weighed as `density`. */
+export function frustumGeom(
+  name: string, rBottom: number, rTop: number, h: number, z: number,
+  rgba: number[], density = STEEL, extra: Partial<SceneGeom> = {}, segments = 24,
+): SceneGeom {
+  const shape = frustumMesh(rBottom, rTop, h, segments);
+  for (let i = 2; i < shape.renderVertices.length; i += 3) shape.renderVertices[i] = +(shape.renderVertices[i] + z).toFixed(7);
+  for (let i = 1; i < shape.vertices.length; i += 3) shape.vertices[i] = +(shape.vertices[i] + z).toFixed(7);
+  const volume = (Math.PI * h / 3) * (rBottom * rBottom + rBottom * rTop + rTop * rTop);
+  return {
+    name, type: 'mesh', size: [1], rgba: [...rgba], dynamic: true,
+    mass: +(Math.max(volume * density, 1e-7)).toFixed(7), condim: 3, ...shape, ...extra,
   };
 }

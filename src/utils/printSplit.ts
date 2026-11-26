@@ -196,6 +196,8 @@ const PIN_SEGMENTS = 48;
 const FACE_EPS = 0.01;
 /** A half under this share of its piece is a sliver, not a section. */
 const SLIVER_SHARE = 0.02;
+/** Minimum section thickness along the cut normal, mm, to avoid fragile unprintable slivers. */
+const MIN_SECTION_THICKNESS_MM = 15;
 /** A shared patch smaller than this is two corners touching, not a joint. */
 const MIN_JOINT_AREA_MM2 = 1;
 /** How deep a hole goes past half a dowel, so the dowel bottoms in it before the faces meet. */
@@ -764,7 +766,10 @@ function waistPlanes(piece: Piece, normals: Vec3[]): { n: Vec3; offset: number }
       // out of a block, as long as it is more than a pointed tip.
       const atEnd = i === 0 || end === WAIST_SAMPLES - 1;
       if (!atEnd || end - i >= MOST_TIP_SAMPLES) {
-        for (const k of [(i + end) / 2, i, end]) found.push({ n, offset: at(k), area: areas[Math.round(k)], end: atEnd });
+        const ks = [(i + end) / 2];
+        if (i > 0) ks.push(i);
+        if (end < WAIST_SAMPLES - 1) ks.push(end);
+        for (const k of ks) found.push({ n, offset: at(k), area: areas[Math.round(k)], end: atEnd });
       }
       i = end + 1;
     }
@@ -811,12 +816,25 @@ function cutNormals(piece: Piece): Vec3[] {
   return normals;
 }
 
+const isAxisAligned = (n: Vec3) => Math.max(Math.abs(n[0]), Math.abs(n[1]), Math.abs(n[2])) > 0.999;
+
 /**
  * One candidate cut, or null if it leaves nothing, or a sliver unless
  * `slender` says thin is expected: a rod parted at a waist is a sliver by
  * volume and 200 mm long.
  */
 function tryCut(piece: Piece, n: Vec3, offset: number, ctx: Ctx, slender = false): CutChoice | null {
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < piece.geo.hull.length; i += 3) {
+    const s = n[0] * piece.geo.hull[i] + n[1] * piece.geo.hull[i + 1] + n[2] * piece.geo.hull[i + 2];
+    if (s < lo) lo = s;
+    if (s > hi) hi = s;
+  }
+  const extent = hi - lo;
+  const minThickness = Math.min(MIN_SECTION_THICKNESS_MM, extent * 0.25, Math.min(ctx.W, ctx.D, ctx.H) * 0.25);
+  if (offset - lo < minThickness || hi - offset < minThickness) {
+    return null;
+  }
   const [posM, negM] = piece.m.splitByPlane(n, offset);
   let transferred = false;
   try {
@@ -837,7 +855,9 @@ function tryCut(piece: Piece, n: Vec3, offset: number, ctx: Ctx, slender = false
     const neg = makePiece(negM, [...piece.cutDowns, n], ctx);
     const sections = predictedSections(pos, ctx) + predictedSections(neg, ctx);
     const support = pos.pose.supportMm2 + neg.pose.supportMm2;
-    const score = sections * 1e9 + (face.thin ? 1e12 : 0) + face.noRoom * 1e7 + support + 0.25 * face.area;
+    const skewPenalty = isAxisAligned(n) ? 0 : 5e8;
+    const noRoomPenalty = Math.min(face.noRoom, 40) * 1e7;
+    const score = sections * 1e9 + (face.thin ? 1e12 : 0) + skewPenalty + noRoomPenalty + support + 0.25 * face.area;
     transferred = true;
     return { n, offset, pos, neg, score, thin: face.thin };
   } finally {

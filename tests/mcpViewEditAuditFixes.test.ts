@@ -624,6 +624,92 @@ describe('View & Section command audit fixes', () => {
     }
   });
 
+  it('SCREENSHOT(clean: true) suppresses composer OutlineEffect selection during render, restores it, and skips rAF', async () => {
+    const { physicsGlobals } = await import('../src/physicsGlobals');
+    const selectedMeshA = { id: 'meshA' };
+    const selectedMeshB = { id: 'meshB' };
+    const selectionSet = new Set<unknown>([selectedMeshA, selectedMeshB]);
+    const outlineSelection = {
+      [Symbol.iterator]: () => selectionSet[Symbol.iterator](),
+      clear: () => selectionSet.clear(),
+      set: (items: unknown[]) => {
+        selectionSet.clear();
+        for (const item of items) selectionSet.add(item);
+      },
+      get size() { return selectionSet.size; },
+    };
+    const outlineEffect = { selection: outlineSelection, forceUpdate: false };
+    let seenSelectionDuringRender = -1;
+    let seenForceUpdateDuringRender = false;
+    const fakeComposer = {
+      passes: [{ effects: [outlineEffect] }],
+      render: () => {
+        seenSelectionDuringRender = outlineSelection.size;
+        seenForceUpdateDuringRender = outlineEffect.forceUpdate;
+      },
+    };
+    const fakeCanvas = {
+      width: 640,
+      height: 480,
+      toDataURL: () => 'data:image/png;base64,CLEAN',
+    };
+    const fakeGl = { domElement: fakeCanvas, render: () => {} };
+
+    const origWindow = globalThis.window;
+    const origRAF = globalThis.requestAnimationFrame;
+    const origPgGl = physicsGlobals._physics_gl;
+    const origPgComposer = physicsGlobals._physics_composer;
+    const rafSpy = vi.fn(() => 1);
+    (globalThis as Record<string, unknown>).requestAnimationFrame = rafSpy;
+    (globalThis as Record<string, unknown>).window = {
+      _physics_gl: fakeGl,
+      _physics_composer: fakeComposer,
+    };
+    physicsGlobals._physics_gl = fakeGl as never;
+    physicsGlobals._physics_composer = fakeComposer as never;
+
+    try {
+      const res = await viewCommands.SCREENSHOT({ clean: true }, makeCtx()) as {
+        ok: boolean;
+        dataUrl: string;
+        view: Record<string, boolean>;
+      };
+
+      expect(res.ok).toBe(true);
+      expect(res.dataUrl).toBe('data:image/png;base64,CLEAN');
+      expect(res.view.clean).toBe(true);
+      // Outline selection cleared and forceUpdate set while the clean frame rendered
+      expect(seenSelectionDuringRender).toBe(0);
+      expect(seenForceUpdateDuringRender).toBe(true);
+      // Outline selection and clean flag restored after capture
+      expect(Array.from(selectionSet)).toEqual([selectedMeshA, selectedMeshB]);
+      expect(outlineEffect.forceUpdate).toBe(true);
+      expect(useCapture.getState().clean).toBe(false);
+      // Must not wait on requestAnimationFrame (avoids extra SwiftShader renders)
+      expect(rafSpy).not.toHaveBeenCalled();
+
+      // Also restores outline selection if toDataURL throws
+      fakeCanvas.toDataURL = () => { throw new Error('canvas read failed'); };
+      await expect(viewCommands.SCREENSHOT({ clean: true }, makeCtx())).rejects.toThrow(/canvas read failed/);
+      expect(Array.from(selectionSet)).toEqual([selectedMeshA, selectedMeshB]);
+      expect(useCapture.getState().clean).toBe(false);
+    } finally {
+      (globalThis as Record<string, unknown>).window = origWindow;
+      (globalThis as Record<string, unknown>).requestAnimationFrame = origRAF;
+      physicsGlobals._physics_gl = origPgGl;
+      physicsGlobals._physics_composer = origPgComposer;
+    }
+  });
+
+  it('SceneCanvas keeps SelectionOutline mounted during clean capture so EffectComposer never recompiles shaders', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const src = fs.readFileSync(path.resolve(__dirname, '../src/components/scene/SceneCanvas.tsx'), 'utf8');
+    expect(src).toContain('<SelectionOutline />');
+    expect(src).not.toMatch(/!cleanCapture\s*&&\s*<SelectionOutline/);
+    expect(src).toContain('function EditorOverlays()');
+  });
+
   it('GET_OBJECT validates offset and limit', async () => {
     const node = makeSculptNode();
     useStore.setState({ sceneGraph: { name: 'test', nodes: [node] } });

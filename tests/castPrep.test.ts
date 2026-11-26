@@ -1,6 +1,14 @@
 import { describe, it, expect } from 'vitest';
+import fs from 'fs';
 import * as THREE from 'three';
+import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
+import createOpenSCAD from '@lofcz/openscad-wasm';
 import { findFeatureEdges } from '../src/utils/featureEdges';
+import { relaxFacetedCurveSetbacks } from '../src/utils/edgeRoundBase';
+import { csgProgram } from '../src/utils/csg';
+import { indexScadTriangles } from '../src/utils/scadMesh';
+import { analyzeMesh, weldByPosition } from '../src/utils/meshIntegrity';
+import { meshWatertightIssue, stripAddedCircleEdges } from '../src/utils/castPrepRunner';
 import {
   bakeDraftInto,
   draftBodyGeoms,
@@ -13,7 +21,7 @@ import {
   snapshotShape,
   unprepScene,
 } from '../src/utils/castPrep';
-import type { CastPrep, SceneGraph, SceneNode } from '../src/types/scene';
+import type { CastPrep, EdgeRoundFeature, SceneGraph, SceneNode } from '../src/types/scene';
 
 /** A three geometry as the flat positions + faces the edge finder takes. */
 function soup(geometry: THREE.BufferGeometry): { positions: number[]; faces: number[] } {
@@ -158,6 +166,36 @@ describe('baking draft into a scene', () => {
     expect(geoms[0].mass).toBe(0.7);
   });
 
+  it('preserves custom density and physical material properties when baking a CSG mesh', () => {
+    const tris = cubeTris();
+    const verts = tris.map((v, i) => (i % 3 === 2 ? v - 0.01 : v));
+    const node = {
+      id: 'bronze_csg', name: 'bronze_csg', type: 'body', pos: [0, 0, 0.01], children: [], csgEnabled: true,
+      geoms: [
+        {
+          name: 'src', type: 'box', size: [0.01, 0.01, 0.01],
+          density: 8800, friction: [0.4, 0.01, 0.001], contype: 2, conaffinity: 3, margin: 0.001, gap: 0.0005,
+        },
+        { name: 'hole', type: 'cylinder', size: [0.003, 0.012], csg: 'difference', density: 1000 },
+        {
+          name: 'bronze_csg_csg', type: 'mesh', size: [1], role: 'visual', mass: 0, csgDerived: 'visual',
+          renderVertices: verts, vertices: [], faces: verts.map((_, i) => i).filter((i) => i < verts.length / 3),
+        },
+        { name: 'bronze_csg_col0', type: 'box', size: [0.01, 0.01, 0.01], role: 'collision', csgDerived: 'collider' },
+      ],
+    } as unknown as SceneNode;
+    const [world] = eachBody({ nodes: [node] }).map((b) => b.world);
+    const geoms = draftBodyGeoms(node, world, params)!;
+    expect(geoms).toHaveLength(1);
+    expect(geoms[0].mass).toBeUndefined();
+    expect(geoms[0].density).toBe(8800);
+    expect(geoms[0].friction).toEqual([0.4, 0.01, 0.001]);
+    expect(geoms[0].contype).toBe(2);
+    expect(geoms[0].conaffinity).toBe(3);
+    expect(geoms[0].margin).toBe(0.001);
+    expect(geoms[0].gap).toBe(0.0005);
+  });
+
   it('respects a child body\'s world transform', () => {
     const child = cubeNode('child', 0);
     child.pos = [0, 0, 0.03];
@@ -299,5 +337,158 @@ describe('planEdgeRounds', () => {
     const plan = planEdgeRounds(edges, 0.01, 1, [], (e) => e.edge.convex && edgeOnPlane(e, world, 0));
     // The L's base outline is six edges.
     expect(plan.broken).toBe(12);
+  });
+
+  it('keeps clearance on narrow counterbore shelves so opposing roundings never leave a 0.01 mm sliver', () => {
+    // Two concentric counterbore floor rims separated by 1.61 mm (maxSetback = 0.805 mm each).
+    const outer = {
+      id: 0, closed: true, surfaces: [0, 1] as [number, number], angleDeg: 90, maxSetback: 0.000805,
+      top: false, bottom: false, vertical: false, points: [[0.00436, 0, 0] as [number, number, number]],
+      edge: {
+        kind: 'circle' as const, centre: [0, 0, 0], axis: [0, 0, 1], radius: 0.00436, ref: [1, 0, 0], segments: 32,
+        n1: [0, 0, 1], n2: [-1, 0, 0], t1: [-1, 0, 0], t2: [0, 0, 1], convex: false,
+      },
+    };
+    const inner = {
+      id: 1, closed: true, surfaces: [0, 2] as [number, number], angleDeg: 90, maxSetback: 0.000805,
+      top: false, bottom: false, vertical: false, points: [[0.00275, 0, 0] as [number, number, number]],
+      edge: {
+        kind: 'circle' as const, centre: [0, 0, 0], axis: [0, 0, 1], radius: 0.00275, ref: [1, 0, 0], segments: 32,
+        n1: [0, 0, 1], n2: [-1, 0, 0], t1: [1, 0, 0], t2: [0, 0, -1], convex: true,
+      },
+    };
+    const plan = planEdgeRounds([outer, inner], 0.01, 1);
+    const totalSetback = plan.features.reduce((sum, f) => sum + f.size * f.edges.length, 0);
+    // Remaining flat shelf must be well above the 0.01 mm STL weld grid (>= 0.2 mm).
+    expect(0.00161 - totalSetback).toBeGreaterThanOrEqual(0.0002 - 1e-9);
+  });
+});
+
+describe('cast prep watertightness with M5 counterbore holes', () => {
+  let modPromise: Promise<WebAssembly.Module> | null = null;
+  async function compileScadNode(scad: string) {
+    if (!modPromise) {
+      const wasm = fs.readFileSync('node_modules/@lofcz/openscad-wasm/openscad.wasm');
+      modPromise = WebAssembly.compile(wasm);
+    }
+    const mod = await modPromise;
+    const inst = await createOpenSCAD({
+      noInitialRun: true,
+      print: () => {},
+      printErr: () => {},
+      instantiateWasm: (imports: WebAssembly.Imports, done: (i: WebAssembly.Instance, m: WebAssembly.Module) => void) => {
+        WebAssembly.instantiate(mod, imports).then((i) => done(i, mod));
+        return {};
+      },
+    });
+    inst.FS.writeFile('/in.scad', scad);
+    inst.callMain(['/in.scad', '-o', '/out.stl', '--backend', 'Manifold', '--export-format', 'binstl']);
+    const stl = inst.FS.readFile('/out.stl');
+    const buf = stl.buffer.slice(stl.byteOffset, stl.byteOffset + stl.byteLength);
+    const geom = new STLLoader().parse(buf);
+    return indexScadTriangles(geom.attributes.position.array as Float32Array);
+  }
+
+  it('preserves watertightness (0 non-manifold edges) through edges=true + 3 deg sand draft on CSG parts with M5 counterbores', async () => {
+    const parts: SceneNode[] = [
+      // Flange plate with 4 tight M5 counterbores + central boss
+      {
+        id: 'flange', name: 'flange', type: 'body', pos: [0, 0, 0.005], csgEnabled: true, children: [],
+        geoms: [
+          { name: 'plate', type: 'box', size: [0.03, 0.03, 0.005], pos: [0, 0, 0] },
+          { name: 'boss', type: 'cylinder', size: [0.012, 0.008], pos: [0, 0, 0.005], csg: 'union' },
+          { name: 'bore', type: 'cylinder', size: [0.006, 0.02], pos: [0, 0, 0.005], csg: 'difference' },
+          ...([-1, 1].flatMap((sx) => [-1, 1].map((sy) => [sx * 0.021, sy * 0.021]))).flatMap(([x, y], i) => [
+            { name: `h${i}`, type: 'cylinder', size: [0.00275, 0.012], pos: [x, y, 0], csg: 'difference' },
+            { name: `cb${i}`, type: 'cylinder', size: [0.00438, 0.0055], pos: [x, y, 0.005], csg: 'difference' },
+          ]),
+        ],
+      } as unknown as SceneNode,
+      // Gusseted L-bracket with M5 counterbore mounting holes
+      {
+        id: 'gusset_bracket', name: 'gusset_bracket', type: 'body', pos: [0, 0, 0.005], csgEnabled: true, children: [],
+        geoms: [
+          { name: 'base', type: 'box', size: [0.03, 0.02, 0.005], pos: [0, 0, 0] },
+          { name: 'wall', type: 'box', size: [0.03, 0.005, 0.02], pos: [0, -0.015, 0.015] },
+          { name: 'gusset', type: 'box', size: [0.004, 0.015, 0.015], pos: [0, -0.005, 0.015] },
+          { name: 'h1', type: 'cylinder', size: [0.00275, 0.012], pos: [-0.018, 0.005, 0], csg: 'difference' },
+          { name: 'cb1', type: 'cylinder', size: [0.00475, 0.0055], pos: [-0.018, 0.005, 0.005], csg: 'difference' },
+          { name: 'h2', type: 'cylinder', size: [0.00275, 0.012], pos: [0.018, 0.005, 0], csg: 'difference' },
+          { name: 'cb2', type: 'cylinder', size: [0.00475, 0.0055], pos: [0.018, 0.005, 0.005], csg: 'difference' },
+        ],
+      } as unknown as SceneNode,
+    ];
+
+    for (const node of parts) {
+      const baseMesh = await compileScadNode(csgProgram(node, { rounds: false, always: true })!);
+      const baseW = weldByPosition(baseMesh.renderVertices, baseMesh.faces);
+      expect(analyzeMesh(baseW.positions, baseW.faces)?.closed).toBe(true);
+
+      const found = findFeatureEdges(baseMesh.renderVertices, baseMesh.faces, { up: [0, 0, 1] });
+      relaxFacetedCurveSetbacks(found, baseMesh.renderVertices, baseMesh.faces);
+      const world = new THREE.Matrix4().makeTranslation(node.pos![0], node.pos![1], node.pos![2]);
+      const plan = planEdgeRounds(found.edges, 0.01, 1, [], (e) => e.edge.convex && edgeOnPlane(e, world, 0));
+      expect(plan.broken).toBeGreaterThan(0);
+
+      const roundedMesh = await compileScadNode(csgProgram({ ...node, edgeRounds: plan.features })!);
+      const roundedW = weldByPosition(roundedMesh.renderVertices, roundedMesh.faces);
+      const roundedIntegrity = analyzeMesh(roundedW.positions, roundedW.faces)!;
+      expect(roundedIntegrity.closed).toBe(true);
+      expect(roundedIntegrity.nonManifoldEdges).toBe(0);
+      expect(roundedIntegrity.boundaryEdges).toBe(0);
+
+      // Apply 3 deg sand draft on top of the rounded mesh.
+      const tris: number[] = [];
+      const rv = roundedMesh.renderVertices;
+      for (let i = 0; i < roundedMesh.faces.length; i++) {
+        const vi = roundedMesh.faces[i] * 3;
+        tris.push(rv[vi] + node.pos![0], rv[vi + 1] + node.pos![1], rv[vi + 2] + node.pos![2]);
+      }
+      const drafted = draftTriangles(tris, { deg: 3, mode: 'add', partingZ: 0 });
+      const draftedW = weldByPosition(drafted.positions, drafted.faces);
+      const draftedIntegrity = analyzeMesh(draftedW.positions, draftedW.faces)!;
+      expect(draftedIntegrity.closed).toBe(true);
+      expect(draftedIntegrity.nonManifoldEdges).toBe(0);
+      expect(draftedIntegrity.boundaryEdges).toBe(0);
+    }
+  }, 30000);
+
+  it('meshWatertightIssue detects open/non-manifold CSG meshes and stripAddedCircleEdges drops only newly added rims', () => {
+    // Open tetrahedron (missing one face -> 3 boundary edges)
+    const openNode = {
+      id: 'open', name: 'open', type: 'body', pos: [0, 0, 0], csgEnabled: true, children: [],
+      geoms: [{
+        name: 'open_csg', type: 'mesh', csgDerived: 'visual', role: 'visual', size: [1],
+        renderVertices: [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1],
+        faces: [0, 2, 1, 0, 1, 3, 1, 2, 3],
+      }],
+    } as unknown as SceneNode;
+    expect(meshWatertightIssue(openNode)).toContain('boundary edges');
+
+    // Closed tetrahedron
+    const closedNode = {
+      ...openNode,
+      geoms: [{ ...openNode.geoms[0], faces: [0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3] }],
+    } as unknown as SceneNode;
+    expect(meshWatertightIssue(closedNode)).toBeNull();
+
+    // stripAddedCircleEdges preserves pre-existing circle features and drops newly-added circles only.
+    const existingCircle: EdgeRoundFeature = {
+      mode: 'chamfer', size: 0.001,
+      edges: [{ kind: 'circle', centre: [0, 0, 0], axis: [0, 0, 1], radius: 0.005, ref: [1, 0, 0], segments: 32, n1: [0, 0, 1], n2: [-1, 0, 0], t1: [1, 0, 0], t2: [0, 0, -1], convex: true }],
+    };
+    const addedMixed: EdgeRoundFeature = {
+      mode: 'chamfer', size: 0.001,
+      edges: [
+        { kind: 'line', a: [0, 0, 0], b: [0.01, 0, 0], n1: [0, 0, 1], n2: [0, -1, 0], t1: [0, 1, 0], t2: [0, 0, -1], convex: true },
+        { kind: 'circle', centre: [0.01, 0, 0], axis: [0, 0, 1], radius: 0.003, ref: [1, 0, 0], segments: 32, n1: [0, 0, 1], n2: [-1, 0, 0], t1: [1, 0, 0], t2: [0, 0, -1], convex: true },
+      ],
+    };
+    const res = stripAddedCircleEdges([existingCircle, addedMixed], 1);
+    expect(res.dropped).toBe(1);
+    expect(res.features).toHaveLength(2);
+    expect(res.features[0]).toBe(existingCircle);
+    expect(res.features[1].edges).toHaveLength(1);
+    expect(res.features[1].edges[0].kind).toBe('line');
   });
 });
