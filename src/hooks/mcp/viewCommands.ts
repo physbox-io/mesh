@@ -234,8 +234,8 @@ async function takeScreenshot(msg: Record<string, unknown>, waitedInQueue = fals
   let restoreRenderer: (() => void) | null = null;
   let restoreScale: (() => void) | null = null;
   let dataUrl: string;
-  let capturedWidth = gl.domElement.width;
-  let capturedHeight = gl.domElement.height;
+  let capturedWidth: number;
+  let capturedHeight: number;
   try {
     if (overridden || clean) {
       restoreRenderer = pauseRendererDuringFlush(win?._physics_composer, gl);
