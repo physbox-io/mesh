@@ -106,6 +106,12 @@ export interface FinishingPathInput {
    * waterline pass.
    */
   steepAngleDeg?: number;
+  /**
+   * Optional predicate for hybrid + flat bit: returns true at `(x, y)` on
+   * `floorZ` where roughing already cleared the waste moat floor, so hybrid
+   * omits redundant floor raster passes there before splitting runs.
+   */
+  skipFloorAt?: (x: number, y: number) => boolean;
 }
 
 const DEFAULT_STEEP_ANGLE_DEG = 35;
@@ -468,17 +474,31 @@ export function contourPasses(input: FinishingPathInput): Point2D[][] {
    * proud over the bottom 2.7 mm. A floor counts once it is as big as the
    * bit's own end.
    */
+  const floorSet = new Set<number>();
   if (input.flatWallMm && input.flatWallMm > step) {
     const cellArea = Math.max(1e-9, (surface.stepX || 1) * (surface.stepY || 1));
     const enough = Math.max(4, (Math.PI * (input.flatWallMm / 4) ** 2) / cellArea);
     const counts = new Map<number, number>();
-    for (const v of surface.z) {
-      if (v < -1e-3 && v > floorZ + 1e-3) {
-        const k = Math.round(v * 1e4);
-        counts.set(k, (counts.get(k) ?? 0) + 1);
+    const { cols, rows, z } = surface;
+    // Only count genuine flat interior cells (4 neighbours at the same height).
+    // Bilinear wall-edge samples from tool dilation repeat the same fractional
+    // Z values along every vertical wall; counting them invented phantom floors
+    // (e.g. -0.101, -0.539, -0.710 mm) and multiplied waterline passes by 5x.
+    for (let r = 1; r < rows - 1; r++) {
+      for (let c = 1; c < cols - 1; c++) {
+        const k = r * cols + c;
+        const v = z[k];
+        if (v >= -1e-3 || v <= floorZ + 1e-3) continue;
+        if (
+          Math.abs(z[k - 1] - v) > 5e-3 || Math.abs(z[k + 1] - v) > 5e-3 ||
+          Math.abs(z[k - cols] - v) > 5e-3 || Math.abs(z[k + cols] - v) > 5e-3
+        ) continue;
+        const key = Math.round(v * 1e4);
+        counts.set(key, (counts.get(key) ?? 0) + 1);
       }
     }
     const floors = [...counts].filter(([, n]) => n >= enough).map(([k]) => k / 1e4 + 1e-4);
+    for (const fl of floors) floorSet.add(fl);
     if (floors.length > 0) {
       const all = [...levels.filter((l) => !floors.some((f) => Math.abs(l - f) < 1e-3)), ...floors];
       levels.length = 0;
@@ -487,19 +507,32 @@ export function contourPasses(input: FinishingPathInput): Point2D[][] {
   }
   let keep = levels.map(() => true);
   if (input.flatWallMm && input.flatWallMm > step) {
-    const z = surface.z;
+    const { cols, rows, z } = surface;
+    // Ignore bilinear transition cells sitting on a vertical wall; only real
+    // non-vertical surfaces (sloped faces or flats) between `hi` and `lo`
+    // require an intermediate waterline level.
     const between = (hi: number, lo: number) => {
-      for (let i = 0; i < z.length; i++) if (z[i] < hi - 1e-6 && z[i] > lo + 1e-6) return true;
+      for (let r = 1; r < rows - 1; r++) {
+        for (let c = 1; c < cols - 1; c++) {
+          const i = r * cols + c;
+          const v = z[i];
+          if (v >= hi - 1e-6 || v <= lo + 1e-6) continue;
+          const nbMin = Math.min(z[i - 1], z[i + 1], z[i - cols], z[i + cols]);
+          const nbMax = Math.max(z[i - 1], z[i + 1], z[i - cols], z[i + cols]);
+          if (nbMax - nbMin > wallRise) continue;
+          return true;
+        }
+      }
       return false;
     };
     keep = levels.map(() => false);
     let lastKept = Infinity;
     for (let i = levels.length - 1; i >= 0; i--) {
-      // Bottom up: a level is kept at the floor, where any of the surface lies
-      // between it and the next level down (the two trace different walls),
+      // Bottom up: a level is kept at the floor, at any real flat floor, where
+      // any non-vertical surface lies between it and the next level down,
       // or where the wall since the last one kept would be too tall for one.
       const below = i + 1 < levels.length ? levels[i + 1] : -Infinity;
-      if (i === levels.length - 1 || between(levels[i], below) || levels[i] - lastKept > input.flatWallMm - 1e-6) {
+      if (i === levels.length - 1 || floorSet.has(levels[i]) || between(levels[i], below) || levels[i] - lastKept > input.flatWallMm - 1e-6) {
         keep[i] = true;
         lastKept = levels[i];
       }
@@ -668,8 +701,9 @@ function hybridPassGroups(input: FinishingPathInput): Point2D[][][] {
     { dx: 0, dy: -stepY },
   ];
   const isShallowOrWallFoot = (p: Point2D) => {
-    if (!isSteep(p)) return true;
     const zp = surfaceZAt(p.x, p.y);
+    if (input.skipFloorAt && zp <= input.floorZ + 0.05 && input.skipFloorAt(p.x, p.y)) return false;
+    if (!isSteep(p)) return true;
     return footOffsets.some((o) => {
       const q = { x: p.x + o.dx, y: p.y + o.dy };
       return !isSteep(q) && Math.abs(zp - surfaceZAt(q.x, q.y)) <= 1e-3;

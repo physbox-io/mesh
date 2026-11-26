@@ -216,7 +216,15 @@ export function finishSurface(
     // A flat bit's side finishes a straight wall in one pass, two diameters at
     // a time and no more than its flutes are long.
     ...(opts.finishingToolType === 'flat'
-      ? { flatWallMm: Math.min(2 * opts.finishingToolDiaMm, opts.finishingFluteLengthMm > 0 ? opts.finishingFluteLengthMm : Infinity) }
+      ? {
+          flatWallMm: Math.min(2 * opts.finishingToolDiaMm, opts.finishingFluteLengthMm > 0 ? opts.finishingFluteLengthMm : Infinity),
+          ...(opts.roughingEnabled && job.scrap !== undefined
+            ? {
+                skipFloorAt: (x: number, y: number) =>
+                  materialLevelAt(x, y) <= floorZ + Math.max(0.5, opts.roughingAllowanceMm) + 0.5,
+              }
+            : {}),
+        }
       : {}),
   });
 

@@ -116,7 +116,7 @@ describe('machining realism fixes', () => {
     expect(warned).not.toMatch(/board round it is left uncut/);
   }, 60_000);
 
-  it('uses matching 0.5xD hardwood stepdown for roughing and unroughed layered finishing', () => {
+  it('uses matching 0.4xD hardwood stepdown for roughing and unroughed layered finishing', () => {
     const feeds = deriveReliefFeeds({
       material: 'hardwood',
       roughingToolDiaMm: 1.5875,
@@ -126,7 +126,7 @@ describe('machining realism fixes', () => {
       finishingToolType: 'flat',
       carveDepthMm: 6,
     });
-    expect(feeds.roughingStepdownMm).toBeCloseTo(0.79, 2);
+    expect(feeds.roughingStepdownMm).toBeCloseTo(0.64, 2);
 
     const finishOnly = generateSolidMachining(
       smallHolder,
@@ -142,7 +142,7 @@ describe('machining realism fixes', () => {
       })
     );
     expect(finishOnly.success, finishOnly.error).toBe(true);
-    // Uses ~0.79 mm layered stepdown (not aggressive 1.59 mm = 1xD).
-    expect(finishOnly.warnings.join(' ')).toMatch(/at most 0\.79 mm each/);
+    // Uses ~0.64 mm layered stepdown (not aggressive 1.59 mm = 1xD).
+    expect(finishOnly.warnings.join(' ')).toMatch(/at most 0\.64 mm each/);
   }, 60_000);
 });

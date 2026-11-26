@@ -86,8 +86,7 @@ export function chiploadMm(feedMmMin: number, rpm: number, flutes: number): numb
 /** Axial stepdown as a fraction of cutter diameter for full-width clearing in `material`. */
 export function stepdownFractionFor(material: MaterialId): number {
   if (material === 'aluminium') return 0.1;
-  if (material === 'foam' || material === 'softwood') return 0.6;
-  return 0.5;
+  return 0.4;
 }
 
 /** Two decimals, so a derived setting lands in the UI as a number and not a float artefact. */
@@ -343,8 +342,8 @@ export function deriveReliefFeeds(
     finishingPlungeRate: finish.plungeMmMin,
     // A ball nose leaves a scallop of about 3% of its radius at 25% spacing,
     // which sands out; a V-bit's ridge is set by its angle instead. A flat mill
-    // leaves no scallop on a flat face, so 50% stepover clears pockets and
-    // flat tops cleanly in nearly half the time.
+    // leaves no scallop on a flat face, so 40% stepover clears pockets and
+    // flat tops cleanly while keeping tight corner accuracy.
     finishingStepoverPercent: opts.finishingToolType === 'flat' ? 50 : 25,
     // 0 means "use the material-appropriate clearing stepdown when layered",
     // matching roughing when finishing clears solid stock on its own.
