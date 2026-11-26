@@ -15,12 +15,18 @@ export interface AddedChain {
 /** The key a chain's output is kept under: the same chain for the same part replaces it. */
 const chainSource = (chain: string, partIds: readonly string[], what: string) => `chain:${chain}:${[...partIds].sort().join(',')}:${what}`;
 
+/** Beside-placement transform resting cleanly on z = 0 (not inheriting any sub-floor pour base offset). */
+function besideFloorTransform() {
+  const t = sceneStockTransform();
+  return { ...t, modelMinMm: [t.modelMinMm[0], t.modelMinMm[1], 0] as [number, number, number] };
+}
+
 /** The finished piece beside the model, as the master stands; selected unless told otherwise. */
 async function addPiece(piece: ChainPiece, label: string, lines: string[], select: boolean, source: string) {
   return addSimulationToScene({
     source,
     mesh: piece.mesh,
-    transform: sceneStockTransform(),
+    transform: besideFloorTransform(),
     kind: 'cast',
     label,
     placement: 'beside',
@@ -39,7 +45,7 @@ export async function addSiliconeChain(r: { piece: ChainPiece; warnings: string[
   const mold = await addSimulationToScene({
     source: chainSource('silicone', partIds, 'mold'),
     mesh: r.siliconeMold,
-    transform: sceneStockTransform(),
+    transform: besideFloorTransform(),
     kind: 'mold',
     label: 'Silicone mold',
     placement: 'beside',
