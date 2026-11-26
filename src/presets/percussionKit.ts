@@ -158,10 +158,11 @@ if (tLoop >= 0.90 && tLoop < 1.55) {
         name: 'timpani_head_pad',
         type: 'slide',
         axis: [0, 0, 1],
-        stiffness: 3400,
-        damping: 18,
+        stiffness: 4200,
+        damping: 24,
         limited: true,
-        range: [-0.005, 0.005],
+        range: [-0.007, 0.007],
+        hardStop: true,
       },
     ],
     geoms: [
@@ -241,6 +242,40 @@ if (tLoop >= 0.90 && tLoop < 1.55) {
         rgba: [0.72, 0.75, 0.80, 1],
         role: 'visual',
       },
+      // Snare basket hub collar and 3 chrome cradle arms reaching up to grip snare_bottom_hoop
+      {
+        name: 'snare_basket_hub',
+        type: 'cylinder',
+        size: [0.018, 0.006],
+        pos: [0, 0, -0.076],
+        rgba: [0.22, 0.24, 0.28, 1],
+        role: 'visual',
+      },
+      ...[30, 150, 270].flatMap((deg, idx) => {
+        const rad = (deg * Math.PI) / 180;
+        const hx = +(0.185 * Math.cos(rad)).toFixed(4);
+        const hy = +(0.185 * Math.sin(rad)).toFixed(4);
+        const cx = +(0.014 * Math.cos(rad)).toFixed(4);
+        const cy = +(0.014 * Math.sin(rad)).toFixed(4);
+        return [
+          {
+            name: `snare_basket_arm_${idx + 1}`,
+            type: 'capsule' as const,
+            fromto: [cx, cy, -0.076, hx, hy, -0.066],
+            size: [0.0045],
+            rgba: [0.72, 0.75, 0.80, 1],
+            role: 'visual' as const,
+          },
+          {
+            name: `snare_basket_claw_${idx + 1}`,
+            type: 'capsule' as const,
+            fromto: [hx, hy, -0.068, hx, hy, -0.058],
+            size: [0.0055],
+            rgba: [0.16, 0.16, 0.18, 1],
+            role: 'visual' as const,
+          },
+        ];
+      }),
       ...[30, 150, 270].map((deg, idx) => {
         const rad = (deg * Math.PI) / 180;
         return {
@@ -444,6 +479,7 @@ if (tLoop >= 0.90 && tLoop < 1.55) {
     pos: [0.390, 0.035, 0.268],
     deformMaterial: 'softMetal',
     density: 8600,
+    collision: 'hull',
     nonlinearPlate: {
       enabled: true,
       crashSensitivity: 2.5,
@@ -467,15 +503,6 @@ if (tLoop >= 0.90 && tLoop < 1.55) {
     ],
     geoms: [
       {
-        name: 'cymbal_bow_disk',
-        type: 'cylinder',
-        size: [0.170, 0.00068], // Ø340 mm × 1.36 mm paper-thin spun B20 bronze crash cymbal (~1.06 kg)
-        density: 8600,
-        solref: [0.004, 0.22],
-        rgba: [0.88, 0.72, 0.28, 1],
-        role: 'collision',
-      },
-      {
         name: 'cymbal_spun_bronze_shell',
         type: 'mesh',
         size: [1],
@@ -483,10 +510,9 @@ if (tLoop >= 0.90 && tLoop < 1.55) {
         vertices: cymbalVisualMesh.vertices,
         renderVertices: cymbalVisualMesh.renderVertices,
         faces: cymbalVisualMesh.faces,
+        density: 8600,
+        solref: [0.004, 0.22],
         rgba: [0.89, 0.73, 0.30, 1],
-        role: 'visual',
-        contype: 0,
-        conaffinity: 0,
       },
       {
         name: 'cymbal_top_felt_washer',
@@ -537,9 +563,18 @@ if (tLoop >= 0.90 && tLoop < 1.55) {
     ],
     geoms: [
       {
+        name: 'choke_hinge_knuckle',
+        type: 'cylinder',
+        fromto: [-0.012, 0, 0, 0.012, 0, 0],
+        size: [0.006],
+        rgba: [0.24, 0.26, 0.30, 1],
+        contype: 0,
+        conaffinity: 0,
+      },
+      {
         name: 'choke_lever_rod',
         type: 'capsule',
-        fromto: [0, -0.010, 0.004, 0, -0.106, 0.046],
+        fromto: [0, 0, 0, 0, -0.106, 0.046],
         size: [0.0032],
         density: 2700,
         rgba: [0.35, 0.38, 0.44, 1],
@@ -583,6 +618,7 @@ if (tLoop >= 0.90 && tLoop < 1.55) {
       { name: 'cymbal_spindle_pin', type: 'cylinder', fromto: [0.390, 0.035, 0.260, 0.390, 0.035, 0.305], size: [0.004], rgba: [0.82, 0.84, 0.88, 1], contype: 0, conaffinity: 0 },
       { name: 'cymbal_choke_post_base', type: 'cylinder', size: [0.042, 0.006], pos: [0.390, 0.225, 0.006], rgba: [0.20, 0.22, 0.26, 1], role: 'visual' },
       { name: 'cymbal_choke_post', type: 'cylinder', fromto: [0.390, 0.225, 0.008, 0.390, 0.225, 0.275], size: [0.007], rgba: [0.70, 0.73, 0.78, 1], contype: 0, conaffinity: 0 },
+      { name: 'cymbal_choke_clamp', type: 'box', size: [0.014, 0.009, 0.009], pos: [0.390, 0.225, 0.2693], rgba: [0.20, 0.22, 0.26, 1], contype: 0, conaffinity: 0 },
     ],
     children: [],
   };

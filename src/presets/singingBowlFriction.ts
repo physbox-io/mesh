@@ -207,23 +207,6 @@ api.applyJointForce('trough_rock_hinge', 28.0 * (targetTilt - qTilt) + 3.6 * (ta
         faces: bowlShellMesh.faces,
         density: 8700,
         friction: [0.38, 0.004, 0.0002],
-        solref: [0.006, 0.35],
-        rgba: [0.76, 0.58, 0.26, 1],
-      },
-      {
-        // Analytical mjc_SphereCapsule lip equator collider for exact C^infinity chatter-free rim rub.
-        // Hand-authored, so NOT csgDerived: 'collider' — the convex-decomposition pass replaces every
-        // geom carrying that flag with its own pieces (none for this hull), which deleted the lip and
-        // let the pressed mallet sink half its width into the bowl with no rim contact to sing from.
-        name: 'bowl_lip_ring_collider',
-        type: 'capsule',
-        size: [0.1096, 0.004],
-        pos: [0, 0, 0.1098],
-        mass: 0,
-        role: 'collision',
-        contype: 2,
-        conaffinity: 2,
-        friction: [0.38, 0.004, 0.0002],
         solref: [0.012, 1.35],
         solimp: [0.35, 0.98, 0.0035, 0.5, 2],
         rgba: [0.76, 0.58, 0.26, 1],
@@ -302,8 +285,17 @@ api.applyJointForce('trough_rock_hinge', 28.0 * (targetTilt - qTilt) + 3.6 * (ta
       name: 'puja_cradle_riser_sweep',
       type: 'capsule',
       size: [0.0034, 0.01],
-      fromto: [0.136, 0, 0.016, 0.137, 0, 0.098],
+      fromto: [0.136, 0, 0.016, 0.137, 0, 0.1107],
       rgba: [0.30, 0.20, 0.13, 1],
+      contype: 0,
+      conaffinity: 0,
+    },
+    {
+      name: 'puja_radial_guide_rail',
+      type: 'cylinder',
+      size: [0.0028],
+      fromto: [0.141, 0, 0.1107, 0.123, 0, 0.1107],
+      rgba: [0.76, 0.60, 0.26, 1],
       contype: 0,
       conaffinity: 0,
     },
@@ -403,31 +395,28 @@ api.applyJointForce('trough_rock_hinge', 28.0 * (targetTilt - qTilt) + 3.6 * (ta
             ],
             geoms: [
               {
-                // Exact analytical mjc_SphereCapsule contact patch embedded flush inside the 18° suede sleeve
-                name: 'puja_suede_band',
-                type: 'sphere',
-                size: [0.0110],
-                pos: [0, 0, 0],
-                mass: 0.022,
-                condim: 3,
-                contype: 2,
-                conaffinity: 2,
-                friction: [0.38, 0.004, 0.0002],
-                solref: [0.012, 1.35],
-                solimp: [0.35, 0.98, 0.0035, 0.5, 2],
-                role: 'collision',
-                rgba: [0.19, 0.18, 0.20, 1],
-              },
-              {
                 name: 'puja_suede_sleeve',
                 type: 'capsule',
                 size: [0.0110, 0.022], // Dark-charcoal suede striker wrap leaning 18° against outer bronze lip
                 pos: [0, 0, 0],
                 euler: [0, -18, 0],
+                mass: 0.022,
+                condim: 3,
+                friction: [0.38, 0.004, 0.0002],
+                solref: [0.012, 1.35],
+                solimp: [0.35, 0.98, 0.0035, 0.5, 2],
+                rgba: [0.19, 0.18, 0.20, 1],
+              },
+              {
+                // Sliding clamp collar riding on puja_radial_guide_rail and clasping puja_lower_ferrule
+                name: 'puja_slide_clamp_collar',
+                type: 'box',
+                size: [0.0065, 0.0055, 0.0050],
+                pos: alongMallet(-0.023),
                 role: 'visual',
+                rgba: [0.78, 0.62, 0.26, 1],
                 contype: 0,
                 conaffinity: 0,
-                rgba: [0.19, 0.18, 0.20, 1],
               },
               {
                 name: 'puja_lower_ferrule',
@@ -681,6 +670,16 @@ api.applyJointForce('trough_rock_hinge', 28.0 * (targetTilt - qTilt) + 3.6 * (ta
       },
     ],
     geoms: [
+      // Brass pivot axle pin running through trough underside into front/back brass bearings
+      {
+        name: 'trough_pivot_axle_pin',
+        type: 'cylinder',
+        fromto: [0, -0.044, 0, 0, 0.046, 0],
+        size: [0.0035],
+        rgba: [0.82, 0.66, 0.28, 1],
+        contype: 0,
+        conaffinity: 0,
+      },
       // Front lane floor (maple hardwood, y_local = -0.014)
       {
         name: 'trough_maple_bed',

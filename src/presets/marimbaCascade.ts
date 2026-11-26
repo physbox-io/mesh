@@ -73,6 +73,28 @@ for (let i = 0; i < score.length; i++) {
       { name: 'mallet_rail', type: 'box', size: [0.175, 0.009, 0.032], pos: [0.02, -0.230, 0.032], rgba: [0.30, 0.20, 0.13, 1] },
       { name: 'drum_post_l', type: 'box', size: [0.008, 0.012, 0.048], pos: [-0.155, -0.270, 0.048], rgba: [0.30, 0.20, 0.13, 1] },
       { name: 'drum_post_r', type: 'box', size: [0.008, 0.012, 0.048], pos: [0.195, -0.270, 0.048], rgba: [0.30, 0.20, 0.13, 1] },
+      // Felt/foam nodal suspension pads & brass pins on rail_front/rail_back supporting the 5 rosewood bars
+      ...notes.flatMap((note, i) => {
+        const x = -0.11 + i * 0.052;
+        const tag = note.toLowerCase();
+        return ([-0.052, 0.052] as const).flatMap((yRail, side) => {
+          const s = side === 0 ? 'f' : 'b';
+          return [
+            { name: `bar_pad_${tag}_${s}`, type: 'cylinder' as const, size: [0.006, 0.0032], pos: [x, yRail, 0.0248], rgba: [0.16, 0.15, 0.16, 1], contype: 0, conaffinity: 0 },
+            { name: `bar_pin_${tag}_${s}`, type: 'cylinder' as const, size: [0.0018, 0.005], pos: [x, yRail, 0.0265], rgba: [0.82, 0.68, 0.28, 1], contype: 0, conaffinity: 0 },
+          ];
+        });
+      }),
+      // Rubber suspension posts supporting the C5 tubular steel chime above rail_front/rail_back
+      ...([-0.052, 0.052] as const).map((yRail, side) => ({
+        name: `chime_pad_c5_${side === 0 ? 'f' : 'b'}`,
+        type: 'cylinder' as const,
+        size: [0.0055, 0.0048],
+        pos: [0.155, yRail, 0.0262],
+        rgba: [0.16, 0.15, 0.16, 1],
+        contype: 0,
+        conaffinity: 0,
+      })),
     ],
     children: [
       {

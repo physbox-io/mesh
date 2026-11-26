@@ -139,6 +139,7 @@ export const vibraphoneResonatorsPreset: SceneGraph = (() => {
           name: `tube_wall_${note.toLowerCase()}`,
           type: 'mesh',
           size: [1],
+          dynamic: true,
           rgba: [0.78, 0.82, 0.88, 1],
           contype: 0,
           conaffinity: 0,
@@ -286,11 +287,46 @@ if (tLoop >= 1.42 && tLoop < 1.96) {
         pos: [0.182, 0, +(barBottomZ - 0.016).toFixed(5)],
         rgba: [0.26, 0.18, 0.12, 1],
       },
-      { name: 'leg_fl', type: 'capsule', fromto: [-0.182, -0.058, 0.012, -0.182, -0.058, +(barBottomZ - 0.028).toFixed(5)], size: [0.006], rgba: [0.22, 0.25, 0.30, 1], contype: 0, conaffinity: 0 },
-      { name: 'leg_bl', type: 'capsule', fromto: [-0.182, 0.058, 0.012, -0.182, 0.058, +(barBottomZ - 0.028).toFixed(5)], size: [0.006], rgba: [0.22, 0.25, 0.30, 1], contype: 0, conaffinity: 0 },
-      { name: 'leg_fr', type: 'capsule', fromto: [0.182, -0.058, 0.012, 0.182, -0.058, +(barBottomZ - 0.028).toFixed(5)], size: [0.006], rgba: [0.22, 0.25, 0.30, 1], contype: 0, conaffinity: 0 },
-      { name: 'leg_br', type: 'capsule', fromto: [0.182, 0.058, 0.012, 0.182, 0.058, +(barBottomZ - 0.028).toFixed(5)], size: [0.006], rgba: [0.22, 0.25, 0.30, 1], contype: 0, conaffinity: 0 },
+      { name: 'leg_fl', type: 'capsule', fromto: [-0.182, -0.058, 0.006, -0.182, -0.058, +(barBottomZ - 0.028).toFixed(5)], size: [0.006], rgba: [0.22, 0.25, 0.30, 1], contype: 0, conaffinity: 0 },
+      { name: 'leg_bl', type: 'capsule', fromto: [-0.182, 0.058, 0.006, -0.182, 0.058, +(barBottomZ - 0.028).toFixed(5)], size: [0.006], rgba: [0.22, 0.25, 0.30, 1], contype: 0, conaffinity: 0 },
+      { name: 'leg_fr', type: 'capsule', fromto: [0.182, -0.058, 0.006, 0.182, -0.058, +(barBottomZ - 0.028).toFixed(5)], size: [0.006], rgba: [0.22, 0.25, 0.30, 1], contype: 0, conaffinity: 0 },
+      { name: 'leg_br', type: 'capsule', fromto: [0.182, 0.058, 0.006, 0.182, 0.058, +(barBottomZ - 0.028).toFixed(5)], size: [0.006], rgba: [0.22, 0.25, 0.30, 1], contype: 0, conaffinity: 0 },
+      // Lower side stretchers tying front/back legs together and anchoring pedal_cross_stretcher
+      { name: 'lower_stretcher_l', type: 'box', size: [0.008, 0.062, 0.008], pos: [-0.182, 0, 0.008], rgba: [0.20, 0.22, 0.26, 1], contype: 0, conaffinity: 0 },
+      { name: 'lower_stretcher_r', type: 'box', size: [0.008, 0.062, 0.008], pos: [0.182, 0, 0.008], rgba: [0.20, 0.22, 0.26, 1], contype: 0, conaffinity: 0 },
       { name: 'pedal_cross_stretcher', type: 'box', size: [0.186, 0.012, 0.008], pos: [0, 0, 0.008], rgba: [0.20, 0.22, 0.26, 1], contype: 0, conaffinity: 0 },
+      // Sustain pedal clevis hinge brackets & axle pin mounted on pedal_cross_stretcher
+      { name: 'pedal_hinge_bracket_l', type: 'box', size: [0.004, 0.008, 0.009], pos: [-0.026, 0.010, 0.021], rgba: [0.26, 0.28, 0.33, 1], contype: 0, conaffinity: 0 },
+      { name: 'pedal_hinge_bracket_r', type: 'box', size: [0.004, 0.008, 0.009], pos: [0.026, 0.010, 0.021], rgba: [0.26, 0.28, 0.33, 1], contype: 0, conaffinity: 0 },
+      { name: 'pedal_hinge_pin', type: 'cylinder', fromto: [-0.032, 0.010, 0.024, 0.032, 0.010, 0.024], size: [0.0028], rgba: [0.80, 0.83, 0.88, 1], contype: 0, conaffinity: 0 },
+      // Braided suspension cords, rubber posts, and brass nodal pins supporting all 6 aluminum bars
+      { name: 'cord_string_front', type: 'capsule', fromto: [-0.182, -0.058, +(barBottomZ - 0.001).toFixed(5), 0.182, -0.058, +(barBottomZ - 0.001).toFixed(5)], size: [0.0018], rgba: [0.86, 0.84, 0.78, 1], contype: 0, conaffinity: 0 },
+      { name: 'cord_string_back', type: 'capsule', fromto: [-0.182, 0.058, +(barBottomZ - 0.001).toFixed(5), 0.182, 0.058, +(barBottomZ - 0.001).toFixed(5)], size: [0.0018], rgba: [0.86, 0.84, 0.78, 1], contype: 0, conaffinity: 0 },
+      ...notes.flatMap((note, i) => {
+        const x = +(-0.140 + i * 0.056).toFixed(4);
+        const tag = note.toLowerCase();
+        return ([-0.058, 0.058] as const).flatMap((yRail, side) => {
+          const s = side === 0 ? 'f' : 'b';
+          return [
+            { name: `vibe_cord_post_${tag}_${s}`, type: 'cylinder' as const, size: [0.0048, 0.0048], pos: [x, yRail, +(barBottomZ - 0.00425).toFixed(5)], rgba: [0.14, 0.15, 0.17, 1], contype: 0, conaffinity: 0 },
+            { name: `vibe_cord_pin_${tag}_${s}`, type: 'cylinder' as const, size: [0.0018, 0.006], pos: [x, yRail, +(barBottomZ - 0.003).toFixed(5)], rgba: [0.85, 0.72, 0.28, 1], contype: 0, conaffinity: 0 },
+          ];
+        });
+      }),
+      // Resonator rack rails, end ties, and tube clamp collars attaching all 6 resonator tubes to the frame
+      { name: 'resonator_rack_front', type: 'box', size: [0.182, 0.004, 0.006], pos: [0, -0.0235, +(tubeMouthZ - 0.045).toFixed(5)], rgba: [0.22, 0.25, 0.30, 1], contype: 0, conaffinity: 0 },
+      { name: 'resonator_rack_back', type: 'box', size: [0.182, 0.004, 0.006], pos: [0, 0.0235, +(tubeMouthZ - 0.045).toFixed(5)], rgba: [0.22, 0.25, 0.30, 1], contype: 0, conaffinity: 0 },
+      { name: 'resonator_rack_tie_l', type: 'box', size: [0.006, 0.058, 0.006], pos: [-0.182, 0, +(tubeMouthZ - 0.045).toFixed(5)], rgba: [0.22, 0.25, 0.30, 1], contype: 0, conaffinity: 0 },
+      { name: 'resonator_rack_tie_r', type: 'box', size: [0.006, 0.058, 0.006], pos: [0.182, 0, +(tubeMouthZ - 0.045).toFixed(5)], rgba: [0.22, 0.25, 0.30, 1], contype: 0, conaffinity: 0 },
+      ...notes.map((note, i) => ({
+        name: `resonator_clamp_${note.toLowerCase()}`,
+        type: 'cylinder' as const,
+        size: [0.024, 0.005],
+        pos: [+(-0.140 + i * 0.056).toFixed(4), 0, +(tubeMouthZ - 0.045).toFixed(5)],
+        rgba: [0.24, 0.27, 0.33, 1],
+        contype: 0,
+        conaffinity: 0,
+      })),
       // Electric tremolo motor housing mounted on left end-cheek
       {
         name: 'tremolo_motor_can',
@@ -388,6 +424,15 @@ if (tLoop >= 1.42 && tLoop < 1.96) {
           },
         ],
         geoms: [
+          {
+            name: 'pedal_hinge_knuckle',
+            type: 'cylinder',
+            fromto: [-0.021, 0, 0, 0.021, 0, 0],
+            size: [0.005],
+            rgba: [0.26, 0.28, 0.33, 1],
+            contype: 0,
+            conaffinity: 0,
+          },
           {
             name: 'chrome_pedal_plate',
             type: 'box',

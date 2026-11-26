@@ -68,11 +68,24 @@ for (let i = 0; i < score.length; i++) {
     geoms: [
       { name: 'glock_rail_front', type: 'box', size: [0.18, 0.007, 0.011], pos: [0, -0.048, 0.011], rgba: [0.20, 0.25, 0.34, 1] },
       { name: 'glock_rail_back', type: 'box', size: [0.18, 0.007, 0.011], pos: [0, 0.048, 0.011], rgba: [0.20, 0.25, 0.34, 1] },
-      { name: 'glock_tie_l', type: 'box', size: [0.008, 0.110, 0.009], pos: [-0.175, -0.050, 0.009], rgba: [0.16, 0.20, 0.28, 1] },
-      { name: 'glock_tie_r', type: 'box', size: [0.008, 0.110, 0.009], pos: [0.175, -0.050, 0.009], rgba: [0.16, 0.20, 0.28, 1] },
+      // Extended side rails spanning y = [-0.200, +0.060] so glock_drum_post_l/r tie solidly into the main frame
+      { name: 'glock_tie_l', type: 'box', size: [0.008, 0.130, 0.009], pos: [-0.175, -0.070, 0.009], rgba: [0.16, 0.20, 0.28, 1] },
+      { name: 'glock_tie_r', type: 'box', size: [0.008, 0.130, 0.009], pos: [0.175, -0.070, 0.009], rgba: [0.16, 0.20, 0.28, 1] },
       { name: 'glock_mallet_rail', type: 'box', size: [0.18, 0.009, 0.030], pos: [0, -0.148, 0.030], rgba: [0.18, 0.22, 0.30, 1] },
       { name: 'glock_drum_post_l', type: 'box', size: [0.008, 0.012, 0.046], pos: [-0.175, -0.188, 0.046], rgba: [0.18, 0.22, 0.30, 1] },
       { name: 'glock_drum_post_r', type: 'box', size: [0.008, 0.012, 0.046], pos: [0.175, -0.188, 0.046], rgba: [0.18, 0.22, 0.30, 1] },
+      // Rubber grommet posts & brass nodal pins on glock_rail_front/back supporting all 6 steel bars
+      ...notes.flatMap((note, i) => {
+        const x = -0.13 + i * 0.052;
+        const tag = note.toLowerCase();
+        return ([-0.048, 0.048] as const).flatMap((yRail, side) => {
+          const s = side === 0 ? 'f' : 'b';
+          return [
+            { name: `glock_grommet_${tag}_${s}`, type: 'cylinder' as const, size: [0.0055, 0.0050], pos: [x, yRail, 0.0266], rgba: [0.14, 0.15, 0.17, 1], contype: 0, conaffinity: 0 },
+            { name: `glock_pin_${tag}_${s}`, type: 'cylinder' as const, size: [0.0018, 0.0065], pos: [x, yRail, 0.0285], rgba: [0.85, 0.70, 0.28, 1], contype: 0, conaffinity: 0 },
+          ];
+        });
+      }),
     ],
     children: [
       {

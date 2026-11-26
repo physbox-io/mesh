@@ -74,13 +74,31 @@ export const smokerExtras = (): SceneNode[] => {
       { ...span('door_lintel', -DRL + 0.005, DRL - 0.005, -SY, -SY + T, 14 * C, 15 * C - 0.01), rgba: concrete, density: 2400 },
     ]),
     fixed('smoker_slab', 'Roof slab', [
-      { ...span('slab', -SX - 0.03, SX + 0.03, -SY - 0.03, SY + 0.03, 16 * C - 0.01, 17 * C - 0.01), rgba: concrete, density: 2400 },
+      // Four slab sections sitting flush on the walls (z = 16*C..17*C) and framing
+      // the 122.5 mm square flue opening under the chimney.
+      { ...span('slab_front', -SX - 0.03, SX + 0.03, -SY - 0.03, 0.0425, 16 * C, 17 * C), rgba: concrete, density: 2400 },
+      { ...span('slab_back', -SX - 0.03, SX + 0.03, 0.165, SY + 0.03, 16 * C, 17 * C), rgba: concrete, density: 2400 },
+      { ...span('slab_left', -SX - 0.03, -0.06125, 0.0425, 0.165, 16 * C, 17 * C), rgba: concrete, density: 2400 },
+      { ...span('slab_right', 0.06125, SX + 0.03, 0.0425, 0.165, 16 * C, 17 * C), rgba: concrete, density: 2400 },
     ]),
     // The baffle the firebox heats, open at the back for the smoke to rise
     // past; and the grate, both resting on the brickwork's inner faces.
-    fixed('smoker_steel', 'Baffle and grate', [
+    fixed('smoker_steel', 'Baffle, grate and hinges', [
       { ...span('baffle', -SX + T, SX - T, -SY + T, SY - T - 0.12, 8 * C - 0.016, 8 * C - 0.01), rgba: steel, density: 7850 },
       { ...span('grate', -SX + T, SX - T, -SY + T, SY - T, 11 * C - 0.016, 11 * C - 0.01), rgba: [0.35, 0.36, 0.38, 1], density: 2000 },
+      // Fixed wall-side hinge plates, barrels, and pins anchored to the left door pier.
+      ...([0.08, 0.36] as const).flatMap((hzLocal, idx): SceneGeom[] => {
+        const hx = -DR - 0.01;
+        const hy = -SY - 0.012;
+        const hz = 8 * C + hzLocal;
+        const iron = [0.14, 0.15, 0.17, 1];
+        return [
+          { ...span(`hinge_wall_plate_${idx}`, hx - 0.055, hx + 0.002, -SY - 0.006, -SY, hz - 0.025, hz + 0.025), rgba: iron, contype: 0, conaffinity: 0 },
+          { ...span(`hinge_wall_arm_bot_${idx}`, hx - 0.012, hx + 0.005, hy, -SY - 0.004, hz - 0.025, hz - 0.009), rgba: iron, contype: 0, conaffinity: 0 },
+          { ...span(`hinge_wall_arm_top_${idx}`, hx - 0.012, hx + 0.005, hy, -SY - 0.004, hz + 0.009, hz + 0.025), rgba: iron, contype: 0, conaffinity: 0 },
+          { name: `hinge_pin_${idx}`, type: 'cylinder', fromto: [hx, hy, hz - 0.028, hx, hy, hz + 0.028], size: [0.0045], rgba: [0.32, 0.33, 0.36, 1], contype: 0, conaffinity: 0 },
+        ];
+      }),
     ]),
     {
       // A steel door on a hinge down its left edge; push it and it swings.
@@ -89,7 +107,13 @@ export const smokerExtras = (): SceneNode[] => {
       children: [],
       geoms: [
         { ...span('door_plate', 0, 2 * DR + 0.02, -0.006, 0.006, 0.0, 6 * C - 0.01), rgba: steel, density: 7850 },
+        ...([0.08, 0.36] as const).flatMap((hzLocal, idx): SceneGeom[] => [
+          { name: `door_hinge_barrel_${idx}`, type: 'cylinder', pos: [0, 0, hzLocal], size: [0.0085, 0.0085], rgba: [0.14, 0.15, 0.17, 1], contype: 0, conaffinity: 0 },
+          { ...span(`door_hinge_strap_${idx}`, 0, 0.028, -0.007, 0.006, hzLocal - 0.0085, hzLocal + 0.0085), rgba: [0.14, 0.15, 0.17, 1], contype: 0, conaffinity: 0 },
+        ]),
         { name: 'door_handle', type: 'capsule', size: [0.008], fromto: [2 * DR - 0.04, -0.03, 0.12, 2 * DR - 0.04, -0.03, 0.32], rgba: [0.1, 0.1, 0.1, 1], density: 7850 },
+        { name: 'door_handle_standoff_bot', type: 'cylinder', size: [0.006], fromto: [2 * DR - 0.04, -0.03, 0.135, 2 * DR - 0.04, -0.005, 0.135], rgba: [0.1, 0.1, 0.1, 1], contype: 0, conaffinity: 0 },
+        { name: 'door_handle_standoff_top', type: 'cylinder', size: [0.006], fromto: [2 * DR - 0.04, -0.03, 0.305, 2 * DR - 0.04, -0.005, 0.305], rgba: [0.1, 0.1, 0.1, 1], contype: 0, conaffinity: 0 },
       ],
     },
   ];
@@ -117,8 +141,11 @@ export const castleShape = (): SceneGraph => {
     for (let m = 0; m < 10; m += 4) {
       box(`merlon_${ti}_${tj}_a${m}`, ti + m, ti + m + 2, tj, tj + 2, 23, 25);
       box(`merlon_${ti}_${tj}_b${m}`, ti + m, ti + m + 2, tj + 8, tj + 10, 23, 25);
-      box(`merlon_${ti}_${tj}_c${m}`, ti, ti + 2, tj + m, tj + m + 2, 23, 25);
-      box(`merlon_${ti}_${tj}_d${m}`, ti + 8, ti + 10, tj + m, tj + m + 2, 23, 25);
+      // Only emit side merlons at m = 4; m = 0 and m = 8 coincide with corners from a/b.
+      if (m > 0 && m < 8) {
+        box(`merlon_${ti}_${tj}_c${m}`, ti, ti + 2, tj + m, tj + m + 2, 23, 25);
+        box(`merlon_${ti}_${tj}_d${m}`, ti + 8, ti + 10, tj + m, tj + m + 2, 23, 25);
+      }
     }
   }
   // Curtain walls between the towers, battlements along the top.
@@ -146,14 +173,38 @@ export const castleShape = (): SceneGraph => {
 
 export const castleExtras = (): SceneNode[] => {
   const at = (n: number) => n * P;
+  const iron = [0.16, 0.17, 0.19, 1];
+  // Fixed sill hinge brackets and pin anchored into the castle gate sill at y = 0.
+  const hingeMounts: SceneNode = {
+    id: 'castle_drawbridge_hinges',
+    name: 'Drawbridge Hinges',
+    type: 'body',
+    pos: [at(20), 0, 0.002],
+    joints: [],
+    children: [],
+    geoms: [
+      ...([-0.025, 0.025] as const).flatMap((hx, idx): SceneGeom[] => [
+        { ...span(`sill_hinge_plate_${idx}`, hx - 0.005, hx + 0.005, 0, 0.006, -0.002, 0.002), rgba: iron, contype: 0, conaffinity: 0 },
+        { name: `sill_hinge_barrel_l_${idx}`, type: 'cylinder', fromto: [hx - 0.005, 0, 0, hx - 0.0022, 0, 0], size: [0.002], rgba: iron, contype: 0, conaffinity: 0 },
+        { name: `sill_hinge_barrel_r_${idx}`, type: 'cylinder', fromto: [hx + 0.0022, 0, 0, hx + 0.005, 0, 0], size: [0.002], rgba: iron, contype: 0, conaffinity: 0 },
+        { name: `sill_hinge_pin_${idx}`, type: 'cylinder', fromto: [hx - 0.006, 0, 0, hx + 0.006, 0, 0], size: [0.0012], rgba: [0.35, 0.36, 0.38, 1], contype: 0, conaffinity: 0 },
+      ]),
+    ],
+  };
   // A drawbridge on a hinge at the gate's sill, lowered onto the ground.
   const drawbridge: SceneNode = {
     id: 'castle_drawbridge', name: 'Drawbridge', type: 'body', pos: [at(20), 0, 0.002],
     joints: [{ name: 'drawbridge_hinge', type: 'hinge', axis: [1, 0, 0], pos: [0, 0, 0], damping: 0.002, limited: true, range: [0, 90] }],
     children: [],
-    geoms: [{ ...span('planks', -at(4) + 0.001, at(4) - 0.001, -0.07, -0.001, -0.002, 0.002), rgba: [0.45, 0.3, 0.16, 1], density: 600 }],
+    geoms: [
+      { ...span('planks', -at(4) + 0.001, at(4) - 0.001, -0.07, -0.001, -0.002, 0.002), rgba: [0.45, 0.3, 0.16, 1], density: 600 },
+      ...([-0.025, 0.025] as const).flatMap((hx, idx): SceneGeom[] => [
+        { name: `drawbridge_hinge_knuckle_${idx}`, type: 'cylinder', fromto: [hx - 0.002, 0, 0, hx + 0.002, 0, 0], size: [0.002], rgba: iron, contype: 0, conaffinity: 0 },
+        { ...span(`drawbridge_hinge_strap_${idx}`, hx - 0.002, hx + 0.002, -0.014, 0, -0.0018, 0.0022), rgba: iron, contype: 0, conaffinity: 0 },
+      ]),
+    ],
   };
-  return [drawbridge];
+  return [hingeMounts, drawbridge];
 };
 
 /** The model of the brickwork: one solid body, to be laid in brick. */

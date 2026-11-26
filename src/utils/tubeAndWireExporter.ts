@@ -543,7 +543,39 @@ export function pipeStructureScene(
   options?: Parameters<typeof generatePipeStructurePreset>[1]
 ): SceneNode[] {
   const struts = generatePipeStructurePreset(preset, options);
-  return [...struts, ...pipeFittings(struts, { pipeStandardId: options?.pipeStandardId ?? 'pvc_sch40_3_4' })];
+  const fittings = pipeFittings(struts, { pipeStandardId: options?.pipeStandardId ?? 'pvc_sch40_3_4' });
+  const all = [...struts, ...fittings];
+
+  // Raise the assembled structure so ground-level struts and base hubs rest
+  // flush on z = 0 rather than sinking half-buried into the floor.
+  let minZ = Infinity;
+  for (const node of all) {
+    const pz = node.pos?.[2] ?? 0;
+    for (const g of node.geoms ?? []) {
+      if (g.csg === 'difference') continue;
+      if (g.type === 'sphere' && g.size) {
+        const gz = g.pos?.[2] ?? 0;
+        const r = g.size[2] ?? g.size[0] ?? 0;
+        minZ = Math.min(minZ, pz + gz - r);
+      } else if ((g.type === 'cylinder' || g.type === 'capsule') && g.fromto && g.size) {
+        const [x0, y0, z0, x1, y1, z1] = g.fromto;
+        const r = g.size[0] ?? 0;
+        const dx = x1 - x0, dy = y1 - y0, dz = z1 - z0;
+        const len = Math.hypot(dx, dy, dz);
+        const capDrop = g.type === 'capsule' ? r : (len > 1e-9 ? r * Math.hypot(dx, dy) / len : r);
+        minZ = Math.min(minZ, pz + Math.min(z0, z1) - capDrop);
+      }
+    }
+  }
+  if (Number.isFinite(minZ) && minZ < 0) {
+    // Round up to 0.1 mm so integer-mm strut lengths do not drift across 0.01 mm cut-list rounding boundaries.
+    const liftZ = Math.ceil(-minZ * 1000) / 1000;
+    return all.map((n) => ({
+      ...n,
+      pos: [n.pos?.[0] ?? 0, n.pos?.[1] ?? 0, +((n.pos?.[2] ?? 0) + liftZ).toFixed(6)] as [number, number, number],
+    }));
+  }
+  return all;
 }
 
 /**
@@ -1078,6 +1110,8 @@ export function buildPipeHubNode(
 
   if (effectiveFitStyle === 'socket') {
     const outerRadiusMm = spec.odMm / 2 + opts.hubWallMm;
+    // Slightly inset sleeve radius (0.08 mm) avoids tangent cylinder-sphere CSG seams while preserving exact hub_core radius.
+    const sleeveOuterRadiusMm = outerRadiusMm - 0.08;
     const boreRadiusMm = spec.odMm / 2 + opts.fitClearanceMm;
 
     // Central sphere body
@@ -1098,7 +1132,7 @@ export function buildPipeHubNode(
       geoms.push({
         name: `sleeve_${i + 1}`,
         type: 'cylinder',
-        size: [mm(outerRadiusMm), mm(sleeveEndMm / 2)],
+        size: [mm(sleeveOuterRadiusMm), mm(sleeveEndMm / 2)],
         fromto: [0, 0, 0, mm(pEnd[0]), mm(pEnd[1]), mm(pEnd[2])],
         csg: 'union',
         rgba: positiveRgba,

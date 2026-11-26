@@ -413,7 +413,10 @@ const resetPlunger: SceneNode = {
   type: 'body',
   pos: [DX, SH_Y, PLUNGER_Z],
   joints: [{ name: 'reset_slide', type: 'slide', axis: [0, 0, 1], pos: [0, 0, 0], limited: true, range: [0, 0.012], hardStop: true, damping: 0.05 }],
-  geoms: [{ name: 'plunger_pin', type: 'box', size: [0.0025, 0.0025, 0.003], mass: 0.01, rgba: STEEL }],
+  geoms: [
+    { name: 'plunger_pin', type: 'box', size: [0.0025, 0.0025, 0.003], mass: 0.01, rgba: STEEL },
+    { name: 'plunger_shaft', type: 'cylinder', size: [0.0018, 0.0045], pos: [0, 0, -0.0045], rgba: STEEL, role: 'visual', contype: 0, conaffinity: 0 },
+  ],
   children: [],
 };
 // Hold-down clamp: a servo arm that swings down onto the carriage and holds it on
@@ -439,7 +442,8 @@ const dropFrame: SceneGeom[] = [
   part('drop_crosshead', [RAIL_X + 0.006, 0.004, 0.003], [DX, RAIL_Y, CROSSHEAD_Z + 0.003], FRAME, ghost),
   { name: 'lift_screw', type: 'cylinder', size: [0.0018, (CROSSHEAD_Z - BASE_TOP) / 2], pos: [DX, RAIL_Y, (CROSSHEAD_Z + BASE_TOP) / 2], rgba: STEEL, ...ghost },
   part('lift_motor', [0.008, 0.008, 0.009], [DX, RAIL_Y, CROSSHEAD_Z + 0.006 + 0.009], DARK, ghost),
-  part('plunger_housing', [0.004, 0.004, 0.00325], [DX, SH_Y, BASE_TOP + 0.00325], FRAME, ghost),
+  part('plunger_housing', [0.0055, 0.0055, 0.0042], [DX, SH_Y, BASE_TOP + 0.0042], DARK, ghost),
+  { name: 'plunger_guide_sleeve', type: 'cylinder', size: [0.0038, 0.0020], pos: [DX, SH_Y, BASE_TOP + 0.0085], rgba: FRAME, ...ghost },
   part('clamp_servo', [0.006, 0.006, 0.006], [CLAMP_PIVOT[0], 0.009, CLAMP_PIVOT[2]], DARK, ghost),
   part('clamp_post', [0.005, 0.005, (CLAMP_PIVOT[2] - 0.006 - BASE_TOP) / 2 + 0.0002], [CLAMP_PIVOT[0], 0.009, (CLAMP_PIVOT[2] - 0.006 + BASE_TOP) / 2], FRAME, ghost),
 ];

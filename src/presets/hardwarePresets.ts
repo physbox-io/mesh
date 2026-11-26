@@ -353,6 +353,19 @@ function bearingCart(): SceneGraph {
   const ramp = body('ramp', rampCentre.toArray(), [box('ramp_board', [0.42, 0.12, 0.01], [0, 0, 0], WOOD, 2)], false, {
     quat: [tilt.w, tilt.x, tilt.y, tilt.z],
   });
+  // Grounded wooden trestle supports resting flush on z = 0 under the tilted ramp board.
+  const p0 = rampCentre.clone().addScaledVector(up, -0.01);
+  const zUnder = (wx: number) => p0.z - (wx - p0.x) * Math.tan(a);
+  const highTop = zUnder(-0.335);
+  const midTop = zUnder(-0.065);
+  const rampSupport = body('ramp_support', [0, 0, 0], [
+    box('ramp_leg_high_l', [0.015, 0.015, highTop / 2], [-0.35, 0.095, highTop / 2], WOOD, 0.5),
+    box('ramp_leg_high_r', [0.015, 0.015, highTop / 2], [-0.35, -0.095, highTop / 2], WOOD, 0.5),
+    box('ramp_brace_high', [0.012, 0.095, 0.012], [-0.35, 0, highTop * 0.45], WOOD, 0.3),
+    box('ramp_leg_mid_l', [0.015, 0.015, midTop / 2], [-0.08, 0.095, midTop / 2], WOOD, 0.3),
+    box('ramp_leg_mid_r', [0.015, 0.015, midTop / 2], [-0.08, -0.095, midTop / 2], WOOD, 0.3),
+    box('ramp_brace_mid', [0.012, 0.095, 0.012], [-0.08, 0, midTop * 0.45], WOOD, 0.2),
+  ], false);
   const onRamp = rampCentre.clone().addScaledVector(down, -0.28).addScaledVector(up, 0.01);
   const q = [tilt.w, tilt.x, tilt.y, tilt.z];
   const at = (local: number[]) => onRamp.clone().addScaledVector(up, 0.025).add(new THREE.Vector3(...(local as [number, number, number])).applyQuaternion(tilt)).toArray().map((v) => +v.toFixed(6));
@@ -374,7 +387,7 @@ function bearingCart(): SceneGraph {
 
   // The deck, counterbored for M3 cap screws over the chassis's holes.
   const deck = body('deck', at([0, 0, 0.006 + 0.005]), [box('deck_plate', [0.075, 0.032, 0.005], [0, 0, 0], PLA_ORANGE, 0.08)], true, { quat: q });
-  const scene = { nodes: [ramp, chassis, deck] } as SceneGraph;
+  const scene = { nodes: [ramp, rampSupport, chassis, deck] } as SceneGraph;
   corners.forEach(([x, y], i) => {
     const group = cut(deck, { kind: 'counterbore', size: 'M3', at: [x, y, 0.005], normal: [0, 0, 1] }, `screw${i}`);
     const screw = seat(deck, group, { kind: 'screw', size: 'M3' }, `deck_bolt${i}`);
