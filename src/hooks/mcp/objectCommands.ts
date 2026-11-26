@@ -23,6 +23,10 @@ import { HARDWARE_PARTS, documentWorldMatrix, quietHardwarePart, sharedSeamPoint
 import { withoutNulls } from '../../utils/withoutNulls';
 import { jointAxisWarnings } from '../../utils/jointAxisCheck';
 import {
+  generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH,
+  DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS,
+} from '../../utils/geom';
+import {
   countBodies, collectNodeIds, type Msg, pointList, resolveParent, withChild, findNodeInScene,
   isPlainObject, isFiniteNumber, isFiniteVec3,
 } from './bridgeUtils';
@@ -56,6 +60,7 @@ function syncFreeJointToDocument(id: string) {
 /** Acoustic fields a body update is checked for (utils/incomingBodyCheck.ts normalizeAcousticFields). */
 const SPEC_FIELDS = ['acousticString', 'windInstrument', 'acousticMembrane', 'nonlinearPlate', 'resonatorTube', 'acousticBow'] as const;
 const ACOUSTIC_FIELDS = ['deformMaterial', ...SPEC_FIELDS];
+const CURVE_FIELDS = ['isCurve', 'curvePoints', 'curveWidth', 'curveThickness', 'curveSegments', 'curveClosed', 'curveBank'] as const;
 
 /** Deduplicates ids across an incoming raw body subtree against `taken` BEFORE fillBodyDefaults runs. */
 function dedupeRawSubtree(raw: RawNode, taken: Set<string>): RawNode {
@@ -276,6 +281,70 @@ export const objectCommands: McpCommands = {
       if (updates.geoms.some((g: SceneGeom) => g.csg === 'difference' || g.csg === 'intersection' || (g.type === 'cylinder' && (g.thread?.pitch ?? 0) > 0))) {
         updates.csgEnabled = true;
       }
+    }
+
+    // Regenerate curve segment boxes whenever any curve* field changes on an
+    // isCurve body (or isCurve becomes true, or geoms: [] / rgba is updated).
+    const willBeCurve = (updates.isCurve !== undefined ? updates.isCurve : target.isCurve) === true;
+    const curveFieldTouched = CURVE_FIELDS.some((k) => k in rawUpdates);
+    const explicitEmptyGeoms = Array.isArray(rawUpdates.geoms) && rawUpdates.geoms.length === 0;
+    const explicitNonEmptyGeoms = Array.isArray(rawUpdates.geoms) && rawUpdates.geoms.length > 0;
+    const rgbaTouched = 'rgba' in rawUpdates && updates.rgba !== undefined;
+    if (willBeCurve) {
+      const bodyLabel = typeof updates.name === 'string' ? updates.name : (target.name ?? targetId);
+      if (updates.curveSegments !== undefined && (!isFiniteNumber(updates.curveSegments) || !Number.isInteger(updates.curveSegments) || updates.curveSegments < 1 || updates.curveSegments > 500)) {
+        return { ok: false, error: `Body '${bodyLabel}': curveSegments must be an integer between 1 and 500.` };
+      }
+      if (updates.curveWidth !== undefined && (!isFiniteNumber(updates.curveWidth) || updates.curveWidth <= 0)) {
+        return { ok: false, error: `Body '${bodyLabel}': curveWidth must be a positive finite number.` };
+      }
+      if (updates.curveThickness !== undefined && (!isFiniteNumber(updates.curveThickness) || updates.curveThickness <= 0)) {
+        return { ok: false, error: `Body '${bodyLabel}': curveThickness must be a positive finite number.` };
+      }
+      if (updates.curveBank !== undefined && !isFiniteNumber(updates.curveBank)) {
+        return { ok: false, error: `Body '${bodyLabel}': curveBank must be a finite number.` };
+      }
+      if (updates.curvePoints !== undefined) {
+        if (!Array.isArray(updates.curvePoints) || updates.curvePoints.length < 2 || !updates.curvePoints.every(isFiniteVec3)) {
+          return { ok: false, error: `Body '${bodyLabel}': curvePoints must be an array of at least 2 finite [x, y, z] points.` };
+        }
+      }
+      if (!explicitNonEmptyGeoms && (curveFieldTouched || explicitEmptyGeoms || rgbaTouched)) {
+        const curvePoints = (updates.curvePoints ?? target.curvePoints ?? DEFAULT_CURVE_POINTS).map((p: number[]) => [...p]);
+        const curveWidth = updates.curveWidth ?? target.curveWidth ?? DEFAULT_CURVE_WIDTH;
+        const curveThickness = updates.curveThickness ?? target.curveThickness ?? DEFAULT_CURVE_THICKNESS;
+        const curveSegments = updates.curveSegments ?? target.curveSegments ?? DEFAULT_CURVE_SEGMENTS;
+        const curveClosed = (updates.curveClosed !== undefined ? updates.curveClosed : target.curveClosed) === true;
+        const curveBank = updates.curveBank ?? target.curveBank ?? 0;
+        const curveRgba =
+          updates.rgba
+          ?? normalizeRgba((target as unknown as Record<string, unknown>).rgba)
+          ?? target.geoms?.[0]?.rgba
+          ?? [0.85, 0.45, 0.15, 1];
+        if (!target.isCurve) {
+          updates.curvePoints = curvePoints;
+          updates.curveWidth = curveWidth;
+          updates.curveThickness = curveThickness;
+          updates.curveSegments = curveSegments;
+          updates.curveClosed = curveClosed;
+          updates.curveBank = curveBank;
+        }
+        updates.geoms = generateCurveGeoms(
+          targetId,
+          curvePoints,
+          curveWidth,
+          curveThickness,
+          curveSegments,
+          curveRgba,
+          curveClosed,
+          curveBank,
+        );
+      }
+    }
+
+    // Clear a stale "Set a mass if you wanted the heavier figure" warning once mass is explicitly set.
+    if (updates.mass != null && target.collisionWarning?.includes('Set a mass if you wanted the heavier figure')) {
+      updates.collisionWarning = undefined;
     }
 
     // null or "" detaches the source: the body keeps the mesh it last

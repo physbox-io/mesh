@@ -327,6 +327,10 @@ export function collisionReport(node: SceneNode): Record<string, unknown> {
       collisionPending: true,
     };
   }
+  const effectiveCollisionWarning =
+    node.collisionWarning && !(node.mass != null && node.collisionWarning.includes('Set a mass if you wanted the heavier figure'))
+      ? node.collisionWarning
+      : undefined;
   if (colliders.length > 0) {
     const hfields = colliders.filter(g => g.type === 'hfield' && g.hfield);
     if (hfields.length > 0 && hfields.length === colliders.length) {
@@ -334,7 +338,7 @@ export function collisionReport(node: SceneNode): Record<string, unknown> {
       return {
         collidesAs: `heightfield (${dims})`,
         ...(node.collisionSolidity !== undefined ? { solidity: node.collisionSolidity } : {}),
-        ...(node.collisionWarning ? { collisionWarning: node.collisionWarning } : {}),
+        ...(effectiveCollisionWarning ? { collisionWarning: effectiveCollisionWarning } : {}),
       };
     }
     return {
@@ -352,7 +356,7 @@ export function collisionReport(node: SceneNode): Record<string, unknown> {
         surfaceUncoveredMm: node.collisionUncovered.mm,
         surfaceUncovered: uncoveredSentence(node.collisionUncovered),
       } : {}),
-      ...(node.collisionWarning ? { collisionWarning: node.collisionWarning } : {}),
+      ...(effectiveCollisionWarning ? { collisionWarning: effectiveCollisionWarning } : {}),
     };
   }
   if (solidMeshGeoms(node).length === 0) return {};
@@ -361,7 +365,7 @@ export function collisionReport(node: SceneNode): Record<string, unknown> {
     collidesAs: 'convex hull',
     ...(node.collisionSolidity !== undefined ? { solidity: node.collisionSolidity } : {}),
     ...(filled ? { cavityFilled: 'This body is hollow but collides as its convex hull, so its cavity is solid to contact.' } : {}),
-    ...(node.collisionWarning ? { collisionWarning: node.collisionWarning } : {}),
+    ...(effectiveCollisionWarning ? { collisionWarning: effectiveCollisionWarning } : {}),
     ...(node.collisionError ? { collisionError: node.collisionError } : {}),
   };
 }

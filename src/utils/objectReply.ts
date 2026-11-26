@@ -245,13 +245,26 @@ function acousticsOf(node: SceneNode, scene?: SceneNode[]): Record<string, unkno
 
 function replyNode(node: SceneNode, opts: ObjectReplyOptions): Record<string, unknown> {
   const geoms = node.geoms || [];
-  const listed = opts.full ? geoms : geoms.filter((g) => !generatedCollider(g));
+  const baseListed = opts.full ? geoms : geoms.filter((g) => !generatedCollider(g));
+  const summarizeCurve = !opts.full && node.isCurve === true;
+  const listed = summarizeCurve ? [] : baseListed;
   const pieces = geoms.filter((g) => g.csgDerived === 'collider').length;
   const exact = geoms.filter((g) => g.contactClass);
   const { csgScad, ...rest } = node;
   const world = opts.world?.get(node.id);
   return {
     ...stripMeshArrays({ ...rest, geoms: listed.map(withMeshChecks), children: [] } as SceneNode),
+    ...(summarizeCurve ? {
+      geomCount: baseListed.length,
+      curve: {
+        segments: baseListed.length,
+        ...(node.curvePoints ? { controlPoints: node.curvePoints.length } : {}),
+        ...(node.curveWidth !== undefined ? { widthMm: +(node.curveWidth * 1000).toFixed(2) } : {}),
+        ...(node.curveThickness !== undefined ? { thicknessMm: +(node.curveThickness * 1000).toFixed(2) } : {}),
+        ...(node.curveClosed ? { closed: true } : {}),
+        ...(node.curveBank ? { bankDeg: node.curveBank } : {}),
+      },
+    } : {}),
     ...(opts.full && csgScad !== undefined ? { csgScad } : {}),
     ...(() => {
       const acoustics = acousticsOf(node, opts.scene);

@@ -301,6 +301,58 @@ function frameToQuat(x: number[], y: number[], z: number[]): number[] {
   return [qw / n, qx / n, qy / n, qz / n];
 }
 
+type Vec3 = [number, number, number];
+
+function cross3(a: Vec3, b: Vec3): Vec3 {
+  return [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ];
+}
+
+function dot3(a: Vec3, b: Vec3): number {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+function normalize3(v: Vec3): Vec3 {
+  const len = Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+  if (len < 1e-12) return [0, 0, 0];
+  return [v[0] / len, v[1] / len, v[2] / len];
+}
+
+/**
+ * Minimal-rotation parallel transport (Bishop frame) of the cross-section
+ * lateral axis `yPrev` from unit tangent `tPrev` to unit tangent `tCurr`.
+ * Keeps horizontal tracks identical to world-up framing while eliminating the
+ * ~90-degree gimbal snap and center jump near vertical tangents.
+ */
+function transportNormal(tPrev: Vec3, yPrev: Vec3, tCurr: Vec3): Vec3 {
+  const d = Math.max(-1, Math.min(1, dot3(tPrev, tCurr)));
+  let yNext: Vec3;
+  if (d > 1 - 1e-10 || d < -1 + 1e-10) {
+    yNext = [yPrev[0], yPrev[1], yPrev[2]];
+  } else {
+    const c = cross3(tPrev, tCurr);
+    const s = Math.sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]);
+    const axis: Vec3 = [c[0] / s, c[1] / s, c[2] / s];
+    const axCrossY = cross3(axis, yPrev);
+    const axDotY = dot3(axis, yPrev);
+    const oneMinusD = 1 - d;
+    yNext = [
+      yPrev[0] * d + axCrossY[0] * s + axis[0] * axDotY * oneMinusD,
+      yPrev[1] * d + axCrossY[1] * s + axis[1] * axDotY * oneMinusD,
+      yPrev[2] * d + axCrossY[2] * s + axis[2] * axDotY * oneMinusD,
+    ];
+  }
+  const proj = dot3(yNext, tCurr);
+  return normalize3([
+    yNext[0] - proj * tCurr[0],
+    yNext[1] - proj * tCurr[1],
+    yNext[2] - proj * tCurr[2],
+  ]);
+}
+
 export function generateCurveGeoms(
   id: string,
   points: number[][] = DEFAULT_CURVE_POINTS,
@@ -316,43 +368,68 @@ export function generateCurveGeoms(
     ? sampleCatmullRom(points, nSeg, true)
     : sampleCatmullRom(points, nSeg + 1);
   const bank = (bankDeg * Math.PI) / 180;
-  const cosB = Math.cos(bank), sinB = Math.sin(bank);
-  const geoms: SceneGeom[] = [];
   const pairCount = closed ? samples.length : samples.length - 1;
+
+  const segs: Array<{ index: number; a: number[]; b: number[]; len: number; xAxis: Vec3 }> = [];
   for (let i = 0; i < pairCount; i++) {
     const a = samples[i], b = samples[(i + 1) % samples.length];
     const d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
     const len = Math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
     if (len < 1e-6) continue;
-    const xAxis = [d[0] / len, d[1] / len, d[2] / len];
-    // Flat-banked frame: yAxis horizontal, zAxis the "up-ish" surface normal.
-    const ref = Math.abs(xAxis[2]) > 0.99 ? [0, 1, 0] : [0, 0, 1];
-    const yRaw = [
-      ref[1] * xAxis[2] - ref[2] * xAxis[1],
-      ref[2] * xAxis[0] - ref[0] * xAxis[2],
-      ref[0] * xAxis[1] - ref[1] * xAxis[0],
-    ];
-    const yLen = Math.sqrt(yRaw[0] * yRaw[0] + yRaw[1] * yRaw[1] + yRaw[2] * yRaw[2]) || 1;
-    let yAxis = [yRaw[0] / yLen, yRaw[1] / yLen, yRaw[2] / yLen];
-    let zAxis = [
-      xAxis[1] * yAxis[2] - xAxis[2] * yAxis[1],
-      xAxis[2] * yAxis[0] - xAxis[0] * yAxis[2],
-      xAxis[0] * yAxis[1] - xAxis[1] * yAxis[0],
-    ];
-    if (bank !== 0) {
+    segs.push({ index: i, a, b, len, xAxis: [d[0] / len, d[1] / len, d[2] / len] });
+  }
+  if (segs.length === 0) return [];
+
+  // Seed initial frame with world-up when non-vertical (matches flat-banked tracks),
+  // then parallel-transport minimally from each segment to the next.
+  const t0 = segs[0].xAxis;
+  const initRef: Vec3 = Math.abs(t0[2]) > 0.99 ? [0, 1, 0] : [0, 0, 1];
+  const y0 = normalize3(cross3(initRef, t0));
+  const z0 = normalize3(cross3(t0, y0));
+
+  const frames: Array<{ x: Vec3; y: Vec3; z: Vec3 }> = [{ x: t0, y: y0, z: z0 }];
+  for (let k = 1; k < segs.length; k++) {
+    const prev = frames[k - 1];
+    const tCurr = segs[k].xAxis;
+    const yCurr = transportNormal(prev.x, prev.y, tCurr);
+    const zCurr = normalize3(cross3(tCurr, yCurr));
+    frames.push({ x: tCurr, y: yCurr, z: zCurr });
+  }
+
+  // For closed loops, distribute any residual parallel-transport holonomy twist
+  // evenly around the loop so the seam between last and first segment is continuous.
+  let closedTwist = 0;
+  if (closed && segs.length >= 2) {
+    const last = frames[frames.length - 1];
+    const yWrap = transportNormal(last.x, last.y, t0);
+    closedTwist = Math.atan2(dot3(yWrap, z0), dot3(yWrap, y0));
+  }
+
+  const geoms: SceneGeom[] = [];
+  let prevQuat: number[] | null = null;
+  for (let k = 0; k < segs.length; k++) {
+    const { index, a, b, len } = segs[k];
+    const xAxis = frames[k].x;
+    let yAxis = frames[k].y;
+    let zAxis = frames[k].z;
+    const phi = bank - (closedTwist * k) / segs.length;
+    if (phi !== 0) {
       // Roll the cross-section about the tangent: positive bank raises the
       // +y (left-of-travel) edge, tipping the surface toward the right.
-      const yB = [
-        cosB * yAxis[0] + sinB * zAxis[0],
-        cosB * yAxis[1] + sinB * zAxis[1],
-        cosB * yAxis[2] + sinB * zAxis[2],
+      const cosP = Math.cos(phi);
+      const sinP = Math.sin(phi);
+      const yB: Vec3 = [
+        cosP * yAxis[0] + sinP * zAxis[0],
+        cosP * yAxis[1] + sinP * zAxis[1],
+        cosP * yAxis[2] + sinP * zAxis[2],
       ];
-      const zB = [
-        -sinB * yAxis[0] + cosB * zAxis[0],
-        -sinB * yAxis[1] + cosB * zAxis[1],
-        -sinB * yAxis[2] + cosB * zAxis[2],
+      const zB: Vec3 = [
+        -sinP * yAxis[0] + cosP * zAxis[0],
+        -sinP * yAxis[1] + cosP * zAxis[1],
+        -sinP * yAxis[2] + cosP * zAxis[2],
       ];
-      yAxis = yB; zAxis = zB;
+      yAxis = yB;
+      zAxis = zB;
     }
     // Center sits half a thickness below the spline so the TOP face is the track.
     const halfT = thickness / 2;
@@ -363,12 +440,18 @@ export function generateCurveGeoms(
     ];
     // Slight tangential overlap hides the gaps where adjacent segments meet.
     const halfL = len / 2 + Math.min(len * 0.35, thickness * 0.5);
+    let quat = frameToQuat(xAxis, yAxis, zAxis);
+    if (prevQuat) {
+      const qDot = prevQuat[0] * quat[0] + prevQuat[1] * quat[1] + prevQuat[2] * quat[2] + prevQuat[3] * quat[3];
+      if (qDot < 0) quat = [-quat[0], -quat[1], -quat[2], -quat[3]];
+    }
+    prevQuat = quat;
     geoms.push({
-      name: `${id}_seg${i}`,
+      name: `${id}_seg${index}`,
       type: 'box',
       size: [halfL, width / 2, halfT],
       pos: center,
-      quat: frameToQuat(xAxis, yAxis, zAxis),
+      quat,
       rgba: [...rgba],
     });
   }

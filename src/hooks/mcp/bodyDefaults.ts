@@ -871,6 +871,7 @@ export const fillBodyDefaults = (
       curveSegments:  b.curveSegments  ?? DEFAULT_CURVE_SEGMENTS,
       curveClosed:    b.curveClosed === true,
       curveBank:      b.curveBank      ?? 0,
+      ...(normalizeRgba(b.rgba) ? { rgba: normalizeRgba(b.rgba)! } : {}),
     } : {}),
   };
   // A body free to move, given no pos, stands on the floor where it is drawn

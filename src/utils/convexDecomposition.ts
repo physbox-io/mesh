@@ -784,7 +784,7 @@ function cavityWarning(cavities: NonNullable<ColliderResult['cavities']>): strin
  * body someone picks up rather than one of its meshes.
  */
 function massWarning(node: SceneNode, decomposed: MeshColliders[]): string | undefined {
-  if (node.collisionMass !== undefined) return undefined;
+  if (node.collisionMass !== undefined || node.mass != null) return undefined;
   const hollow = decomposed.filter(p => p.source.mass === undefined && p.volume > 0);
   const volume = hollow.reduce((v, p) => v + p.volume, 0);
   const hullVolume = hollow.reduce((v, p) => v + p.hullVolume, 0);

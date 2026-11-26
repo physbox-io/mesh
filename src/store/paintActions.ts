@@ -140,6 +140,9 @@ export function paintActions({ set, get }: SliceDeps): PaintActions {
       for (const geom of targets) {
         geom.rgba = [rgba[0] ?? 0.8, rgba[1] ?? 0.8, rgba[2] ?? 0.8, rgba[3] ?? geom.rgba?.[3] ?? 1];
       }
+      if (!geomName && node.isCurve && targets[0].rgba) {
+        (node as SceneNode & { rgba?: number[] }).rgba = [...targets[0].rgba];
+      }
 
       // Base colour does go into the MJCF, unlike paint, so this one recompiles —
       // once for the whole body rather than once per geom.
@@ -196,6 +199,9 @@ export function paintActions({ set, get }: SliceDeps): PaintActions {
         for (const geom of targets) {
           geom.rgba = [entry.rgba[0] ?? 0.8, entry.rgba[1] ?? 0.8, entry.rgba[2] ?? 0.8, explicitAlpha ?? geom.rgba?.[3] ?? 1];
           colored += 1;
+        }
+        if (!entry.geomName && node.isCurve && targets[0]?.rgba) {
+          (node as SceneNode & { rgba?: number[] }).rgba = [...targets[0].rgba];
         }
       }
       if (colored > 0) {
