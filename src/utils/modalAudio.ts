@@ -209,7 +209,7 @@ function collectAcousticSubtree(node: SceneNode): { geoms: SceneGeom[]; material
     const allSolid: SceneGeom[] = [];
     for (let i = 0; i < raw.length; i++) {
       const g = raw[i];
-      if (g.csgDerived || g.csg === 'difference' || g.role === 'visual' || g.type === 'plane') continue;
+      if (g.csgDerived || g.csg === 'difference' || g.role === 'visual' || g.role === 'collision' || g.type === 'plane') continue;
       allSolid.push(g);
       if (!(g.contype === 0 && g.conaffinity === 0)) colliding.push(g);
     }
@@ -225,7 +225,7 @@ function collectAcousticSubtree(node: SceneNode): { geoms: SceneGeom[]; material
   const visit = (n: SceneNode, isRoot: boolean) => {
     if (!isRoot && ((n.joints?.length ?? 0) > 0 || n.simulation || n.acousticString)) return;
     for (const g of n.geoms ?? []) {
-      if (g.csgDerived || g.csg === 'difference' || g.role === 'visual' || g.type === 'plane') continue;
+      if (g.csgDerived || g.csg === 'difference' || g.role === 'visual' || g.role === 'collision' || g.type === 'plane') continue;
       allSolid.push({ geom: g, host: n });
       const disabled = g.contype === 0 && g.conaffinity === 0;
       if (!disabled) colliding.push({ geom: g, host: n });

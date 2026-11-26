@@ -307,7 +307,7 @@ describe('H9, M1, M5: BODY_CUT, COMBINE_BODIES, APPLY_PATTERN, KNIFE, IMPORT_STL
     const box = makeBoxNode('box1');
     useStore.setState({ sceneGraph: { nodes: [box] } });
 
-    expect(applySingleCutToBody('box1', { shape: 'countersink' }).ok).toBe(false);
+    expect(applySingleCutToBody('box1', { shape: 'dovetail' }).ok).toBe(false);
     expect(applySingleCutToBody('box1', { shape: 'hole', diameterMm: NaN }).ok).toBe(false);
     expect(applySingleCutToBody('box1', { shape: 'hole', depthMm: -5 }).ok).toBe(false);
     expect(applySingleCutToBody('box1', { shape: 'hole', normal: [0, 0, 0] }).ok).toBe(false);

@@ -92,7 +92,7 @@ describe('framing a body in the scene', () => {
     const beside = frameBodyInScene(scene, 'b', { placement: 'beside' });
     expect(beside.nodes[0].id).toBe('b');
     // Clear of the 1 m box along +X.
-    const xs = beside.nodes.slice(1).flatMap((n) => n.geoms?.[0]?.fromto ? [n.geoms[0].fromto[0], n.geoms[0].fromto[3]] : []);
+    const xs = beside.nodes.slice(1).flatMap((n) => n.geoms?.[0]?.fromto ? [(n.pos?.[0] ?? 0) + n.geoms[0].fromto[0], (n.pos?.[0] ?? 0) + n.geoms[0].fromto[3]] : []);
     expect(Math.min(...xs)).toBeGreaterThan(0.5);
     // Every pipe in the frame has the cut list's attention, and a fitting at both ends.
     const bd = breakdownPipeFrame({ nodes: replaced.nodes } as unknown as SceneGraph);

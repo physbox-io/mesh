@@ -236,7 +236,7 @@ describe('scaling acoustic bodies', () => {
     expect(c.windInstrument!.boreLengthM).toBeCloseTo(1.2, 9);
     expect(c.windInstrument!.mouthRadiusM).toBeCloseTo(0.02, 9);
     expect(c.windInstrument!.bellRadiusM).toBeCloseTo(0.08, 9);
-    expect(c.windInstrument!.toneholeJoints![0].diameterMm).toBeCloseTo(21, 9);
+    expect(c.windInstrument!.toneholeJoints![0].diameterMm).toBeCloseTo(24, 9);
     expect(c.tunedPitchHz).toBeUndefined();
 
     scaleNodeTree('brass_bugle_horn', 2, 3, 4);

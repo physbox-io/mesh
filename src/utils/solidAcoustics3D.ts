@@ -665,7 +665,7 @@ export function buildBodyRayScene(
     const geoms = n.geoms ?? [];
     // Source geoms (!csgDerived) capture live primitives, live CSG boolean cutters, AND live Sculpt meshes!
     // Fall back to compiled visual mesh only if no source geoms exist.
-    const sourceGeoms = geoms.filter((g) => !g.csgDerived && g.role !== 'visual' && g.type !== 'plane');
+    const sourceGeoms = geoms.filter((g) => !g.csgDerived && g.role !== 'visual' && g.role !== 'collision' && g.type !== 'plane');
     const chosenList = sourceGeoms.length > 0
       ? sourceGeoms
       : geoms.filter((g) => g.csgDerived === 'visual' && g.type === 'mesh');
@@ -1161,7 +1161,7 @@ function computeNodeGeomSignature(node: SceneNode): string {
   ];
   const visit = (n: SceneNode, prefix: string) => {
     for (const g of n.geoms ?? []) {
-      if (g.csgDerived || g.role === 'visual' || g.type === 'plane') continue;
+      if (g.csgDerived || g.role === 'visual' || g.role === 'collision' || g.type === 'plane') continue;
       const rv = g.type === 'mesh' ? getZUpMeshVertices(g) : (g.renderVertices ?? g.vertices);
       let meshHash = '';
       if (rv && rv.length > 0) {
@@ -1345,7 +1345,7 @@ function detectSingleSolidPrincipalPose(node: SceneNode): THREE.Matrix4 | null {
   let hasWeldedChildSolid = false;
   for (const ch of node.children ?? []) {
     if ((ch.joints?.length ?? 0) > 0 || ch.simulation || ch.acousticString || ch.acousticMembrane) continue;
-    if ((ch.geoms ?? []).some((g) => !g.csgDerived && g.role !== 'visual' && g.type !== 'plane' && g.csg !== 'difference')) {
+    if ((ch.geoms ?? []).some((g) => !g.csgDerived && g.role !== 'visual' && g.role !== 'collision' && g.type !== 'plane' && g.csg !== 'difference')) {
       hasWeldedChildSolid = true;
       break;
     }
@@ -1353,7 +1353,7 @@ function detectSingleSolidPrincipalPose(node: SceneNode): THREE.Matrix4 | null {
   if (hasWeldedChildSolid) return null;
 
   const allowCsg = node.csgEnabled !== false;
-  const sourceGeoms = (node.geoms ?? []).filter((g) => !g.csgDerived && g.role !== 'visual' && g.type !== 'plane');
+  const sourceGeoms = (node.geoms ?? []).filter((g) => !g.csgDerived && g.role !== 'visual' && g.role !== 'collision' && g.type !== 'plane');
   for (const g of sourceGeoms) {
     const op = allowCsg ? g.csg : undefined;
     if (op === 'difference' || op === 'intersection') continue;

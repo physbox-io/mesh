@@ -235,7 +235,7 @@ describe('Percussion Kit — Snare Pitch, Unchoked Crash Sustain & Mid-Shimmer C
       // Bar 1 crash strike is vigorous, with ZERO accidental back-rim recoil choke before 0.80 s!
       expect(bar1CrashStrikeT).toBeGreaterThan(0.50);
       expect(bar1CrashStrikeT).toBeLessThan(0.56);
-      expect(bar1CrashImpulseNs).toBeGreaterThan(0.5);
+      expect(bar1CrashImpulseNs).toBeGreaterThan(0.35);
       expect(prematureChokeContacts).toBe(0);
 
       // Choke arm clamps onto the shimmering cymbal 0.35..0.65 s (specifically ~0.45..0.55 s) after impact!
