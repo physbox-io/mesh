@@ -207,7 +207,7 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
         'scad', 'csgEnabled', 'csgCollision', 'csgSectors', 'csgFn', 'csgHoleAxis', 'csgMass', 'csgHash', 'csgScad',
         'csgVolume', 'csgHullVolume', 'csgCentroid', 'csgWarning', 'csgError', 'edgeRounds', 'edgeRoundsLost',
         'collisionHash', 'collisionDecomposed', 'collisionSolidity', 'collisionCavities', 'collisionIntrusion', 'collisionUncovered', 'collisionWarning', 'collisionError',
-        'basePos', 'tunedPitchHz',
+        'basePos', 'tunedPitchHz', 'simulation',
       ] as const;
       const strip = (n: SceneNode) => {
         for (const key of GENERATORS) delete (n as unknown as Record<string, unknown>)[key];

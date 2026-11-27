@@ -534,6 +534,7 @@ export const castCommands: McpCommands = {
       result = exportPrintFiles(store.sceneGraph, {
         format,
         ids,
+        moldParts: ids.length > 0,
         separate,
         ...(typeof msg.plate === 'boolean' ? { plate: msg.plate } : {}),
         ...(typeof msg.filaments === 'number' ? { filaments: msg.filaments } : {}),
