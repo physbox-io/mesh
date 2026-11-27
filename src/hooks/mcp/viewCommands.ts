@@ -4,7 +4,7 @@
 // screenshot, reference images, note cards, and the schema
 // ---------------------------------------------------------------------------
 
-import { useViewQuality } from '../../store/viewQualityStore';
+import { useViewQuality, usePathTraceStatus } from '../../store/viewQualityStore';
 import { useCapture } from '../../store/captureStore';
 import { useSoundStore } from '../../store/soundStore';
 import { renderViewportNow } from '../../utils/viewportCapture';
@@ -199,6 +199,14 @@ async function takeScreenshot(msg: Record<string, unknown>, waitedInQueue = fals
     scale = msg.scale;
   }
 
+  let renderSamples = 16;
+  if (msg.renderSamples !== undefined && msg.renderSamples !== null) {
+    if (typeof msg.renderSamples !== 'number' || !Number.isFinite(msg.renderSamples) || msg.renderSamples < 1 || msg.renderSamples > 512) {
+      return { ok: false, error: 'renderSamples must be a finite number between 1 and 512.' };
+    }
+    renderSamples = Math.round(msg.renderSamples);
+  }
+
   const win = getPhysicsWindow();
   const gl = win?._physics_gl;
   if (!gl || !gl.domElement) return { ok: false, error: 'Renderer not ready yet' };
@@ -213,20 +221,25 @@ async function takeScreenshot(msg: Record<string, unknown>, waitedInQueue = fals
     colliders: viewQuality.showColliders,
     edges: useStore.getState().showEdges,
     wireframe: useStore.getState().wireframe,
+    render: viewQuality.pathTrace,
   };
   const wanted = {
     colliders: typeof msg.showColliders === 'boolean' ? msg.showColliders : before.colliders,
     edges: typeof msg.showEdges === 'boolean' ? msg.showEdges : before.edges,
     wireframe: typeof msg.wireframe === 'boolean' ? msg.wireframe : before.wireframe,
+    render: typeof msg.render === 'boolean' ? msg.render : before.render,
   };
   const apply = (v: typeof before) => {
-    if (useViewQuality.getState().showColliders !== v.colliders) useViewQuality.getState().setShowColliders(v.colliders);
+    const vq = useViewQuality.getState();
+    if (vq.showColliders !== v.colliders) vq.setShowColliders(v.colliders);
+    if (vq.pathTrace !== v.render) vq.setPathTrace(v.render);
     const s = useStore.getState();
     if (s.showEdges !== v.edges) s.toggleShowEdges();
     if (s.wireframe !== v.wireframe) s.toggleWireframe();
   };
   const overridden = wanted.colliders !== before.colliders
-    || wanted.edges !== before.edges || wanted.wireframe !== before.wireframe;
+    || wanted.edges !== before.edges || wanted.wireframe !== before.wireframe
+    || wanted.render !== before.render;
   const clean = msg.clean === true;
   if (overridden) apply(wanted);
   if (clean) useCapture.setState({ clean: true });
@@ -236,37 +249,84 @@ async function takeScreenshot(msg: Record<string, unknown>, waitedInQueue = fals
   let dataUrl: string;
   let capturedWidth: number;
   let capturedHeight: number;
+  let actualRenderSamples: number | undefined;
   try {
-    if (overridden || clean) {
-      restoreRenderer = pauseRendererDuringFlush(win?._physics_composer, gl);
+    if (wanted.render) {
+      // Wait for PathTracedView to build/compile and accumulate target samples,
+      // then read the path-traced canvas directly without overwriting it with
+      // the raster composer.
       await flushReactCommit();
-    }
-    // If anything (e.g. a background V-HACD collider install or recompile)
-    // stalled the main thread during the flush, yield one fresh macrotask so
-    // useMCPBridge's 2 s WORKING heartbeat can fire before renderViewportNow().
-    if (Date.now() - startMs >= 250) await yieldMacrotask();
-    restoreRenderer?.();
-    restoreRenderer = null;
-    if (clean) restoreOutlines = suppressComposerOutlines(win?._physics_composer);
-    const scaleState = applyRenderScale(gl, win?._physics_composer, scale);
-    restoreScale = scaleState.restore;
-    // Through the composer when there is one; see renderViewportNow.
-    renderViewportNow();
-    if (scale < 1 && !scaleState.scaledRenderer) {
-      const down = downsampleCanvas(gl.domElement, scale);
-      if (down) {
-        dataUrl = down.dataUrl;
-        capturedWidth = down.width;
-        capturedHeight = down.height;
+      const target = renderSamples;
+      const statusNow = usePathTraceStatus.getState();
+      const alreadyDone = before.render
+        && (statusNow.phase === 'done' || (statusNow.phase === 'rendering' && statusNow.samples >= target));
+      if (!alreadyDone) {
+        await new Promise<void>((resolve) => {
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            unsub();
+            clearTimeout(timer);
+            resolve();
+          };
+          const unsub = usePathTraceStatus.subscribe((st) => {
+            if (st.phase === 'done' || (st.phase === 'rendering' && st.samples >= target)) finish();
+          });
+          const timer = setTimeout(finish, 45_000);
+          const cur = usePathTraceStatus.getState();
+          if (cur.phase === 'done' || (cur.phase === 'rendering' && cur.samples >= target)) finish();
+        });
+      }
+      actualRenderSamples = usePathTraceStatus.getState().samples;
+      if (scale < 1) {
+        const down = downsampleCanvas(gl.domElement, scale);
+        if (down) {
+          dataUrl = down.dataUrl;
+          capturedWidth = down.width;
+          capturedHeight = down.height;
+        } else {
+          dataUrl = gl.domElement.toDataURL('image/png');
+          capturedWidth = gl.domElement.width;
+          capturedHeight = gl.domElement.height;
+        }
       } else {
         dataUrl = gl.domElement.toDataURL('image/png');
         capturedWidth = gl.domElement.width;
         capturedHeight = gl.domElement.height;
       }
     } else {
-      dataUrl = gl.domElement.toDataURL('image/png');
-      capturedWidth = gl.domElement.width;
-      capturedHeight = gl.domElement.height;
+      if (overridden || clean) {
+        restoreRenderer = pauseRendererDuringFlush(win?._physics_composer, gl);
+        await flushReactCommit();
+      }
+      // If anything (e.g. a background V-HACD collider install or recompile)
+      // stalled the main thread during the flush, yield one fresh macrotask so
+      // useMCPBridge's 2 s WORKING heartbeat can fire before renderViewportNow().
+      if (Date.now() - startMs >= 250) await yieldMacrotask();
+      restoreRenderer?.();
+      restoreRenderer = null;
+      if (clean) restoreOutlines = suppressComposerOutlines(win?._physics_composer);
+      const scaleState = applyRenderScale(gl, win?._physics_composer, scale);
+      restoreScale = scaleState.restore;
+      // Through the composer when there is one; see renderViewportNow.
+      renderViewportNow();
+      if (scale < 1 && !scaleState.scaledRenderer) {
+        const down = downsampleCanvas(gl.domElement, scale);
+        if (down) {
+          dataUrl = down.dataUrl;
+          capturedWidth = down.width;
+          capturedHeight = down.height;
+        } else {
+          dataUrl = gl.domElement.toDataURL('image/png');
+          capturedWidth = gl.domElement.width;
+          capturedHeight = gl.domElement.height;
+        }
+      } else {
+        dataUrl = gl.domElement.toDataURL('image/png');
+        capturedWidth = gl.domElement.width;
+        capturedHeight = gl.domElement.height;
+      }
     }
   } finally {
     restoreScale?.();
@@ -278,13 +338,15 @@ async function takeScreenshot(msg: Record<string, unknown>, waitedInQueue = fals
 
   const ink = (typeof document !== 'undefined' && document.documentElement?.classList?.contains('dark')) ? 'white' : 'black';
   const notes: string[] = [];
-  if (wanted.edges) {
+  if (wanted.render) {
+    notes.push(`Ray-traced Render mode (${actualRenderSamples ?? 0} samples).`);
+  } else if (wanted.edges) {
     notes.push(`Edges view is on: the thin ${ink} lines along corners, and ${ink} specks on fine detail (text, patterns, sculpted creases, small holes), are ink lines drawn on edges sharper than 20-30 degrees, not geometry or defects. Pass show_edges: false for a frame without them.`);
   }
-  if (wanted.wireframe) {
+  if (wanted.wireframe && !wanted.render) {
     notes.push('Wireframe view is on: bodies are drawn as their triangle edges, see-through, not as shaded solids. Pass wireframe: false for a shaded frame.');
   }
-  if (wanted.colliders) {
+  if (wanted.colliders && !wanted.render) {
     notes.push('Collider overlay is on: coloured outlines are what the physics collides, drawn over the bodies.');
   }
   return {
@@ -295,7 +357,14 @@ async function takeScreenshot(msg: Record<string, unknown>, waitedInQueue = fals
     // Says whether the frame was drawn to order or is whatever the
     // canvas happened to be holding.
     rendered: Boolean(win?._physics_scene && win?._physics_camera),
-    view: { ...wanted, clean, ...(scale !== 1 ? { scale } : {}) },
+    view: {
+      colliders: wanted.colliders,
+      edges: wanted.edges,
+      wireframe: wanted.wireframe,
+      clean,
+      ...(scale !== 1 ? { scale } : {}),
+      ...(wanted.render ? { render: true, renderSamples: actualRenderSamples } : {}),
+    },
     ...(notes.length ? { note: notes.join(' ') } : {}),
   };
 }

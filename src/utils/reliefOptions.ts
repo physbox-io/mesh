@@ -403,6 +403,8 @@ export interface ToolpathSegment {
    * is only honest if it models the same hop the machine will make.
    */
   traverseZ?: number;
+  /** True for rest-clearing passes emitted with the finishing tool before the final waterline/raster pass. */
+  rest?: boolean;
 }
 
 /**

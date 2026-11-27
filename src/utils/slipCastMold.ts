@@ -593,38 +593,74 @@ interface Split {
   total: number;
 }
 
-/**
- * The surface each piece pulls off, and what of it faces away. A face goes to
- * the base when there is one, it faces down and it is over the plug; to the
- * side wedge its centroid is in otherwise.
- */
+/** Precomputed per-sample polar angle and base-plug flag so angle search avoids repeated atan2 calls. */
+interface PreparedSamples {
+  samples: SurfaceSample[];
+  angles: Float64Array;
+  isBase: Uint8Array;
+  baseUndercut: number;
+}
+
+function prepareSamples(
+  samples: SurfaceSample[], axis: [number, number],
+  overBase: ((s: SurfaceSample) => boolean) | null,
+): PreparedSamples {
+  const n = samples.length;
+  const angles = new Float64Array(n);
+  const isBase = new Uint8Array(n);
+  let baseUndercut = 0;
+  for (let i = 0; i < n; i++) {
+    const s = samples[i];
+    if (overBase && overBase(s)) {
+      isBase[i] = 1;
+      if (-s.nz < UNDERCUT_COS) baseUndercut += s.area;
+    } else {
+      angles[i] = Math.atan2(s.y - axis[1], s.x - axis[0]);
+    }
+  }
+  return { samples, angles, isBase, baseUndercut };
+}
+
+function scoreSplitPrepared(prep: PreparedSamples, sides: number, theta: number): Split {
+  const undercut = new Array<number>(sides + 1).fill(0);
+  undercut[sides] = prep.baseUndercut;
+  const wedge = (2 * Math.PI) / sides;
+  const invWedge = 1 / wedge;
+  const cosB = new Float64Array(sides);
+  const sinB = new Float64Array(sides);
+  for (let j = 0; j < sides; j++) {
+    const bis = theta + (j + 0.5) * wedge;
+    cosB[j] = Math.cos(bis);
+    sinB[j] = Math.sin(bis);
+  }
+  const { samples, angles, isBase } = prep;
+  const TAU = 2 * Math.PI;
+  for (let i = 0; i < samples.length; i++) {
+    if (isBase[i]) continue;
+    let a = angles[i] - theta;
+    a = ((a % TAU) + TAU) % TAU;
+    const j = Math.min(sides - 1, Math.floor(a * invWedge));
+    const s = samples[i];
+    if (s.nx * cosB[j] + s.ny * sinB[j] < UNDERCUT_COS) undercut[j] += s.area;
+  }
+  let total = 0;
+  for (let j = 0; j <= sides; j++) total += undercut[j];
+  return { sides, theta, undercut, total };
+}
+
 function scoreSplit(
   samples: SurfaceSample[], axis: [number, number], sides: number, theta: number,
   overBase: ((s: SurfaceSample) => boolean) | null,
 ): Split {
-  const undercut = new Array<number>(sides + 1).fill(0);
-  const wedge = (2 * Math.PI) / sides;
-  for (const s of samples) {
-    if (overBase && overBase(s)) {
-      if (-s.nz < UNDERCUT_COS) undercut[sides] += s.area;
-      continue;
-    }
-    let a = Math.atan2(s.y - axis[1], s.x - axis[0]) - theta;
-    a = ((a % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
-    const j = Math.min(sides - 1, Math.floor(a / wedge));
-    const bis = theta + (j + 0.5) * wedge;
-    const dot = s.nx * Math.cos(bis) + s.ny * Math.sin(bis);
-    if (dot < UNDERCUT_COS) undercut[j] += s.area;
-  }
-  return { sides, theta, undercut, total: undercut.reduce((x, y) => x + y, 0) };
+  return scoreSplitPrepared(prepareSamples(samples, axis, overBase), sides, theta);
 }
 
 /** The best turn of the split for a number of sides: least undercut, every 2°. */
-function bestTurn(samples: SurfaceSample[], axis: [number, number], sides: number, overBase: ((s: SurfaceSample) => boolean) | null): Split {
+function bestTurnPrepared(prep: PreparedSamples, sides: number): Split {
   const span = (2 * Math.PI) / sides;
   let best: Split | null = null;
   for (let deg = 0; deg * DEG < span - 1e-9; deg += 2) {
-    const s = scoreSplit(samples, axis, sides, deg * DEG, overBase);
+    const s = scoreSplitPrepared(prep, sides, deg * DEG);
     if (!best || s.total < best.total - 1e-6) best = s;
   }
   return best!;
@@ -638,16 +674,28 @@ export function chooseSplit(
   samples: SurfaceSample[], axis: [number, number], sides: number | 'auto',
   overBase: ((s: SurfaceSample) => boolean) | null,
 ): Split {
-  if (sides !== 'auto') return bestTurn(samples, axis, Math.max(2, Math.min(MAX_SLIP_SIDES, Math.round(sides))), overBase);
-  const area = samples.reduce((a, s) => a + s.area, 0);
+  const fullPrep = prepareSamples(samples, axis, overBase);
+  // For very dense meshes (30k-60k tris), stride-subsample for the 2° search
+  // then evaluate the winning split on the full sample set for exact undercutMm2.
+  const searchPrep = samples.length > 6000
+    ? prepareSamples(samples.filter((_, i) => i % Math.ceil(samples.length / 6000) === 0), axis, overBase)
+    : fullPrep;
+  if (sides !== 'auto') {
+    const k = Math.max(2, Math.min(MAX_SLIP_SIDES, Math.round(sides)));
+    const winner = bestTurnPrepared(searchPrep, k);
+    return searchPrep === fullPrep ? winner : scoreSplitPrepared(fullPrep, k, winner.theta);
+  }
+  const area = searchPrep.samples.reduce((a, s) => a + s.area, 0);
   let least: Split | null = null;
   for (let k = 2; k <= MAX_SLIP_SIDES; k++) {
-    const s = bestTurn(samples, axis, k, overBase);
-    if (s.total <= area * 0.002) return s;
+    const s = bestTurnPrepared(searchPrep, k);
+    if (s.total <= area * 0.002) {
+      return searchPrep === fullPrep ? s : scoreSplitPrepared(fullPrep, k, s.theta);
+    }
     // More pieces must earn their keep: a quarter less undercut each.
     if (!least || s.total < least.total * 0.75) least = s;
   }
-  return least!;
+  return searchPrep === fullPrep ? least! : scoreSplitPrepared(fullPrep, least!.sides, least!.theta);
 }
 
 /**

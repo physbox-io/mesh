@@ -457,6 +457,12 @@ export const fillBodyDefaults = (
     throw new Error('Each body descriptor must be a plain object.');
   }
   const b = withoutNulls({ ...rawB });
+  // Accept `position` as a friendly alias for `pos` when `pos` is omitted.
+  const bAlias = b as Record<string, unknown>;
+  if (b.pos === undefined && bAlias.position !== undefined) {
+    b.pos = bAlias.position as [number, number, number];
+    delete bAlias.position;
+  }
   const name = b.name ?? b.id ?? `body_${Math.random().toString(36).slice(2, 7)}`;
   const id   = b.id   ?? name;
   const breakError = resolveBreakFields(b as Record<string, unknown>, undefined);

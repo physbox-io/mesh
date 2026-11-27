@@ -10,7 +10,7 @@ import type { SlipCastInput, SlipCastResult } from './slipCastSimulation';
 import type { SlipMoldRequest, SlipMoldResponse } from '../workers/slipMoldProtocol';
 import { workerStoppedError } from './staleBuild';
 
-const SLIP_TIMEOUT_MS = 120_000;
+const SLIP_TIMEOUT_MS = 240_000;
 
 /** A queued slip-mold PLAN superseded by a newer edit for the same subject. */
 export class SlipMoldSupersededError extends Error {

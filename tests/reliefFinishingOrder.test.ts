@@ -65,7 +65,7 @@ function upwardSteps(scene: SceneGraph, strategy: 'contour' | 'hybrid', rasterTo
   // A waterline holds one height all the way round; the link into it and the
   // odd point lifted off a wall do not.
   const runs = res.segments
-    .filter((s) => s.type === 'finishing')
+    .filter((s) => s.type === 'finishing' && !s.rest)
     .map((s) => {
       const zs = s.points.map((p) => p.z).sort((a, b) => a - b);
       const level = zs[Math.floor(zs.length / 2)];
