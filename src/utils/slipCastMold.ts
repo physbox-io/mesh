@@ -1386,9 +1386,7 @@ function build(
     fill = o.fillInside ? insideFill(wasm, part, zMin, zTop) : null;
     if (fill) filled = part.add(fill);
     const zBlockTop = zTop + Math.max(5, o.spareHeightMm);
-    const spareAt: [number, number] | null = o.spareAtMm && o.spareAtMm.every(Number.isFinite)
-      ? [foot[0] + (o.spareAtMm[0] - foot[0]) * scale, foot[1] + (o.spareAtMm[1] - foot[1]) * scale]
-      : null;
+    const spareAt = o.spareAtMm && o.spareAtMm.every(Number.isFinite) ? o.spareAtMm : null;
     // The inside itself: the fill less the part (a fill slab borrows the part's
     // outlines next to a filled slice, so it holds lumps of wall too).
     inside = fill ? fill.subtract(part) : null;

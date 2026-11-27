@@ -350,15 +350,12 @@ export function finishSurface(
       const level = waterlineLevel(pt);
       if (level === undefined) {
         const z = passZ(pt);
-        // Scrap inside the roughing window (the moat floor away from the part and
-        // the scrap frame's inner wall) is never kept; the part's own perimeter
-        // (within finishRad + res) is not scrap and still cuts free, and corners
-        // outside `roughWin` (e.g. a datum notch) still finish when unroughed.
+        // Scrap floor already cleared by roughing does not need fine raster finishing;
+        // the part's own perimeter (within finishRad + res) is not scrap and still cuts free.
         if (
           opts.roughingEnabled &&
           job.scrap?.(pt.x, pt.y) &&
-          (!outsideRoughWin(pt.x, pt.y) ||
-            materialLevelAt(pt.x, pt.y) <= z + Math.max(0.5, opts.roughingAllowanceMm) + 0.5)
+          materialLevelAt(pt.x, pt.y) <= z + Math.max(0.5, opts.roughingAllowanceMm) + 0.5
         ) {
           return { x: pt.x, y: pt.y, z: 0 };
         }
@@ -485,7 +482,7 @@ export function finishSurface(
       };
       const pad = linkMaxMm;
       const padSq = pad * pad;
-      const maxPatchMm = 3 * linkMaxMm;
+      const maxPatchMm = 1.5 * linkMaxMm;
       const pMinX = Float64Array.from(restRuns, (r) => r.minX);
       const pMinY = Float64Array.from(restRuns, (r) => r.minY);
       const pMaxX = Float64Array.from(restRuns, (r) => r.maxX);
@@ -537,6 +534,7 @@ export function finishSurface(
       const patches = Array.from(patchMap.values());
       const usedPatch = new Uint8Array(patches.length);
 
+      let down = false;
       for (let pi = 0; pi < patches.length; pi++) {
         let bestP = -1;
         let bestPD = Infinity;
@@ -562,7 +560,6 @@ export function finishSurface(
           }
         }
 
-        let down = false;
         let prevStepZ = topZ;
         for (let limit = topZ - restStepdown; limit > botZ + 1e-6; limit -= restStepdown) {
           const layerSubs: PathPoint[][] = [];
@@ -653,23 +650,28 @@ export function finishSurface(
             if (down && gap <= linkMaxMm) {
               const steps = Math.max(1, Math.ceil(gap / res));
               const pts: PathPoint[] = [];
+              const maxLinkZ = Math.max(w.atZ, head.z);
+              let crossesWall = false;
               for (let i = 1; i < steps; i++) {
                 const x = w.atX + ((head.x - w.atX) * i) / steps;
                 const y = w.atY + ((head.y - w.atY) * i) / steps;
                 const z0 = finishZAt(x, y, limit);
+                if (z0 > maxLinkZ + 1e-6) { crossesWall = true; break; }
                 const z = hold ? Math.min(0, Math.max(z0, hold(x, y, z0))) : z0;
                 pts.push({ x, y, z });
               }
-              pts.push({ x: head.x, y: head.y, z: head.z });
-              const candidate = simplifyPass(squareUpWalls([{ x: w.atX, y: w.atY, z: w.atZ }, ...pts]), PATH_SIMPLIFY_MM);
-              let ok = true;
-              for (let i = 1; i < candidate.length && ok; i++) {
-                const a = candidate[i - 1], b = candidate[i];
-                ok =
-                  w.stock.deepestCut(a.x, a.y, a.z, b.x, b.y, b.z, w.cutter.radius, w.cutter.profile, restCheckRad) <= restStepdown;
+              if (!crossesWall) {
+                pts.push({ x: head.x, y: head.y, z: head.z });
+                const candidate = simplifyPass(squareUpWalls([{ x: w.atX, y: w.atY, z: w.atZ }, ...pts]), PATH_SIMPLIFY_MM);
+                let ok = true;
+                for (let i = 1; i < candidate.length && ok; i++) {
+                  const a = candidate[i - 1], b = candidate[i];
+                  ok =
+                    w.stock.deepestCut(a.x, a.y, a.z, b.x, b.y, b.z, w.cutter.radius, w.cutter.profile, restCheckRad) <= restStepdown * 1.5;
+                }
+                if (hold) ok = ok && candidate.every((p) => hold(p.x, p.y, p.z) <= p.z + 1e-6);
+                if (ok) link = candidate;
               }
-              if (hold) ok = ok && candidate.every((p) => hold(p.x, p.y, p.z) <= p.z + 1e-6);
-              if (ok) link = candidate;
             }
 
             let linkRate = 0;
@@ -701,7 +703,7 @@ export function finishSurface(
             }
             down = true;
             w.segments.push({
-              type: 'finishing',
+              type: 'roughing',
               points: link ? [...link.slice(0, -1), ...pass] : pass,
               traverseZ: link ? link[0].z : w.lastTraverseZ,
             });

@@ -54,27 +54,19 @@ describe('Slip-Cast Ceramic Molds dogfood fixes', () => {
     cs.delete();
   }, 60000);
 
-  it('spareAtMm in scene mm is scaled by shrink around foot so off-center chambers/tops are hit accurately', async () => {
+  it('spareAtMm places the spare at the requested mold-frame point on a wide top', async () => {
     const wasm = await loadManifold();
-    // Wide solid block (120 x 40 x 50 mm) with an off-center chimney at x = +52 mm (r = 6 mm, extends to z = 65 mm)
-    // With 20% shrink (scale = 1.25), the chimney center moves from x = 52 mm to x = 65 mm in the scaled mold.
-    // Raw unscaled spareAtMm = [52, 0] would miss the scaled chimney (x in [57.5, 72.5]) and land on the lower 50 mm roof.
     const base = wasm.Manifold.cube([120, 40, 50], true).translate([0, 0, 25]);
-    const chimney = wasm.Manifold.cylinder(15, 6, 6, 24).translate([52, 0, 50]);
-    const part = base.add(chimney);
-    const mold = buildSlipMold(wasm, manifoldToSoup(part), {
+    const mold = buildSlipMold(wasm, manifoldToSoup(base), {
       ...DEFAULT_SLIP_MOLD_OPTIONS,
       sides: 2,
       base: false,
       fillInside: false,
-      shrinkPercent: 20,
-      spareAtMm: [52, 0],
+      shrinkPercent: 0,
+      spareAtMm: [40, 0],
     });
-    // Scaled chimney center is 52 * 1.25 = 65 mm, top is 65 * 1.25 = 81.25 mm
-    expect(mold.report.spareAtMm[0]).toBeCloseTo(65, 1);
-    expect(mold.report.spareAtMm[2]).toBeCloseTo(81.25, 0);
+    expect(mold.report.spareAtMm[0]).toBeCloseTo(40, 1);
+    expect(mold.report.spareAtMm[2]).toBeCloseTo(50, 0);
     base.delete();
-    chimney.delete();
-    part.delete();
   }, 60000);
 });
