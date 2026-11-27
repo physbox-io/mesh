@@ -95,15 +95,19 @@ export function needsScadBuild(node: SceneNode): boolean {
  * by evaluateNodeCsg, in the same pass that builds its mesh. Two producers
  * writing colliders to one node would fight over them every compile.
  *
- * Also skips dress forms unless convex decomposition was explicitly requested
- * (`collision === 'decompose'`): cloth collides against exact form SDFs, so
- * decomposing 40 form meshes into ~600 convex pieces wasted seconds of WASM CPU.
+ * Also skips dress forms and fabrication tooling (slip-cast mold plaster/case
+ * pieces, silicone pour-box pieces) unless convex decomposition was explicitly
+ * requested (`collision === 'decompose'`): cloth collides against exact form
+ * SDFs, and mold tooling bodies are static fabrication reference meshes, so
+ * decomposing 15-40 concave meshes into hundreds of convex hulls wastes
+ * minutes of WASM CPU and stalls subsequent move/staging commands.
  */
-const shouldDecomposeBodyForm = (node: SceneNode) => !node.bodyForm || node.collision === 'decompose';
+const shouldAutoDecompose = (node: SceneNode) =>
+  (!node.bodyForm && !node.slipMold && !node.pourBox) || node.collision === 'decompose';
 
 function collectStaleColliders(nodes: SceneNode[], out: SceneNode[] = []): SceneNode[] {
   for (const node of nodes || []) {
-    if (!node.csgEnabled && shouldDecomposeBodyForm(node) && collidersAreStale(node)) out.push(node);
+    if (!node.csgEnabled && shouldAutoDecompose(node) && collidersAreStale(node)) out.push(node);
     collectStaleColliders(node.children || [], out);
   }
   return out;
@@ -232,7 +236,7 @@ export function pendingColliderBodies(): string[] {
   const out: string[] = [];
   const running = new Set(collidersInFlight.keys());
   const walk = (nodes: SceneNode[] = []) => nodes.forEach(n => {
-    if ((!n.csgEnabled && shouldDecomposeBodyForm(n) && collidersAreStale(n)) || running.has(n.id)) out.push(n.name);
+    if ((!n.csgEnabled && shouldAutoDecompose(n) && collidersAreStale(n)) || running.has(n.id)) out.push(n.name);
     walk(n.children);
   });
   walk(useStore.getState().sceneGraph.nodes);

@@ -30,7 +30,7 @@
 
 import type { CrossSection, Manifold, ManifoldToplevel } from 'manifold-3d';
 import { buildPartManifold } from './moldManifold';
-import { printedMeshOf } from './printedMesh';
+import { cleanManifoldMesh, printedMeshOf } from './printedMesh';
 import { castMaterial, castWeightG, mixGrams, type CastMaterialId } from './castMaterials';
 
 export interface SlipMoldOptions {
@@ -216,8 +216,13 @@ const DEG = Math.PI / 180;
 
 type Vec2 = [number, number];
 
+/** Cleaned float32-metre watertight mesh for exported/scene plaster & case parts. */
 function meshOf(m: Manifold): SlipMesh {
-  // Without the slivers booleans leave along their seams (see printedMesh.ts).
+  return cleanManifoldMesh(m);
+}
+
+/** Lightweight extraction for internal-only helper meshes (drafting, cavity/spare simulation inputs). */
+function rawMeshOf(m: Manifold): SlipMesh {
   return printedMeshOf(m);
 }
 
@@ -718,7 +723,7 @@ function draftForPieces(
   overBase: ((x: number, y: number, z: number, nz: number) => boolean) | null,
 ): Manifold {
   // Vertices on every parting line first, so the draft can leave them there.
-  const raw = meshOf(m);
+  const raw = rawMeshOf(m);
   const wedgeAngles: number[] = [];
   for (let j = 0; j < sides; j++) {
     const a = theta + j * ((2 * Math.PI) / sides);
@@ -740,9 +745,12 @@ function draftForPieces(
   for (let i = 0; i < nv; i++) top = Math.max(top, P[i * 3 + 2]);
   const rimZ = top - 2;
   // Per vertex, in its side's frame (e1 horizontal along the parting, e2 = +Z):
-  // Σ ĥĥᵀ and Σ ĥ of the walls round it.
+  // Σ w·ĥĥᵀ and Σ w·ĥ of the walls round it that actually need draft.
   const acc = new Float64Array(nv * 5);
+  const maxNeed = new Float64Array(nv);
   const FLAT = Math.sin(3 * DEG);
+  const needLo = Math.sin((deg + 2) * DEG);
+  const needHi = Math.sin(Math.max(deg + 12, 22) * DEG);
   for (let f = 0; f < T.length; f += 3) {
     const ia = T[f] * 3, ib = T[f + 1] * 3, ic = T[f + 2] * 3;
     const ux = P[ib] - P[ia], uy = P[ib + 1] - P[ia + 1], uz = P[ib + 2] - P[ia + 2];
@@ -758,14 +766,22 @@ function draftForPieces(
     for (let q = 0; q < 3; q++) {
       const v = T[f + q];
       const bis = theta + (sectorOf[v] + 0.5) * wedge;
+      // Faces that already have ample draft along this piece's pull (e.g.
+      // front-facing helical flutes or surface reliefs) must not be shifted
+      // perpendicular to the pull, or their alternating ±Z normals get
+      // amplified into sharp undercuts.
+      const np = nx * Math.cos(bis) + ny * Math.sin(bis);
+      const need = np >= needHi ? 0 : np <= needLo ? 1 : (needHi - np) / (needHi - needLo);
+      if (need <= 0) continue;
       // e1 = (-sin, cos, 0) square to the pull in plan; e2 = z.
       const a1 = -nx * Math.sin(bis) + ny * Math.cos(bis), a2 = nz;
       const hl = Math.hypot(a1, a2);
       if (hl < FLAT) continue;
       const h1 = a1 / hl, h2 = a2 / hl;
       const o = v * 5;
-      acc[o] += h1 * h1; acc[o + 1] += h1 * h2; acc[o + 2] += h2 * h2;
-      acc[o + 3] += h1; acc[o + 4] += h2;
+      acc[o] += need * h1 * h1; acc[o + 1] += need * h1 * h2; acc[o + 2] += need * h2 * h2;
+      acc[o + 3] += need * h1; acc[o + 4] += need * h2;
+      if (need > maxNeed[v]) maxNeed[v] = need;
     }
   }
   const tan = Math.tan(deg * DEG);
@@ -791,7 +807,7 @@ function draftForPieces(
       h = Math.min(h, along >= 0 ? Math.abs(px * by - py * bx) : Math.hypot(px, py));
     }
     const bis = theta + (j + 0.5) * wedge;
-    const shift = -h * tan;
+    const shift = -h * tan * maxNeed[i];
     out[i * stride] += -Math.sin(bis) * d1 * shift;
     out[i * stride + 1] += Math.cos(bis) * d1 * shift;
     out[i * stride + 2] += d2 * shift;
@@ -1687,7 +1703,7 @@ function build(
     pieces.push({
       name: r.name,
       plaster: meshOf(lump),
-      caseInPlace: meshOf(c),
+      caseInPlace: rawMeshOf(c),
       casePrint: onePieceMesh,
       caseParts,
       pull: r.pull,
@@ -1735,7 +1751,7 @@ function build(
     slipName: slip.label,
     warnings,
   };
-  const out: SlipMold = { pieces, slip: o.slip, cavity: meshOf(cavity), spare: meshOf(spareOnly), report };
+  const out: SlipMold = { pieces, slip: o.slip, cavity: rawMeshOf(cavity), spare: rawMeshOf(spareOnly), report };
   free(filled, cavity, spareOnly, plasterAll, block, outline, plugTop, plugBottom, baseRegion);
   return out;
 }

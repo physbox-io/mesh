@@ -21,6 +21,7 @@ import type { CrossSection, Manifold, ManifoldToplevel } from 'manifold-3d';
 import { castMaterial, castWeightG, type CastMaterialId } from './castMaterials';
 import type { IndexedMesh } from './stlMesh';
 import type { SlipMesh } from './slipCastMold';
+import { cleanManifoldMesh } from './printedMesh';
 
 export interface SlipCastInput {
   /** The mold's cavity, spare included (SlipMold.cavity). */
@@ -147,15 +148,14 @@ export function simulateSlipCast(wasm: ManifoldToplevel, input: SlipCastInput, w
     piece = keep(keep(piece.translate([-fx, -fy, -fz])).scale(s));
     const pb = piece.boundingBox();
     piece = keep(piece.translate([0, 0, -pb.min[2]]));
-    const m = piece.getMesh();
-    const positions = new Float32Array(m.numVert * 3);
-    for (let i = 0; i < m.numVert; i++) for (let c = 0; c < 3; c++) positions[i * 3 + c] = m.vertProperties[i * m.numProp + c];
+    const cleaned = cleanManifoldMesh(piece);
+    const positions = new Float32Array(cleaned.positions);
     const volumeMm3 = piece.volume();
     const fb = piece.boundingBox();
     const slip = castMaterial(input.slip);
     const shrinkPct = +Math.max(0, (1 - s) * 100).toFixed(1);
     return {
-      mesh: { positions, faces: new Uint32Array(m.triVerts) },
+      mesh: { positions, faces: new Uint32Array(cleaned.faces) },
       volumeMm3: Math.round(volumeMm3),
       weightG: Math.round(castWeightG(input.slip, volumeMm3)),
       wallMm: t,

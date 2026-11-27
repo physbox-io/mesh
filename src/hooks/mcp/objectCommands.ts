@@ -488,7 +488,21 @@ export const objectCommands: McpCommands = {
         // mode, a csg marker) invalidates the generated mesh. The editor's
         // debounced auto-compiler would get to it eventually, but an MCP
         // caller is told ok:true synchronously — so do it here and await it.
-        const compiled = await compileCsgNodes(true);
+        // For pure pose/metadata updates (e.g. moving mold pieces with `pos`
+        // or `quat`), don't block waiting on unrelated V-HACD convex
+        // decomposition of other bodies in the scene.
+        const touchesGeometryOrCollision =
+          opsMap.size > 0
+          || updates.geoms !== undefined
+          || updates.collision !== undefined
+          || updates.collisionResolution !== undefined
+          || updates.csgEnabled !== undefined
+          || updates.csgSectors !== undefined
+          || updates.brickwork !== undefined
+          || updates.bodyForm !== undefined
+          || flexureTouched
+          || curveFieldTouched;
+        const compiled = await compileCsgNodes(true, { colliders: touchesGeometryOrCollision });
         const freshPost = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId) ?? freshPre;
         await applyDeclarativePostCsgFeatures([freshPost], opsMap);
         await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
@@ -700,10 +714,14 @@ export const objectCommands: McpCommands = {
       // A stroke that misses is reported in its place in `results` and the
       // rest still land: one miss used to fail the call after the strokes
       // before it had been applied.
+      // Inherit top-level brush defaults (e.g. rgba, radius, flow, hardness,
+      // geomName, erase) into each stroke unless overridden per stroke.
+      const { targetId: _tid, strokes: _strokes, ...topDefaults } = msg as Record<string, unknown>;
+      void _tid; void _strokes;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const results: Record<string, any>[] = strokes.map((s) => {
         try {
-          return applyPaintStrokeToBody(targetId, s);
+          return applyPaintStrokeToBody(targetId, { ...topDefaults, ...s });
         } catch (err) {
           return { ok: false, error: err instanceof Error ? err.message : String(err) };
         }

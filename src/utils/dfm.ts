@@ -1960,13 +1960,17 @@ function analyseCast(
       severity: 'critical',
       title: 'Undercut locks pattern in mould',
       detail: `${(undercutShare * 100).toFixed(0)}% of the surface leans back up to ${worstDeg.toFixed(0)}° along the draw.`,
-      fix: 'Use a Dissolvable Liner or Silicone Pour Box (for resin, plaster, concrete, or Jesmonite), or split the pattern / use Lost PLA (for metal).',
+      fix: limits.castSlip
+        ? 'Use a multi-piece Slip Cast Plaster Mold (splits radially around undercuts and adds a base plug for recessed feet).'
+        : 'Use a Dissolvable Liner or Silicone Pour Box (for resin, plaster, concrete, or Jesmonite), or split the pattern / use Lost PLA (for metal).',
       position: hotSpot(tris, heat, 0.9) ?? [0, 0, partingZ],
       metric: undercutShare,
-      actions: [
-        { kind: 'open_fab', label: 'Silicone Box', modal: 'mold', moldTab: 'silicone' },
-        { kind: 'open_fab', label: 'PVA Liner', modal: 'mold', moldTab: 'rigid' },
-      ],
+      actions: limits.castSlip
+        ? [{ kind: 'open_fab', label: 'Slip Cast Mold', modal: 'mold', moldTab: 'slip' }]
+        : [
+            { kind: 'open_fab', label: 'Silicone Box', modal: 'mold', moldTab: 'silicone' },
+            { kind: 'open_fab', label: 'PVA Liner', modal: 'mold', moldTab: 'rigid' },
+          ],
     });
   }
 
