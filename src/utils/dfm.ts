@@ -1811,12 +1811,21 @@ function analyseCast(
   // heights from the bottom of the part to the top, the one leaving the least
   // undercut, mid-height when that is as good as any. A lid with a knob parts
   // at the step, not across the middle of the knob.
+  // A flat face lying ON the parting plane itself (e.g. the flat base of a
+  // pattern resting on the parting board at b.minZ) is square to the pull and
+  // never overhangs the mould, regardless of which side `c[2] >= z` assigns it.
+  const FLAT_PULL_NZ = Math.sin((80 * Math.PI) / 180);
+  const isPartingFace = (nz: number, cz: number, z: number): boolean =>
+    Math.abs(cz - z) <= 1e-5 && Math.abs(nz) > FLAT_PULL_NZ;
+
   const undercutAt = (z: number) => {
     let area = 0;
     for (let t = 0; t < count; t++) {
       const tri = triNormal(tris, t);
       if (!tri) continue;
-      const deg = draftDeg(tri.n[2], triCentroid(tris, t)[2] >= z);
+      const c = triCentroid(tris, t);
+      if (isPartingFace(tri.n[2], c[2], z)) continue;
+      const deg = draftDeg(tri.n[2], c[2] >= z);
       if (deg <= 80 && deg < -UNDERCUT_NOISE_DEG) area += tri.area;
     }
     return area;
@@ -1836,6 +1845,7 @@ function analyseCast(
     if (!tri) continue;
     totalArea += tri.area;
     const c = triCentroid(tris, t);
+    if (isPartingFace(tri.n[2], c[2], partingZ)) continue;
     const deg = draftDeg(tri.n[2], c[2] >= partingZ);
     // A face square to the pull is the top or the bottom of the part; it comes
     // straight off and has nothing to drag against.

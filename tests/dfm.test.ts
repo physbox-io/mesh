@@ -6,6 +6,7 @@
 // browser the same module runs on workers/dfmWorker.ts.
 
 import { describe, it, expect } from 'vitest';
+import * as THREE from 'three';
 import {
   analyseDfm,
   dfmLensFor,
@@ -999,5 +1000,26 @@ describe('DFM engine declutter, wall thickness, pose, printer, & hardware regres
     expect(rCube.findings.find((f) => f.id === 'cast_undercut')).toBeUndefined();
     expect(rCube.summary).toMatch(/short of draft/);
     expect(rCube.summary).not.toMatch(/undercut/);
+  });
+
+  it('does not treat a flat bottom parting face at b.minZ as an undercut on a base-drafted part', () => {
+    // A 60 mm tall frustum sitting flat on Z = 0, drafted 2.5° outward toward the base:
+    // parting at b.minZ leaves 0% undercut and >= 2.5° draft everywhere.
+    const rTop = 0.03;
+    const h = 0.06;
+    const rBot = rTop + h * Math.tan((2.5 * Math.PI) / 180);
+    const geom = new THREE.CylinderGeometry(rTop, rBot, h, 32).rotateX(Math.PI / 2).translate(0, 0, h / 2);
+    const nonIdx = geom.toNonIndexed();
+    const pos = Array.from(nonIdx.attributes.position.array as ArrayLike<number>);
+    const faces = Array.from({ length: pos.length / 3 }, (_, i) => i);
+    const body = {
+      id: 'frustum', name: 'frustum', type: 'body', pos: [0, 0, 0],
+      geoms: [{ name: 'g', type: 'mesh', size: [1], renderVertices: pos, vertices: [], faces }],
+      joints: [], children: [],
+    } as unknown as SceneNode;
+    const r = analyseDfm(scene([body]), 'cast', { asPlaced: true, castMaterial: 'aluminium' });
+    expect(r.findings.find((f) => f.id === 'cast_undercut')).toBeUndefined();
+    expect(r.findings.find((f) => f.id === 'cast_draft')).toBeUndefined();
+    expect(r.score).toBe(100);
   });
 });

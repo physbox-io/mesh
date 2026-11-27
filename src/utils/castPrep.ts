@@ -501,9 +501,13 @@ export function draftTriangles(
   }
 
   // Iterative triangle-orientation guard: scale back local displacement on any
-  // triangle that would invert or pinch below 10% of its projected area.
+  // triangle that would invert, pinch below 10% of its projected area, or flip
+  // a non-undercut face into an overhang along the pull direction (which can
+  // happen when clamping a vertex at the foot of a fillet leaves the strip
+  // above it overhanging).
   const MIN_AREA_RATIO = 0.1;
-  const MAX_CLAMP_ITERS = 16;
+  const UNDERCUT_SIN = Math.sin((0.5 * Math.PI) / 180);
+  const MAX_CLAMP_ITERS = 24;
   const scale = new Float64Array(n).fill(1);
   const shrink = new Uint8Array(n);
   for (let iter = 0; iter < MAX_CLAMP_ITERS; iter++) {
@@ -529,7 +533,23 @@ export function draftTriangles(
       const ny = uz * vx - ux * vz;
       const nz = ux * vy - uy * vx;
       const dot = nx * oldN[f * 3] + ny * oldN[f * 3 + 1] + nz * oldN[f * 3 + 2];
-      if (dot < MIN_AREA_RATIO * n2) {
+      let bad = dot < MIN_AREA_RATIO * n2;
+      if (!bad) {
+        const oldLen = Math.sqrt(n2);
+        const newLen = Math.hypot(nx, ny, nz);
+        if (newLen > 1e-12) {
+          const czMid = (az + bz + cz) / 3;
+          const above = czMid > p.partingZ + 1e-6;
+          const below = czMid < p.partingZ - 1e-6;
+          const oldNz = oldN[f * 3 + 2] / oldLen;
+          const newNz = nz / newLen;
+          if ((above && oldNz >= -UNDERCUT_SIN && newNz < -UNDERCUT_SIN)
+            || (below && oldNz <= UNDERCUT_SIN && newNz > UNDERCUT_SIN)) {
+            bad = true;
+          }
+        }
+      }
+      if (bad) {
         anyBad = true;
         shrink[ia] = 1;
         shrink[ib] = 1;

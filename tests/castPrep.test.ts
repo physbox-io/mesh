@@ -118,6 +118,38 @@ describe('draftTriangles', () => {
     expect(innerBase).toBeCloseTo(0.005 - 0.02 * Math.tan((2 * Math.PI) / 180), 6);
     expect(indexedSignedVolume(positions, faces)).toBeGreaterThan(0);
   });
+
+  it('never flips an upward-facing fillet strip into an overhang when clamping adjacent vertices', () => {
+    // A tall revolved boss sitting on a flange with a concave 3 mm fillet at its foot
+    // and a tight horizontal ring vertex 0.6 mm past the fillet toe (forcing clamping).
+    const pts = [
+      new THREE.Vector2(0, 0),
+      new THREE.Vector2(0.04, 0),
+      new THREE.Vector2(0.04, 0.012),
+      new THREE.Vector2(0.0356, 0.012), // tight ring 0.6 mm from fillet toe
+      new THREE.Vector2(0.035, 0.012),
+      new THREE.Vector2(0.0335, 0.0125),
+      new THREE.Vector2(0.0325, 0.0135),
+      new THREE.Vector2(0.032, 0.015),
+      new THREE.Vector2(0.032, 0.060),
+      new THREE.Vector2(0, 0.060),
+    ];
+    const g = new THREE.LatheGeometry(pts, 24).rotateX(Math.PI / 2).toNonIndexed();
+    const tris = Array.from(g.attributes.position.array as ArrayLike<number>);
+    const { positions, faces } = draftTriangles(tris, { deg: 2.5, mode: 'add', partingZ: 0 });
+    expect(indexedSignedVolume(positions, faces)).toBeGreaterThan(0);
+    // Every triangle strictly above the base plane must stay non-undercut (nz >= -sin(1°)).
+    const maxNegNz = Math.sin((1 * Math.PI) / 180);
+    for (let f = 0; f < faces.length; f += 3) {
+      const a = new THREE.Vector3().fromArray(positions, faces[f] * 3);
+      const b = new THREE.Vector3().fromArray(positions, faces[f + 1] * 3);
+      const c = new THREE.Vector3().fromArray(positions, faces[f + 2] * 3);
+      const cz = (a.z + b.z + c.z) / 3;
+      if (cz <= 1e-4) continue;
+      const n = b.clone().sub(a).cross(c.clone().sub(a)).normalize();
+      expect(n.z).toBeGreaterThanOrEqual(-maxNegNz);
+    }
+  });
 });
 
 describe('baking draft into a scene', () => {
