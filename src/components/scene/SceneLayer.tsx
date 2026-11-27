@@ -13,7 +13,7 @@ import * as THREE from 'three';
 import { bodyColor } from '../../utils/bodyColor';
 import { glowIntensity } from '../../utils/geomGlow';
 import { registerLiveCamera } from '../../utils/liveCamera';
-import { DEFAULT_EYE, DEFAULT_TARGET_Y, drawnContentBounds, sceneContentBounds } from '../../utils/frameScene';
+import { DEFAULT_EYE, DEFAULT_TARGET_Y, drawnContentBounds, framingForBounds, sceneContentBounds } from '../../utils/frameScene';
 import { isDrawingView, orthoFraming, ORTHO_STANDOFF, SQUARE_TO_VIEW, VIEW_AXES } from '../../utils/cameraViews';
 import { useCapture } from '../../store/captureStore';
 import { useStore } from '../../store/useStore';
@@ -198,15 +198,29 @@ export const CameraController = () => {
         controlsRef.current.update();
       }
     } else {
-      // Both poses are the same distance out, so switching between them does
-      // not also change how big everything is drawn. That distance shows about
-      // 160 mm of world — see utils/frameScene.
-      live.position.set(...DEFAULT_EYE);
+      // Frame the whole scene at the default 160 mm scale, backing off if the
+      // scene grew (e.g. after adding a slip-cast mold + split-case kit).
+      const { width, height } = getSize().size;
+      const nodes = useStore.getState().sceneGraph.nodes;
+      const bounds = drawnContentBounds(getSize().scene, nodes) ?? sceneContentBounds(nodes);
+      const framing = bounds ? framingForBounds(bounds, height > 0 ? width / height : 1) : null;
       live.up.set(0, 1, 0);
-      live.lookAt(0, DEFAULT_TARGET_Y, 0);
-      if (controlsRef.current) {
-        controlsRef.current.target.set(0, DEFAULT_TARGET_Y, 0);
-        controlsRef.current.update();
+      if (framing) {
+        const [px, py, pz] = framing.position;
+        const [tx, ty, tz] = framing.target;
+        live.position.set(px, pz, -py);
+        live.lookAt(tx, tz, -ty);
+        if (controlsRef.current) {
+          controlsRef.current.target.set(tx, tz, -ty);
+          controlsRef.current.update();
+        }
+      } else {
+        live.position.set(...DEFAULT_EYE);
+        live.lookAt(0, DEFAULT_TARGET_Y, 0);
+        if (controlsRef.current) {
+          controlsRef.current.target.set(0, DEFAULT_TARGET_Y, 0);
+          controlsRef.current.update();
+        }
       }
     }
     (live as THREE.PerspectiveCamera | THREE.OrthographicCamera).updateProjectionMatrix();

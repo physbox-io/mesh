@@ -11,9 +11,9 @@ import { bodyEdges, bodyUp, whyNotRoundable } from '../../utils/edgeRoundBase';
 import { planClampedRoundings } from '../../utils/edgeRound';
 import { selectEdges, type EdgeGroup } from '../../utils/featureEdges';
 import {
-  applyDab, buildMeshPaintGeometry, buildPaintGeometry, canvasFromLayer, isPaintable,
-  layerFromCanvas, paintArgsFromSize, paintMeshResolution, paintResolution, toGeometrySpace,
-  DEFAULT_PAINT_HARDNESS,
+  applyDab, buildMeshPaintGeometry, buildPaintGeometry, canvasFromLayer, computeVertexNormals,
+  isPaintable, layerFromCanvas, paintArgsFromSize, paintMeshResolution, paintResolution,
+  toGeometrySpace, DEFAULT_PAINT_HARDNESS,
 } from '../../utils/vertexPaint';
 import { toSceneGeom } from '../../utils/sculptMesh';
 import { cutSculptOffThread } from '../../utils/sculptCutClient';
@@ -697,7 +697,7 @@ export async function applySinglePatternToBody(targetId: string, m: Record<strin
 export function applyPaintStrokeToBody(targetId: string, m: Record<string, any>): Record<string, any> {
   if (!isPlainObject(m)) throw new Error('Paint stroke must be a plain object');
   const store = useStore.getState();
-  const { geomName, at, atMm, radius, radiusMm, rgba, flow, erase, line, hardness, symmetry } = m;
+  const { geomName, at, atMm, radius, radiusMm, rgba, flow, erase, line, hardness, symmetry, normal, frontOnly, front_only } = m;
   const node = findNodeInScene(store.sceneGraph.nodes, targetId);
   if (!node) throw new Error(`No object with id '${targetId}'`);
 
@@ -790,8 +790,35 @@ export function applyPaintStrokeToBody(targetId: string, m: Record<string, any>)
     const local = run.map((p) => toGeometrySpace(geom.type, p, isDynamicMesh));
     dabs.push(...(line === true ? alongSurface(local, positions, brush / 3) : local));
   }
+  const useFrontOnly = frontOnly === true || front_only === true;
+  let explicitNormal: [number, number, number] | undefined;
+  if (normal !== undefined && normal !== null) {
+    if (!isFiniteVec3(normal)) throw new Error('normal must be a finite [nx, ny, nz] vector');
+    const nl = Math.hypot(normal[0], normal[1], normal[2]);
+    if (nl < 1e-9) throw new Error('normal must be non-zero');
+    const gn = toGeometrySpace(geom.type, [normal[0] / nl, normal[1] / nl, normal[2] / nl], isDynamicMesh);
+    explicitNormal = gn;
+  }
+  const vertexNormals = (explicitNormal || useFrontOnly) && faces?.length
+    ? computeVertexNormals(positions, faces)
+    : undefined;
   let landed = 0;
   for (const [x, y, z] of dabs) {
+    let filterNormal = explicitNormal;
+    if (!filterNormal && useFrontOnly && vertexNormals) {
+      // Infer surface facing normal from the nearest vertex to this dab point.
+      let bestV = -1, bestD2 = Infinity;
+      const nVerts = Math.floor(positions.length / 3);
+      for (let v = 0; v < nVerts; v++) {
+        const dx = positions[v * 3] - x, dy = positions[v * 3 + 1] - y, dz = positions[v * 3 + 2] - z;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 < bestD2) { bestD2 = d2; bestV = v; }
+      }
+      if (bestV >= 0) {
+        const no = bestV * 3;
+        filterNormal = [vertexNormals[no], vertexNormals[no + 1], vertexNormals[no + 2]];
+      }
+    }
     if (applyDab(canvas, positions, {
       x, y, z,
       radius: brush,
@@ -799,6 +826,7 @@ export function applyPaintStrokeToBody(targetId: string, m: Record<string, any>)
       flow: typeof flow === 'number' ? flow : 1,
       erase: isErase,
       hardness: typeof hardness === 'number' ? hardness : DEFAULT_PAINT_HARDNESS,
+      ...(vertexNormals && filterNormal ? { normals: vertexNormals, filterNormal } : {}),
     }, faces)) landed++;
   }
   built?.dispose();

@@ -711,6 +711,38 @@ export interface DabOptions {
    * starts to fall off. 0 (the default) is the soft round brush.
    */
   hardness?: number;
+  /** Optional per-vertex unit normals (length = positions.length) for normal-filtered painting. */
+  normals?: ArrayLike<number>;
+  /** Optional unit facing vector in the surface's space: skip vertices whose normal dot product is < 0.1. */
+  filterNormal?: readonly [number, number, number];
+}
+
+/** Area-weighted smooth per-vertex normals for a triangle mesh (positions, faces). */
+export function computeVertexNormals(
+  positions: ArrayLike<number>,
+  faces: ArrayLike<number>,
+): Float32Array {
+  const n = Math.floor(positions.length / 3);
+  const out = new Float32Array(n * 3);
+  for (let t = 0; t + 2 < faces.length; t += 3) {
+    const ia = faces[t] * 3, ib = faces[t + 1] * 3, ic = faces[t + 2] * 3;
+    const ux = positions[ib] - positions[ia], uy = positions[ib + 1] - positions[ia + 1], uz = positions[ib + 2] - positions[ia + 2];
+    const vx = positions[ic] - positions[ia], vy = positions[ic + 1] - positions[ia + 1], vz = positions[ic + 2] - positions[ia + 2];
+    const nx = uy * vz - uz * vy;
+    const ny = uz * vx - ux * vz;
+    const nz = ux * vy - uy * vx;
+    out[ia] += nx; out[ia + 1] += ny; out[ia + 2] += nz;
+    out[ib] += nx; out[ib + 1] += ny; out[ib + 2] += nz;
+    out[ic] += nx; out[ic + 1] += ny; out[ic + 2] += nz;
+  }
+  for (let i = 0; i < n; i++) {
+    const o = i * 3;
+    const len = Math.hypot(out[o], out[o + 1], out[o + 2]);
+    if (len > 1e-12) {
+      out[o] /= len; out[o + 1] /= len; out[o + 2] /= len;
+    }
+  }
+  return out;
 }
 
 /**
@@ -800,7 +832,7 @@ export function closestPointOnTriangleBary(
 export function applyDab(
   canvas: PaintCanvas,
   positions: ArrayLike<number>,
-  { x, y, z, radius, color, flow, erase, hardness = 0 }: DabOptions,
+  { x, y, z, radius, color, flow, erase, hardness = 0, normals, filterNormal }: DabOptions,
   faces?: ArrayLike<number> | null,
 ): { lo: number; hi: number } | null {
   if (
@@ -842,12 +874,22 @@ export function applyDab(
     if (v > hi) hi = v;
   };
 
+  const fnx = filterNormal ? filterNormal[0] : 0;
+  const fny = filterNormal ? filterNormal[1] : 0;
+  const fnz = filterNormal ? filterNormal[2] : 0;
+  const hasFilter = Boolean(normals && filterNormal && (fnx * fnx + fny * fny + fnz * fnz) > 1e-9);
+
   for (let v = 0; v < canvas.count; v++) {
     const dx = positions[v * 3] - x;
     const dy = positions[v * 3 + 1] - y;
     const dz = positions[v * 3 + 2] - z;
     const d2 = dx * dx + dy * dy + dz * dz;
     if (d2 >= r2) continue;
+    if (hasFilter) {
+      const no = v * 3;
+      const dot = normals![no] * fnx + normals![no + 1] * fny + normals![no + 2] * fnz;
+      if (dot < 0.1) continue;
+    }
 
     // Squared-cosine-ish falloff: full strength under the middle of the brush
     // and zero *slope* at the edge, so overlapping dabs down a stroke add up to
