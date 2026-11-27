@@ -3,7 +3,7 @@ import { unzipSync } from 'three/examples/jsm/libs/fflate.module.js';
 import { exportPrintFiles } from '../src/utils/printExport';
 import { castCommands } from '../src/hooks/mcp/castCommands';
 import type { SceneGraph, SceneNode } from '../src/types/scene';
-import type { PhysicsState } from '../src/store/useStore';
+import { useStore, type PhysicsState } from '../src/store/useStore';
 
 /** Corners of a binary STL, as [x, y, z] in the file's units. */
 function stlPoints(bytes: Uint8Array): number[][] {
@@ -730,5 +730,55 @@ describe('SPLIT_FOR_PRINT MCP metadata and naming', () => {
     expect(calls[0].names).toEqual(['Custom Shell_part1', 'Custom Shell_part2']);
     expect(calls[1].names).toEqual(['Victorian Dollhouse_part1', 'Victorian Dollhouse_part2']);
     expect(calls[2].names).toBeUndefined();
+  });
+
+  it('supports custom filename override in EXPORT_PRINT without overwriting multi-plate outputs', async () => {
+    const graph: SceneGraph = {
+      name: 'Oversized Mold',
+      nodes: [body('q1', [0, 0, 0.02], [0.02, 0.02, 0.02]), body('q2', [0.06, 0, 0.02], [0.02, 0.02, 0.02])],
+    };
+    useStore.setState({ sceneGraph: graph });
+    const ctx = { store: useStore.getState(), toId: (v: unknown) => v };
+    const r = await castCommands.EXPORT_PRINT({
+      ids: ['q1', 'q2'],
+      format: '3mf',
+      plate: true,
+      filename: 'planter_mold_cavity_plate.3mf',
+      includeFiles: false,
+    }, ctx) as { ok: boolean; files?: { name: string }[] };
+    expect(r.ok).toBe(true);
+    expect(r.files?.[0]?.name).toBe('planter_mold_cavity_plate.3mf');
+  });
+
+  it('places split sections with placement=beside past the rightmost body in the scene', () => {
+    const graph: SceneGraph = {
+      name: 'Mold With Cast Sim',
+      nodes: [
+        body('mold', [0, 0, 0.05], [0.05, 0.05, 0.05]),
+        body('cast_sim', [0.30, 0, 0.05], [0.05, 0.05, 0.05]),
+      ],
+    };
+    useStore.setState({ sceneGraph: graph });
+    const sec = {
+      positions: new Float32Array([
+        -0.05, -0.05, -0.05, 0.05, -0.05, -0.05, 0.05, 0.05, -0.05,
+        -0.05, 0.05, -0.05, -0.05, -0.05, 0.05, 0.05, -0.05, 0.05,
+        0.05, 0.05, 0.05, -0.05, 0.05, 0.05,
+      ]),
+      faces: new Uint32Array([0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7]),
+      plainPositions: new Float32Array([]),
+      plainFaces: new Uint32Array([]),
+      up: [0, 0, 1] as [number, number, number],
+      spin: 0,
+      colliders: [],
+      volumeMm3: 1000,
+      convexPieces: [],
+    };
+    const ids = useStore.getState().splitBodyForPrint('mold', [sec], [], { placement: 'beside', centerOrigin: true });
+    expect(ids).toHaveLength(1);
+    const placed = useStore.getState().sceneGraph.nodes.find((n) => n.id === ids[0]);
+    expect(placed).toBeDefined();
+    // cast_sim extends to x = 0.35; split section half-width is 0.05 + 0.08 gap => center >= 0.48
+    expect(placed!.pos[0]).toBeGreaterThanOrEqual(0.47);
   });
 });

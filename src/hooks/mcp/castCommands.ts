@@ -529,6 +529,9 @@ export const castCommands: McpCommands = {
     const exported = ids.length ? ids.map((id) => findNodeInScene(store.sceneGraph.nodes, id)!) : store.sceneGraph.nodes;
     const posed = (nodes: SceneNode[]): boolean => nodes.some((n) => !!n.printPose || posed(n.children ?? []));
     const separate = typeof msg.separate === 'boolean' ? msg.separate : format === 'stl' && posed(exported);
+    const customFilename = typeof msg.filename === 'string' && msg.filename.trim()
+      ? msg.filename.trim().replace(/\.(stl|3mf)$/i, '')
+      : undefined;
     let result;
     try {
       result = exportPrintFiles(store.sceneGraph, {
@@ -540,7 +543,7 @@ export const castCommands: McpCommands = {
         ...(typeof msg.filaments === 'number' ? { filaments: msg.filaments } : {}),
         bed: exportBed,
         ...(marginChk.value !== undefined ? { marginMm: marginChk.value } : {}),
-        baseName: exportFileBase(store, ids),
+        baseName: customFilename || exportFileBase(store, ids),
       });
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };

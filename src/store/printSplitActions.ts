@@ -301,7 +301,9 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
       const at = siblings.indexOf(first);
 
       if (opts.placement === 'beside') {
-        // Keep original body untouched and place all split sections beside it along +X.
+        // Keep original body untouched and place all split sections beside the
+        // rightmost existing body in the scene along +X so they never overlap
+        // adjacent simulations or other parts.
         let allMinX = Infinity, allMaxX = -Infinity;
         for (const s of sections) {
           for (let i = 0; i < s.positions.length; i += 3) {
@@ -310,8 +312,43 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
             if (x > allMaxX) allMaxX = x;
           }
         }
+        let sceneMaxX = -Infinity;
+        const vTmp = new THREE.Vector3();
+        const scanSceneMaxX = (list: SceneNode[]) => {
+          for (const n of list) {
+            const world = worlds.get(n.id);
+            if (world) {
+              for (const g of resolveCsgGeoms(n, 'render')) {
+                const gm = world.clone().multiply(getGeomFrame(g).matrix);
+                const rv = g.renderVertices;
+                if (g.type === 'mesh' && rv && rv.length >= 3) {
+                  for (let i = 0; i < rv.length; i += 3) {
+                    vTmp.set(rv[i], rv[i + 1], rv[i + 2]).applyMatrix4(gm);
+                    if (vTmp.x > sceneMaxX) sceneMaxX = vTmp.x;
+                  }
+                } else if (g.type === 'mesh' && g.vertices && g.vertices.length >= 3) {
+                  for (let i = 0; i < g.vertices.length; i += 3) {
+                    vTmp.set(g.vertices[i], -g.vertices[i + 2], g.vertices[i + 1]).applyMatrix4(gm);
+                    if (vTmp.x > sceneMaxX) sceneMaxX = vTmp.x;
+                  }
+                } else {
+                  const r = g.type === 'box'
+                    ? Math.hypot(g.size?.[0] ?? 0, g.size?.[1] ?? 0, g.size?.[2] ?? 0)
+                    : Math.max(g.size?.[0] ?? 0, g.size?.[1] ?? 0, 0);
+                  vTmp.set(0, 0, 0).applyMatrix4(gm);
+                  if (vTmp.x + r > sceneMaxX) sceneMaxX = vTmp.x + r;
+                }
+              }
+            }
+            if (n.children?.length) scanSceneMaxX(n.children);
+          }
+        };
+        scanSceneMaxX(newScene.nodes);
         const spanX = Number.isFinite(allMaxX - allMinX) ? Math.max(0.05, allMaxX - allMinX) : 0.25;
-        const shiftX = spanX + 0.08;
+        const gap = 0.08;
+        const shiftX = Number.isFinite(allMinX) && Number.isFinite(allMaxX) && Number.isFinite(sceneMaxX)
+          ? Math.max(spanX + gap, sceneMaxX + gap - (basePos[0] + allMinX))
+          : spanX + gap;
         const strippedTemplate: SceneNode = JSON.parse(JSON.stringify(first));
         strip(strippedTemplate);
         const { children: _children, geoms: _geoms, ...rest } = strippedTemplate;

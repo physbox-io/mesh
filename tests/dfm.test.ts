@@ -1022,4 +1022,55 @@ describe('DFM engine declutter, wall thickness, pose, printer, & hardware regres
     expect(r.findings.find((f) => f.id === 'cast_draft')).toBeUndefined();
     expect(r.score).toBe(100);
   });
+
+  it('allows open-top hollow flared vessels to pull outer wall (-Z) and inner core (+Z) without false undercut', () => {
+    // Classic flared concrete planter: outer wall flares from R=110 mm at z=0 to R=140 mm at z=200 mm
+    // (nz < 0, unobstructed from -Z); inner cavity flares from R=85 mm at z=20 mm to R=115 mm at z=200 mm
+    // (nz > 0, unobstructed from +Z). Both draw cleanly in a 2-part ±Z clamshell with a central core.
+    const pts = [
+      new THREE.Vector2(0, 0),
+      new THREE.Vector2(0.11, 0),
+      new THREE.Vector2(0.14, 0.20),
+      new THREE.Vector2(0.115, 0.20),
+      new THREE.Vector2(0.085, 0.02),
+      new THREE.Vector2(0, 0.02),
+    ];
+    const g = new THREE.LatheGeometry(pts, 32).rotateX(Math.PI / 2).toNonIndexed();
+    const pos = Array.from(g.attributes.position.array as ArrayLike<number>);
+    const faces = Array.from({ length: pos.length / 3 }, (_, i) => i);
+    const body = {
+      id: 'flared_planter', name: 'flared_planter', type: 'body', pos: [0, 0, 0],
+      geoms: [{ name: 'g', type: 'mesh', size: [1], renderVertices: pos, vertices: [], faces }],
+      joints: [], children: [],
+    } as unknown as SceneNode;
+    const r = analyseDfm(scene([body]), 'cast', { asPlaced: true, castMaterial: 'concrete' });
+    expect(r.findings.find((f) => f.id === 'cast_undercut')).toBeUndefined();
+    expect(r.findings.find((f) => f.id === 'cast_draft')).toBeUndefined();
+    expect(r.score).toBe(100);
+  });
+
+  it('still catches a true undercut inside a narrow-neck vase where the inner cavity is obstructed from both ±Z', () => {
+    // Narrow-neck vase: inner cavity widens to R=70 mm at z=80 mm then narrows to R=40 mm at z=160 mm.
+    // The upper inner slope (nz < 0) is obstructed from -Z by the solid floor and cannot pull +Z.
+    const pts = [
+      new THREE.Vector2(0, 0),
+      new THREE.Vector2(0.09, 0),
+      new THREE.Vector2(0.09, 0.08),
+      new THREE.Vector2(0.06, 0.16),
+      new THREE.Vector2(0.04, 0.16),
+      new THREE.Vector2(0.07, 0.08),
+      new THREE.Vector2(0.07, 0.02),
+      new THREE.Vector2(0, 0.02),
+    ];
+    const g = new THREE.LatheGeometry(pts, 32).rotateX(Math.PI / 2).toNonIndexed();
+    const pos = Array.from(g.attributes.position.array as ArrayLike<number>);
+    const faces = Array.from({ length: pos.length / 3 }, (_, i) => i);
+    const body = {
+      id: 'narrow_vase', name: 'narrow_vase', type: 'body', pos: [0, 0, 0],
+      geoms: [{ name: 'g', type: 'mesh', size: [1], renderVertices: pos, vertices: [], faces }],
+      joints: [], children: [],
+    } as unknown as SceneNode;
+    const r = analyseDfm(scene([body]), 'cast', { asPlaced: true, castMaterial: 'concrete' });
+    expect(r.findings.find((f) => f.id === 'cast_undercut')).toBeDefined();
+  });
 });

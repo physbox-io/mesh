@@ -36,7 +36,7 @@ import { DEFAULT_FILAMENT, filamentSpec, type FilamentId } from './filaments';
 import { printLimits, type PrinterSettings } from './printLimits';
 import { poseMatrix, rotatePoints, type Mat3 } from './printPlate';
 import { MAX_AVAILABLE_REACH_DIAMETERS, STANDARD_BIT_DIAS } from './reliefCarveExporter';
-import { sampleColumns, sampleWallSpans } from './partColumns';
+import { columnProbe, sampleColumns, sampleWallSpans } from './partColumns';
 import { squaredDistanceTransform } from './heightmapMesh';
 import { overhangDeg, supportArea } from './printSupport';
 import { trappedAirInSoup } from './trappedAir';
@@ -1205,11 +1205,39 @@ export function thinnestWall(
     const cols = gridFor(spanX, minWallMm);
     const rows = gridFor(spanY, minWallMm);
     if (cols < 3 || rows < 3) continue;
-    const { spanStart, spanZ0, spanZ1, minWall, minWallMid, minWallZ0, minWallZ1, hit } = sampleWallSpans(rotated, rb, cols, rows);
+    const {
+      spanStart, spanZ0, spanZ1, spanEnTri, spanExTri,
+      minWall, minWallMid, minWallZ0, minWallZ1, hit,
+    } = sampleWallSpans(rotated, rb, cols, rows);
 
     const stepX = spanX / (cols - 1);
     const stepY = spanY / (rows - 1);
     const baseMargin = Math.max(stepX, stepY) * 2.5;
+
+    const shareVertexSq = 1e-10; // (0.01 mm)^2 in metres
+    const trisShareVertex = (ta: number, tb: number): boolean => {
+      if (ta < 0 || tb < 0) return false;
+      for (let a = 0; a < 3; a++) {
+        const ax = rotated[ta + a * 3], ay = rotated[ta + a * 3 + 1], az = rotated[ta + a * 3 + 2];
+        for (let b = 0; b < 3; b++) {
+          const dx = ax - rotated[tb + b * 3];
+          const dy = ay - rotated[tb + b * 3 + 1];
+          const dz = az - rotated[tb + b * 3 + 2];
+          if (dx * dx + dy * dy + dz * dz <= shareVertexSq) return true;
+        }
+      }
+      return false;
+    };
+
+    const isCreasePinch = (cellIdx: number, z0: number, z1: number): boolean => {
+      const s0 = spanStart[cellIdx], s1 = spanStart[cellIdx + 1];
+      for (let s = s0; s < s1; s++) {
+        if (Math.abs(spanZ0[s] - z0) <= 1e-6 && Math.abs(spanZ1[s] - z1) <= 1e-6) {
+          return trisShareVertex(spanEnTri[s], spanExTri[s]);
+        }
+      }
+      return false;
+    };
 
     const neighborHasSpanNear = (ni: number, z0: number, z1: number, margin: number): boolean => {
       const s0 = spanStart[ni], s1 = spanStart[ni + 1];
@@ -1217,6 +1245,11 @@ export function thinnestWall(
         if (spanZ1[s] >= z0 - margin && spanZ0[s] <= z1 + margin) return true;
       }
       return false;
+    };
+
+    const neighborIsThin = (ni: number): boolean => {
+      const w = minWall[ni];
+      return Number.isFinite(w) && w * 1000 < minWallMm && w * 1000 >= 0.01;
     };
 
     let thinnest = Infinity;
@@ -1237,6 +1270,9 @@ export function thinnestWall(
         // neighbours, not a 1-cell summit/ridge crest sitting in front of
         // unrelated geometry further along the ray.
         const z0 = minWallZ0[i], z1 = minWallZ1[i];
+        // Ignore tiny (< 0.2 mm) crease pinches where entry and exit triangles
+        // share a vertex (e.g. a fillet-to-pattern or drafted fillet seam).
+        if (mm < 0.2 && isCreasePinch(i, z0, z1)) continue;
         const margin = baseMargin + wallM;
         if (
           !neighborHasSpanNear(i - 1, z0, z1, margin) ||
@@ -1245,7 +1281,16 @@ export function thinnestWall(
           !neighborHasSpanNear(i + cols, z0, z1, margin)
         ) continue;
         solidCells++;
-        if (mm < minWallMm) thinCells++;
+        const isThin = mm < minWallMm;
+        if (isThin) {
+          // A real thin wall/fin spans more than one isolated grid sample;
+          // ignore a lone 1-cell fillet-seam outlier surrounded by thick walls.
+          const backedThin =
+            neighborIsThin(i - 1) || neighborIsThin(i + 1) ||
+            neighborIsThin(i - cols) || neighborIsThin(i + cols);
+          if (!backedThin) continue;
+          thinCells++;
+        }
         if (mm < thinnest) {
           thinnest = mm;
           at = [rb.minX + c * stepX, rb.minY + r * stepY, minWallMid[i]];
@@ -1818,6 +1863,46 @@ function analyseCast(
   const isPartingFace = (nz: number, cz: number, z: number): boolean =>
     Math.abs(cz - z) <= 1e-5 && Math.abs(nz) > FLAT_PULL_NZ;
 
+  // On open-top hollow vessels (planters, cups, bowls), a 2-part ±Z clamshell
+  // pulls a central core out of the cavity (+Z) while the outer mold half pulls
+  // off the exterior (-Z), or vice versa. A face that faces +Z and is
+  // unobstructed from +Z (or faces -Z and is unobstructed from -Z) draws cleanly
+  // into that mold half rather than locking against a flat mid-height plane.
+  const heightM = Math.max(0, b.maxZ - b.minZ);
+  const visEps = Math.max(2e-4, heightM * 0.002);
+  let probe: ((x: number, y: number) => { top: number; bottom: number } | null) | null = null;
+  let colGrid: ReturnType<typeof sampleColumns> | null = null;
+  const gridN = 96;
+  const spanX = b.maxX - b.minX;
+  const spanY = b.maxY - b.minY;
+  const effectiveDraftDeg = (nz: number, cx: number, cy: number, cz: number, z: number): number => {
+    const deg = draftDeg(nz, cz >= z);
+    if (deg >= -UNDERCUT_NOISE_DEG) return deg;
+    if (Math.abs(nz) <= 1e-6) return deg;
+    let top = Infinity, bottom = -Infinity;
+    if (count <= 40_000) {
+      if (!probe) probe = columnProbe(tris, b);
+      const col = probe(cx, cy);
+      if (!col) return deg;
+      top = col.top;
+      bottom = col.bottom;
+    } else if (spanX > 1e-9 && spanY > 1e-9) {
+      if (!colGrid) colGrid = sampleColumns(tris, b, gridN, gridN);
+      const c = Math.max(0, Math.min(gridN - 1, Math.round(((cx - b.minX) / spanX) * (gridN - 1))));
+      const r = Math.max(0, Math.min(gridN - 1, Math.round(((cy - b.minY) / spanY) * (gridN - 1))));
+      const idx = r * gridN + c;
+      if (!colGrid.hit[idx]) return deg;
+      top = colGrid.top[idx];
+      bottom = colGrid.bottom[idx];
+    } else {
+      return deg;
+    }
+    const openUp = nz > 0 && cz >= top - visEps;
+    const openDown = nz < 0 && cz <= bottom + visEps;
+    if (openUp || openDown) return draftDeg(nz, openUp);
+    return deg;
+  };
+
   const undercutAt = (z: number) => {
     let area = 0;
     for (let t = 0; t < count; t++) {
@@ -1825,7 +1910,7 @@ function analyseCast(
       if (!tri) continue;
       const c = triCentroid(tris, t);
       if (isPartingFace(tri.n[2], c[2], z)) continue;
-      const deg = draftDeg(tri.n[2], c[2] >= z);
+      const deg = effectiveDraftDeg(tri.n[2], c[0], c[1], c[2], z);
       if (deg <= 80 && deg < -UNDERCUT_NOISE_DEG) area += tri.area;
     }
     return area;
@@ -1846,7 +1931,7 @@ function analyseCast(
     totalArea += tri.area;
     const c = triCentroid(tris, t);
     if (isPartingFace(tri.n[2], c[2], partingZ)) continue;
-    const deg = draftDeg(tri.n[2], c[2] >= partingZ);
+    const deg = effectiveDraftDeg(tri.n[2], c[0], c[1], c[2], partingZ);
     // A face square to the pull is the top or the bottom of the part; it comes
     // straight off and has nothing to drag against.
     if (deg > 80) continue;

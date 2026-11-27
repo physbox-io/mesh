@@ -16,8 +16,8 @@ export const PRINTED_MESH_CLEAN_MM = 1e-3;
  * `m`'s mesh without the seam slivers, and without the shells of no volume
  * that simplifying leaves where a sliver was: positions (xyz, mm) and faces.
  */
-export function printedMeshOf(m: Manifold): { positions: number[]; faces: number[] } {
-  const clean = m.simplify(PRINTED_MESH_CLEAN_MM);
+export function printedMeshOf(m: Manifold, simplifyMm = PRINTED_MESH_CLEAN_MM): { positions: number[]; faces: number[] } {
+  const clean = m.simplify(simplifyMm);
   const parts = clean.decompose();
   const kept = parts.length > 1 ? parts.filter((p) => Math.abs(p.volume()) > 1e-6) : parts;
   const positions: number[] = [];
@@ -141,23 +141,20 @@ export function weldAndCleanMesh(
  * or returns null if no weld epsilon produces a closed manifold mesh.
  */
 export function tryCleanManifoldMesh(m: Manifold): { positions: number[]; faces: number[] } | null {
-  const raw = printedMeshOf(m);
-  for (const eps of [1e-4, 5e-4, 1e-3, 1e-5, 0]) {
-    const cleaned = weldAndCleanMesh(raw, eps);
-    if (cleaned) return cleaned;
+  for (const simplifyMm of [PRINTED_MESH_CLEAN_MM, 2e-3, 5e-3]) {
+    const raw = printedMeshOf(m, simplifyMm);
+    for (const eps of [1e-4, 5e-4, 1e-3, 1e-5, 0]) {
+      const cleaned = weldAndCleanMesh(raw, eps);
+      if (cleaned) return cleaned;
+    }
   }
   return null;
 }
 
 /**
  * Extracts a Manifold solid as a cleaned triangle mesh in mm (falling back to
- * `printedMeshOf` only if no weld epsilon closes it).
+ * `printedMeshOf` only if no simplify + weld pass closes it).
  */
 export function cleanManifoldMesh(m: Manifold): { positions: number[]; faces: number[] } {
-  const raw = printedMeshOf(m);
-  for (const eps of [1e-4, 5e-4, 1e-3, 1e-5, 0]) {
-    const cleaned = weldAndCleanMesh(raw, eps);
-    if (cleaned) return cleaned;
-  }
-  return raw;
+  return tryCleanManifoldMesh(m) ?? printedMeshOf(m);
 }

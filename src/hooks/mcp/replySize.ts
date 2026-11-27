@@ -8,8 +8,8 @@
 // answer. physics_get_scene on a scene with a 275k-vertex master did exactly
 // that. Such a reply is replaced by an error that says what to read instead.
 
-/** Under the server's 32 MiB UTF-8 byte limit, with room for the envelope. */
-export const MCP_REPLY_LIMIT_BYTES = 30 * 1024 * 1024;
+/** Under the server's 96 MiB UTF-8 byte limit, with room for the envelope. */
+export const MCP_REPLY_LIMIT_BYTES = 90 * 1024 * 1024;
 
 /** Backwards-compatible alias for MCP_REPLY_LIMIT_BYTES. */
 export const MCP_REPLY_LIMIT_CHARS = MCP_REPLY_LIMIT_BYTES;

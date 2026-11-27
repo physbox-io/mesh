@@ -650,9 +650,12 @@ export async function metalChain(scene: SceneGraph, options: Partial<CastOptions
       }
     }
 
-    // The part as the metal leaves it, shrunk back to size.
-    const raw = meshOf(reached);
-    const pos = Float32Array.from(raw.positions, (v) => v / grow);
+    // The part as the metal leaves it, shrunk back to size in Manifold before
+    // extracting and welding so float32-metre checks run on final coordinates
+    // (avoiding post-extraction scale quantization collapsing dense relief seams).
+    const shrunk = grow !== 1 ? own.take(reached.scale([1 / grow, 1 / grow, 1 / grow])) : reached;
+    const raw = meshOf(shrunk);
+    const pos = Float32Array.from(raw.positions);
     settle(pos);
     const volume = reached.volume() / grow ** 3;
     // What to melt is the pattern dialog's pour figure; the gating is that less the part.

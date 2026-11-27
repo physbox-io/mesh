@@ -473,7 +473,7 @@ export function exportPrintFiles(scene: SceneGraph, options: PrintExportOptions)
       mm = toBedMm(group.flatMap((p) => p.volumes.map((v) => (options.separate && p.turn ? Array.from(rotatePoints(p.turn, v.tris)) : v.tris))));
     }
     // Names are unique per body but not once lowercased and stripped.
-    let name = options.separate ? safeName(group[0].name) : plated ? `${base}_plate` : base;
+    let name = options.separate ? safeName(group[0].name) : plated ? (base.endsWith('_plate') ? base : `${base}_plate`) : base;
     const seen = used.get(name) ?? 0;
     used.set(name, seen + 1);
     if (seen) name = `${name}_${seen + 1}`;
