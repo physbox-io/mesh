@@ -712,3 +712,25 @@ describe('splitForPrint — WASM handle hygiene', () => {
     }
   });
 });
+
+describe('splitForPrint — disconnected multi-piece bodies (molds)', () => {
+  it('splits each oversized piece independently without cutting across air gaps or falsely warning', () => {
+    // Two separate oversized mold halves (300x100x40 mm each) separated by a
+    // 20 mm air gap, plus a small 30x20x15 mm clip that already fits the bed.
+    const halfA = box(300, 100, 40, [-320, 0, 0]);
+    const halfB = box(300, 100, 40, [20, 0, 0]);
+    const clip = box(30, 20, 15, [0, 150, 0]);
+    const r = ok(splitForPrint(wasm, [halfA, halfB, clip], {
+      bed: { widthMm: 200, depthMm: 200, heightMm: 200 },
+      joinery: { kind: 'peg' },
+    }));
+    // halfA -> 2 sections, halfB -> 2 sections, clip -> 1 untouched section = 5 total.
+    expect(r.sections.length).toBe(5);
+    expect(r.sections.every((s) => s.fits)).toBe(true);
+    // Two internal joints (one in halfA, one in halfB), both with pins.
+    expect(r.joints.length).toBe(2);
+    expect(r.joints.every((j) => j.pins.length >= 2)).toBe(true);
+    // No false "insufficient wall margin ... align manually" warning across separate pieces.
+    expect(r.warnings.filter((w) => w.includes('align manually'))).toEqual([]);
+  });
+});

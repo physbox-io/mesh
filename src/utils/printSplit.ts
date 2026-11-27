@@ -173,7 +173,8 @@ export interface SplitJoint {
 
 export type SplitTree =
   | { section: number }
-  | { cut: number; neg: SplitTree; pos: SplitTree };
+  | { cut: number; neg: SplitTree; pos: SplitTree }
+  | { parts: SplitTree[] };
 
 export type SplitResult =
   | {
@@ -265,10 +266,10 @@ function deleteAll(handles: { delete(): void }[]): void {
   handles.length = 0;
 }
 
-/** Each body-frame metre soup as a solid, in millimetres, unioned into one. */
-function solidFrom(wasm: ManifoldToplevel, soups: ArrayLike<number>[]): { ok: true; solid: Manifold } | { ok: false; error: string } {
+/** Each body-frame metre soup as a solid, in millimetres. Disjoint soups stay separate to avoid expensive no-op unions. */
+function solidsFrom(wasm: ManifoldToplevel, soups: ArrayLike<number>[]): { ok: true; solids: Manifold[] } | { ok: false; error: string } {
   const parts: Manifold[] = [];
-  let solid: Manifold | null = null;
+  const boxes: { min: [number, number, number]; max: [number, number, number] }[] = [];
   let transferred = false;
   try {
     for (const soup of soups) {
@@ -281,21 +282,69 @@ function solidFrom(wasm: ManifoldToplevel, soups: ArrayLike<number>[]): { ok: tr
         return { ok: false, error: made.error.replace('cannot be cut', 'cannot be split') };
       }
       parts.push(made.manifold);
+      boxes.push(made.manifold.boundingBox());
     }
     if (!parts.length) return { ok: false, error: 'There is no solid here to split.' };
-    if (parts.length === 1) {
-      solid = parts.pop()!;
-    } else {
-      solid = wasm.Manifold.union(parts);
-    }
-    if (solid.isEmpty() || !(solid.volume() > 0)) {
-      return { ok: false, error: 'This body encloses no volume (it may be inside out), so it cannot be split.' };
+
+    // Group soups whose bounding boxes overlap so only intersecting pieces pay
+    // for a Manifold union; disconnected pieces (e.g. a two-half mold body)
+    // stay separate without unioning and re-decomposing hundreds of thousands
+    // of triangles.
+    const overlaps = (a: { min: number[]; max: number[] }, b: { min: number[]; max: number[] }) =>
+      a.min[0] <= b.max[0] + 1e-3 && a.max[0] >= b.min[0] - 1e-3
+      && a.min[1] <= b.max[1] + 1e-3 && a.max[1] >= b.min[1] - 1e-3
+      && a.min[2] <= b.max[2] + 1e-3 && a.max[2] >= b.min[2] - 1e-3;
+    const visited = new Uint8Array(parts.length);
+    const solids: Manifold[] = [];
+    try {
+      for (let i = 0; i < parts.length; i++) {
+        if (visited[i]) continue;
+        const cluster: number[] = [i];
+        visited[i] = 1;
+        for (let k = 0; k < cluster.length; k++) {
+          const cur = cluster[k];
+          for (let j = 0; j < parts.length; j++) {
+            if (!visited[j] && overlaps(boxes[cur], boxes[j])) {
+              visited[j] = 1;
+              cluster.push(j);
+            }
+          }
+        }
+        let s: Manifold;
+        if (cluster.length === 1) {
+          s = parts[cluster[0]];
+          parts[cluster[0]] = null as unknown as Manifold;
+        } else {
+          s = wasm.Manifold.union(cluster.map((idx) => parts[idx]));
+        }
+        if (s.isEmpty() || !(s.volume() > 0)) {
+          s.delete();
+          deleteAll(solids);
+          return { ok: false, error: 'This body encloses no volume (it may be inside out), so it cannot be split.' };
+        }
+        solids.push(s);
+      }
+    } catch (err) {
+      deleteAll(solids);
+      throw err;
     }
     transferred = true;
-    return { ok: true, solid };
+    return { ok: true, solids };
   } finally {
-    deleteAll(parts);
-    if (solid && !transferred) solid.delete();
+    for (const p of parts) if (p) p.delete();
+    if (!transferred) { /* solids already cleaned up on error */ }
+  }
+}
+
+/** Each body-frame metre soup as a single solid, in millimetres, unioned into one. */
+function solidFrom(wasm: ManifoldToplevel, soups: ArrayLike<number>[]): { ok: true; solid: Manifold } | { ok: false; error: string } {
+  const res = solidsFrom(wasm, soups);
+  if (!res.ok) return res;
+  if (res.solids.length === 1) return { ok: true, solid: res.solids[0] };
+  try {
+    return { ok: true, solid: wasm.Manifold.union(res.solids) };
+  } finally {
+    deleteAll(res.solids);
   }
 }
 
@@ -364,7 +413,8 @@ function geoOf(m: Manifold): PieceGeo {
     if (f) f.area += len / 2;
     else facets.set(key, { n: nu, area: len / 2 });
   }
-  const restDowns = [...facets.values()].sort((x, y) => y.area - x.area).slice(0, 24).map((f) => f.n);
+  const maxRestDowns = mesh.numTri > 40_000 ? 6 : 24;
+  const restDowns = [...facets.values()].sort((x, y) => y.area - x.area).slice(0, maxRestDowns).map((f) => f.n);
   return { soup, hull, restDowns, volume: m.volume() };
 }
 
@@ -932,15 +982,17 @@ function throughWaists(piece: Piece, normals: Vec3[], best: CutChoice | null, ct
 
 /** The best single cut of a piece that does not fit, or null if no cut works at all. */
 function chooseCut(piece: Piece, ctx: Ctx): CutChoice | null {
-  const normals = cutNormals(piece);
+  const dense = piece.m.numTri() > 40_000;
+  const allNormals = cutNormals(piece);
+  const normals = dense ? allNormals.filter(isAxisAligned) : allNormals;
   // A slab as long as each of the bed's sides: the longest is not always the
   // one to use, since a piece cut to it may then fit no other way (the halves
   // of a 500 × 250 mm plate on a 246 × 246 × 256 mm bed are 250 mm square and
   // need cutting again, where thirds stand on edge).
   const usables = [...new Set([ctx.W, ctx.D, ctx.H])];
   let best: CutChoice | null = null;
-  try {
-    for (const n of normals) {
+  const searchNormals = (dirs: Vec3[], steps: number[]) => {
+    for (const n of dirs) {
       let lo = Infinity, hi = -Infinity;
       for (let i = 0; i < piece.geo.hull.length; i += 3) {
         const s = dot(n, [piece.geo.hull[i], piece.geo.hull[i + 1], piece.geo.hull[i + 2]]);
@@ -955,7 +1007,7 @@ function chooseCut(piece: Piece, ctx: Ctx): CutChoice | null {
         // left after the first cut decides where the next one can reach, so
         // lo + slab and hi - slab do not come to the same planes. Two slabs share
         // the one plane.
-        for (const start of slabs > 2 ? [lo + slab, hi - slab] : [lo + slab]) for (let step = -3; step <= 3; step++) {
+        for (const start of slabs > 2 ? [lo + slab, hi - slab] : [lo + slab]) for (const step of steps) {
           const offset = start + step * 0.05 * slab;
           if (offset <= lo + 0.5 || offset >= hi - 0.5) continue;
           const c = tryCut(piece, n, offset, ctx);
@@ -972,11 +1024,23 @@ function chooseCut(piece: Piece, ctx: Ctx): CutChoice | null {
         }
       }
     }
+  };
+  try {
+    if (dense) {
+      // Dense meshes (> 40k tris, e.g. heightfield molds or patterned parts)
+      // try axis-aligned even cuts first; only fall back to shifted or oblique
+      // planes if no valid cut is found, keeping split time well within budget.
+      searchNormals(normals, [0]);
+      if (!best) searchNormals(normals, [-1, 1]);
+      if (!best) searchNormals(allNormals.filter((n) => !isAxisAligned(n)), [0]);
+    } else {
+      searchNormals(normals, [-3, -2, -1, 0, 1, 2, 3]);
+    }
   } catch (err) {
     if (best) dropChoice(best);
     throw err;
   }
-  return throughWaists(piece, normals, best, ctx);
+  return dense ? best : throughWaists(piece, normals, best, ctx);
 }
 
 /**
@@ -994,11 +1058,13 @@ function explodeVectors(tree: SplitTree, cuts: SplitCut[], count: number): Vec3[
   /** Sections stacked along n: cuts across n add up, cuts along it are side by side. */
   const stack = (t: SplitTree, n: Vec3): number => {
     if ('section' in t) return 1;
+    if ('parts' in t) return Math.max(1, ...t.parts.map((p) => stack(p, n)));
     const [a, b] = [stack(t.neg, n), stack(t.pos, n)];
     return Math.abs(dot(cuts[t.cut].normal, n)) > Math.SQRT1_2 ? a + b : Math.max(a, b);
   };
   const push = (t: SplitTree, at: Vec3) => {
     if ('section' in t) { out[t.section] = at; return; }
+    if ('parts' in t) { for (const p of t.parts) push(p, at); return; }
     const n = cuts[t.cut].normal;
     push(t.neg, add3(at, scale3(n, -stack(t.pos, n))));
     push(t.pos, add3(at, scale3(n, stack(t.neg, n))));
@@ -1521,7 +1587,7 @@ export function splitForPrint(wasm: ManifoldToplevel, soups: ArrayLike<number>[]
   };
   if (!(ctx.W > 0 && ctx.D > 0 && ctx.H > 0)) return { ok: false, error: 'The bed is smaller than its margins.' };
 
-  const made = solidFrom(wasm, soups);
+  const made = solidsFrom(wasm, soups);
   if (!made.ok) return made;
 
   const cuts: SplitCut[] = [];
@@ -1568,24 +1634,73 @@ export function splitForPrint(wasm: ManifoldToplevel, soups: ArrayLike<number>[]
   };
 
   try {
-    let rootPiece: Piece;
-    try {
-      rootPiece = makePiece(made.solid, [], ctx);
-    } catch (err) {
-      made.solid.delete();
-      throw err;
+    // Separate disconnected solids (e.g. a two-half mold body or separable
+    // clips) before cutting so each piece is evaluated and split on its own
+    // without cutting across empty air gaps or needlessly splitting pieces
+    // that already fit the bed. Keep a single connected solid untouched so
+    // vertex order and tie-breaking are preserved identically.
+    const rawParts: Manifold[] = [];
+    for (const s of made.solids) {
+      const comps = s.decompose();
+      // Only separate genuinely disjoint positive-volume solids; a closed
+      // hollow shell with an internal void decomposes into a positive outer
+      // shell and a negative-volume cavity, which must stay together.
+      if (comps.length > 1 && comps.every((c) => c.volume() > 0)) {
+        s.delete();
+        rawParts.push(...comps);
+      } else {
+        deleteAll(comps);
+        rawParts.push(s);
+      }
     }
-
-    const tree = build(rootPiece);
+    let tree: SplitTree;
+    if (rawParts.length <= 1) {
+      const single = rawParts[0];
+      let rootPiece: Piece;
+      try {
+        rootPiece = makePiece(single, [], ctx);
+      } catch (err) {
+        single.delete();
+        throw err;
+      }
+      tree = build(rootPiece);
+    } else {
+      const sorted = rawParts
+        .map((m) => {
+          const b = m.boundingBox();
+          return { m, cx: (b.min[0] + b.max[0]) / 2, cy: (b.min[1] + b.max[1]) / 2, cz: (b.min[2] + b.max[2]) / 2 };
+        })
+        .sort((a, b) => a.cx - b.cx || a.cy - b.cy || a.cz - b.cz);
+      open = sorted.length;
+      const subTrees: SplitTree[] = [];
+      for (let i = 0; i < sorted.length; i++) {
+        let compPiece: Piece;
+        try {
+          compPiece = makePiece(sorted[i].m, [], ctx);
+        } catch (err) {
+          for (let k = i; k < sorted.length; k++) sorted[k].m.delete();
+          throw err;
+        }
+        try {
+          subTrees.push(build(compPiece));
+        } catch (err) {
+          for (let k = i + 1; k < sorted.length; k++) sorted[k].m.delete();
+          throw err;
+        }
+      }
+      tree = { parts: subTrees };
+    }
     if (capped) ctx.warnings.push(`Stopped at ${maxSections} sections, and some of them still do not fit the bed.`);
 
     const explode = explodeVectors(tree, cuts, plain.length);
 
     // --- Joints: the face each pair of neighbouring sections actually shares.
     const joints: SplitJoint[] = [];
-    const leaves = (t: SplitTree): number[] => ('section' in t ? [t.section] : [...leaves(t.neg), ...leaves(t.pos)]);
+    const leaves = (t: SplitTree): number[] =>
+      'section' in t ? [t.section] : 'parts' in t ? t.parts.flatMap(leaves) : [...leaves(t.neg), ...leaves(t.pos)];
     const walk = (t: SplitTree) => {
       if ('section' in t) return;
+      if ('parts' in t) { for (const p of t.parts) walk(p); return; }
       const { normal: n } = cuts[t.cut];
       const o = cuts[t.cut].offset * MM;
       const negLeaves = leaves(t.neg), posLeaves = leaves(t.pos);
@@ -1767,19 +1882,26 @@ export function splitForPrint(wasm: ManifoldToplevel, soups: ArrayLike<number>[]
     // A face with no pin is simply glued, and most such faces are slivers where
     // one cut ends against another, between sections that are pinned to the
     // part elsewhere. What matters is a section — or a group of them — that no
-    // pin ties to the rest at all: that one has to be lined up by hand.
+    // pin ties to the rest of its own connected solid at all: that one has to
+    // be lined up by hand. Check each root component independently so separate
+    // pieces (e.g. a mold's cavity half and lid half) do not falsely warn.
     if (joinery.kind !== 'none' && plain.length > 1) {
       const root = plain.map((_, i) => i);
       const find = (i: number): number => (root[i] === i ? i : (root[i] = find(root[i])));
       for (const j of joints) if (j.pins.length) root[find(j.neg)] = find(j.pos);
-      const groups = new Map<number, number[]>();
-      plain.forEach((_, i) => groups.set(find(i), [...(groups.get(find(i)) ?? []), i]));
-      if (groups.size > 1) {
-        const largest = [...groups.values()].sort((a, b) => b.length - a.length)[0];
-        for (const g of groups.values()) {
-          if (g === largest) continue;
-          const names = g.map((i) => i + 1).join(', ');
-          ctx.warnings.push(`Section${g.length > 1 ? 's' : ''} ${names} ${g.length > 1 ? 'have' : 'has'} insufficient wall margin (${joinery.minWallMm} mm) for a Ø${joinery.diameterMm} mm ${joinery.kind === 'dowel' ? 'dowel' : 'peg'} and must be aligned manually during glue-up.`);
+      const compSubTrees = 'parts' in tree ? tree.parts : [tree];
+      for (const sub of compSubTrees) {
+        const compSections = leaves(sub);
+        if (compSections.length <= 1) continue;
+        const groups = new Map<number, number[]>();
+        for (const s of compSections) groups.set(find(s), [...(groups.get(find(s)) ?? []), s]);
+        if (groups.size > 1) {
+          const largest = [...groups.values()].sort((a, b) => b.length - a.length)[0];
+          for (const g of groups.values()) {
+            if (g === largest) continue;
+            const names = g.map((i) => i + 1).join(', ');
+            ctx.warnings.push(`Section${g.length > 1 ? 's' : ''} ${names} ${g.length > 1 ? 'have' : 'has'} insufficient wall margin (${joinery.minWallMm} mm) for a Ø${joinery.diameterMm} mm ${joinery.kind === 'dowel' ? 'dowel' : 'peg'} and must be aligned manually during glue-up.`);
+          }
         }
       }
     }

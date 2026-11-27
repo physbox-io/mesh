@@ -177,7 +177,8 @@ export function featureGeoms(colliders: FeatureCollider[], prefix: string, rgba:
   });
 }
 
-const leavesOf = (t: SplitTree): number[] => ('section' in t ? [t.section] : [...leavesOf(t.neg), ...leavesOf(t.pos)]);
+const leavesOf = (t: SplitTree): number[] =>
+  'section' in t ? [t.section] : 'parts' in t ? t.parts.flatMap(leavesOf) : [...leavesOf(t.neg), ...leavesOf(t.pos)];
 
 /** Body-frame bounds of some sections, after a rotation. */
 function rotatedMinZ(split: SplitOk, sections: number[], R: Mat3): number {
@@ -214,6 +215,7 @@ export function buildAssemblyPlan(split: SplitOk): AssemblyPlan {
 
   const visit = (t: SplitTree) => {
     if ('section' in t) return;
+    if ('parts' in t) { for (const p of t.parts) visit(p); return; }
     visit(t.neg);
     visit(t.pos);
     const cut = split.cuts[t.cut];
