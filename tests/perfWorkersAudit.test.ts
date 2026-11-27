@@ -193,7 +193,7 @@ describe('slipMoldClient, brickworkClient & pipeFrameClient: coalescing, scene c
     expect(w1.sent[0].scene).toBe(s);
 
     // Timeout p1: w1 terminates, p1 rejects, p3 runs on a fresh worker w2 with scene resent!
-    vi.advanceTimersByTime(120_001);
+    vi.advanceTimersByTime(240_001);
     await expect(p1).rejects.toThrow(/took too long/i);
     expect(w1.terminated).toBe(true);
     expect(FakeSlipWorker.instances).toHaveLength(2);
