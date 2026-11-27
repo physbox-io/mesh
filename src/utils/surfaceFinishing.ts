@@ -703,7 +703,7 @@ export function finishSurface(
             }
             down = true;
             w.segments.push({
-              type: 'roughing',
+              type: 'finishing',
               points: link ? [...link.slice(0, -1), ...pass] : pass,
               traverseZ: link ? link[0].z : w.lastTraverseZ,
             });
