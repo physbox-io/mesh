@@ -1879,7 +1879,7 @@ function analyseCast(
     const deg = draftDeg(nz, cz >= z);
     if (deg >= -UNDERCUT_NOISE_DEG) return deg;
     if (Math.abs(nz) <= 1e-6) return deg;
-    let top = Infinity, bottom = -Infinity;
+    let top: number, bottom: number;
     if (count <= 40_000) {
       if (!probe) probe = columnProbe(tris, b);
       const col = probe(cx, cy);
