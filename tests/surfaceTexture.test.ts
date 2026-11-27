@@ -370,6 +370,50 @@ describe('guards', () => {
     expect(check.closed && check.consistentlyWound).toBe(true);
   });
 
+  it('keeps full depth on a flat face whose rim has a tight cast-prep fillet inside the border', () => {
+    // Revolved flat disk (R = 20 mm) with a 0.7 mm concave fillet around its perimeter,
+    // mimicking a medallion face after physics_set_cast_prep / physics_round_edges.
+    const segs = 32;
+    const filletSteps = 6;
+    const R = 0.02;
+    const rFillet = 0.0007;
+    const profile: [number, number][] = [[0, 0], [R + rFillet, 0], [R + rFillet, 0.005]];
+    for (let s = 0; s <= filletSteps; s++) {
+      const a = (s / filletSteps) * (Math.PI / 2);
+      profile.push([R + rFillet * (1 - Math.sin(a)), 0.004 + rFillet * (1 - Math.cos(a))]);
+    }
+    profile.push([0, 0.004]);
+    const pos: number[] = [];
+    const faces: number[] = [];
+    // Bottom center = 0, top center = 1, rings start at 2.
+    pos.push(0, 0, profile[0][1]);
+    pos.push(0, 0, profile[profile.length - 1][1]);
+    const ringPts = profile.slice(1, -1);
+    for (let i = 0; i < segs; i++) {
+      const th = (i / segs) * Math.PI * 2;
+      const c = Math.cos(th), s = Math.sin(th);
+      for (const [rad, z] of ringPts) pos.push(rad * c, rad * s, z);
+    }
+    const stride = ringPts.length;
+    for (let i = 0; i < segs; i++) {
+      const j = (i + 1) % segs;
+      const a0 = 2 + i * stride;
+      const b0 = 2 + j * stride;
+      faces.push(0, b0, a0);
+      for (let k = 0; k < stride - 1; k++) {
+        faces.push(a0 + k, b0 + k, b0 + k + 1, a0 + k, b0 + k + 1, a0 + k + 1);
+      }
+      faces.push(1, a0 + stride - 1, b0 + stride - 1);
+    }
+    const out = applySurfaceTextures(pos, faces, [
+      fluted({ seedAt: [0, 0, 0.004], seedNormal: [0, 0, 1], depthM: 0.0016, borderM: 0.0015, cellM: 0.0015 }),
+    ]);
+    const [r] = out.regions;
+    expect(r.applied).toBe(true);
+    expect(r.depthM).toBeCloseTo(0.0016, 6);
+    expect(out.warnings.some((w) => /curves too tightly/.test(w))).toBe(false);
+  });
+
   it('refines more coarsely rather than past the triangle limit', () => {
     const { positions, faces } = box(HX, HY, HZ);
     const out = applySurfaceTextures(positions, faces, [fluted({ cellM: 0.0002 })], { maxTriangles: 20_000 });

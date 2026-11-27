@@ -790,16 +790,54 @@ function cachedIndexSurface(positions: ArrayLike<number>, faces: ArrayLike<numbe
 }
 
 /**
- * The tightest the region curves, as a radius in metres: the angle between
- * neighbouring facets over the distance between their middles. Infinite on a
- * flat face.
+ * The tightest the region curves where the pattern actually displaces, as a
+ * radius in metres: the angle between neighbouring facets over the distance
+ * between their middles. Infinite on a flat face.
+ *
+ * Edges whose midpoint lies within `borderM` of the region's boundary never
+ * displace (fade is zero there), so a tight edge fillet added by cast prep or
+ * edge rounding around a flat face does not crush the pattern's depth. Sliver
+ * facet pairs (`across < 0.1 mm`) from CSG boolean seams are also ignored; the
+ * geometric fold guard after displacement still catches any real fold.
  */
-function minCurvatureRadius(mesh: Mesh, normals: Vec3[], edges: Map<number, number[]>, region: Set<number>): number {
+function minCurvatureRadius(
+  mesh: Mesh,
+  normals: Vec3[],
+  edges: Map<number, number[]>,
+  region: Set<number>,
+  borderM = 0,
+): number {
   const centroid = (f: number): Vec3 => {
     const a = vtx(mesh.pos, mesh.faces[3 * f]);
     const b = vtx(mesh.pos, mesh.faces[3 * f + 1]);
     const c = vtx(mesh.pos, mesh.faces[3 * f + 2]);
     return [(a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3, (a[2] + b[2] + c[2]) / 3];
+  };
+  const border2 = borderM > 0 ? borderM * borderM : 0;
+  let boundarySegs: [Vec3, Vec3][] | null = null;
+  const nearBoundary = (p: Vec3): boolean => {
+    if (border2 <= 0) return false;
+    if (!boundarySegs) {
+      boundarySegs = [];
+      for (const [key, list] of edges) {
+        let inCount = 0;
+        for (const f of list) if (region.has(f)) inCount++;
+        if (inCount > 0 && (list.length !== 2 || inCount < 2)) {
+          boundarySegs.push([vtx(mesh.pos, Math.floor(key / KEY)), vtx(mesh.pos, key % KEY)]);
+        }
+      }
+    }
+    for (let i = 0; i < boundarySegs.length; i++) {
+      const [a, b] = boundarySegs[i];
+      const ab = sub(b, a);
+      const ab2 = dot(ab, ab);
+      const t = ab2 > 0 ? Math.max(0, Math.min(1, dot(sub(p, a), ab) / ab2)) : 0;
+      const dx = p[0] - (a[0] + ab[0] * t);
+      const dy = p[1] - (a[1] + ab[1] * t);
+      const dz = p[2] - (a[2] + ab[2] * t);
+      if (dx * dx + dy * dy + dz * dz < border2) return true;
+    }
+    return false;
   };
   let maxK = 0;
   for (const [key, list] of edges) {
@@ -807,14 +845,18 @@ function minCurvatureRadius(mesh: Mesh, normals: Vec3[], edges: Map<number, numb
     const c = Math.min(1, Math.max(-1, dot(normals[list[0]], normals[list[1]])));
     const angle = Math.acos(c);
     if (angle < 1e-4) continue;
+    const va = vtx(mesh.pos, Math.floor(key / KEY));
+    const vb = vtx(mesh.pos, key % KEY);
+    const mid: Vec3 = [(va[0] + vb[0]) * 0.5, (va[1] + vb[1]) * 0.5, (va[2] + vb[2]) * 0.5];
+    if (nearBoundary(mid)) continue;
     // Across the edge, not along it: two long facets of a cylinder have their
     // middles far apart up the axis, and that distance says nothing about how
     // tightly the surface turns round it.
-    const along = norm(sub(vtx(mesh.pos, key % KEY), vtx(mesh.pos, Math.floor(key / KEY))));
+    const along = norm(sub(vb, va));
     const d = sub(centroid(list[0]), centroid(list[1]));
     const t = dot(d, along);
     const across = len([d[0] - along[0] * t, d[1] - along[1] * t, d[2] - along[2] * t]);
-    if (across > 0) maxK = Math.max(maxK, angle / across);
+    if (across >= 1e-4) maxK = Math.max(maxK, angle / across);
   }
   return maxK > 0 ? 1 / maxK : Infinity;
 }
@@ -1727,7 +1769,8 @@ export function applySurfaceTextures(
 
     // A deep engrave on a tight curve folds the surface through itself.
     let depthM = texture.depthM;
-    const radius = minCurvatureRadius(mesh, normals, edges, new Set(grown));
+    const borderM = Math.max(0, texture.borderM ?? DEFAULT_TEXTURE_BORDER_M);
+    const radius = minCurvatureRadius(mesh, normals, edges, new Set(grown), borderM);
     if (Math.abs(depthM) > radius / 2) {
       depthM = Math.sign(depthM) * (radius / 2);
       warnings.push(`Pattern ${index + 1}: the surface curves too tightly for ${(Math.abs(texture.depthM) * 1000).toFixed(1)} mm, so it is ${(Math.abs(depthM) * 1000).toFixed(1)} mm deep.`);
