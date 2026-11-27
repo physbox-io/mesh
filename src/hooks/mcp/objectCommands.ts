@@ -716,12 +716,22 @@ export const objectCommands: McpCommands = {
       // before it had been applied.
       // Inherit top-level brush defaults (e.g. rgba, radius, flow, hardness,
       // geomName, erase) into each stroke unless overridden per stroke.
+      // When a stroke sets radiusMm (or atMm), drop any inherited radius (or at)
+      // so the stroke's millimetre unit isn't shadowed by a top-level default.
       const { targetId: _tid, strokes: _strokes, ...topDefaults } = msg as Record<string, unknown>;
       void _tid; void _strokes;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const results: Record<string, any>[] = strokes.map((s) => {
         try {
-          return applyPaintStrokeToBody(targetId, { ...topDefaults, ...s });
+          if (!isPlainObject(s)) {
+            return { ok: false, error: 'Each paint stroke must be a plain object' };
+          }
+          const merged: Record<string, unknown> = { ...topDefaults, ...s };
+          if (s.radiusMm !== undefined && s.radius === undefined) delete merged.radius;
+          if (s.radius !== undefined && s.radiusMm === undefined) delete merged.radiusMm;
+          if (s.atMm !== undefined && s.at === undefined) delete merged.at;
+          if (s.at !== undefined && s.atMm === undefined) delete merged.atMm;
+          return applyPaintStrokeToBody(targetId, merged);
         } catch (err) {
           return { ok: false, error: err instanceof Error ? err.message : String(err) };
         }

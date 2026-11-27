@@ -1985,10 +1985,14 @@ function analyseCast(
       severity: 'warning',
       title: `Walls have < ${limits.draftDeg}° draft`,
       detail: `${(dragShare * 100).toFixed(0)}% of the surface has less than ${limits.draftDeg}° draft over ${heightMm.toFixed(0)} mm height.`,
-      fix: `Taper walls by ${limits.draftDeg}° (Mold → Draft, or skip draft with a Dissolvable Liner or Silicone Pour Box).`,
+      fix: limits.castSlip
+        ? `Taper walls by ${limits.draftDeg}° (or split into more radial pieces in Slip Cast Mold).`
+        : `Taper walls by ${limits.draftDeg}° (Mold → Draft, or skip draft with a Dissolvable Liner or Silicone Pour Box).`,
       position: hotSpot(tris, heat, 0.05) ?? [0, 0, partingZ],
       metric: dragShare,
-      actions: [{ kind: 'open_fab', label: `Add ${limits.draftDeg}° Draft`, modal: 'mold', moldTab: 'rigid' }],
+      actions: limits.castSlip
+        ? [{ kind: 'open_fab', label: 'Slip Cast Mold', modal: 'mold', moldTab: 'slip' }]
+        : [{ kind: 'open_fab', label: `Add ${limits.draftDeg}° Draft`, modal: 'mold', moldTab: 'rigid' }],
     });
   }
 

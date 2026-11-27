@@ -58,18 +58,19 @@ export function sceneWithSlipMold(
   }
   for (const p of mold.pieces) {
     const id = `slipplaster_${pieceKey(p.name)}_${tag}`;
-    added.push({ ...meshBody(id, `${partName}_plaster_${pieceKey(p.name)}`, p.plaster, PLASTER_RGBA), slipMold: { piece: p.name, role: 'plaster', slip, ...(partIds.length ? { partIds: [...partIds] } : {}) } });
+    added.push({ ...meshBody(id, `${partName}_plaster_${pieceKey(p.name)}`, p.plaster, PLASTER_RGBA), collision: 'hull', slipMold: { piece: p.name, role: 'plaster', slip, ...(partIds.length ? { partIds: [...partIds] } : {}) } });
     plasterIds.push(id);
   }
+  const caseFloor = Math.max(0, floor);
   let x = maxX + 20;
   for (const p of mold.pieces) {
     const key = pieceKey(p.name);
     if (p.caseParts.length <= 1) {
       const b = bounds(p.casePrint);
-      const placed = shifted(p.casePrint, [x - b.lo[0], midY - (b.lo[1] + b.hi[1]) / 2, floor - b.lo[2]]);
+      const placed = shifted(p.casePrint, [x - b.lo[0], midY - (b.lo[1] + b.hi[1]) / 2, caseFloor - b.lo[2]]);
       x += b.hi[0] - b.lo[0] + 20;
       const id = `slipcase_${key}_${tag}`;
-      added.push({ ...meshBody(id, `${partName}_case_${key}`, placed, CASE_RGBA), slipMold: { piece: p.name, role: 'case', slip, ...(partIds.length ? { partIds: [...partIds] } : {}) } });
+      added.push({ ...meshBody(id, `${partName}_case_${key}`, placed, CASE_RGBA), collision: 'hull', slipMold: { piece: p.name, role: 'case', slip, ...(partIds.length ? { partIds: [...partIds] } : {}) } });
       caseIds.push(id);
     } else {
       const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
@@ -77,12 +78,12 @@ export function sceneWithSlipMold(
         const cb = bounds(cp.assembled);
         for (let a = 0; a < 3; a++) { lo[a] = Math.min(lo[a], cb.lo[a]); hi[a] = Math.max(hi[a], cb.hi[a]); }
       }
-      const shift: [number, number, number] = [x - lo[0], midY - (lo[1] + hi[1]) / 2, floor - lo[2]];
+      const shift: [number, number, number] = [x - lo[0], midY - (lo[1] + hi[1]) / 2, caseFloor - lo[2]];
       x += hi[0] - lo[0] + 20;
       for (const cp of p.caseParts) {
         const placed = shifted(cp.assembled, shift);
         const id = `slipcase_${key}_${cp.key}_${tag}`;
-        added.push({ ...meshBody(id, `${partName}_case_${key}_${cp.key}`, placed, partRgba(cp.role)), slipMold: { piece: p.name, role: 'case', slip, ...(partIds.length ? { partIds: [...partIds] } : {}) } });
+        added.push({ ...meshBody(id, `${partName}_case_${key}_${cp.key}`, placed, partRgba(cp.role)), collision: 'hull', slipMold: { piece: p.name, role: 'case', slip, ...(partIds.length ? { partIds: [...partIds] } : {}) } });
         caseIds.push(id);
       }
     }

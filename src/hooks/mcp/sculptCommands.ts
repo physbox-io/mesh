@@ -186,8 +186,20 @@ export const sculptCommands: McpCommands = {
         throw new Error('strokes must be a non-empty array of stroke objects');
       }
     }
+    const topDefaults: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries({ brush, radius, radiusMm, strength, invert, symmetryX, symmetry, detail, dynamicTopology, delta, depthMm, hardness })) {
+      if (v !== undefined) topDefaults[k] = v;
+    }
     const strokeList = strokes !== undefined
-      ? strokes
+      ? strokes.map((s) => {
+          if (!s || typeof s !== 'object' || Array.isArray(s)) return s;
+          const merged: Record<string, unknown> = { ...topDefaults, ...s };
+          if (s.radiusMm !== undefined && s.radius === undefined) delete merged.radius;
+          if (s.radius !== undefined && s.radiusMm === undefined) delete merged.radiusMm;
+          if (s.atMm !== undefined && s.at === undefined) delete merged.at;
+          if (s.at !== undefined && s.atMm === undefined) delete merged.atMm;
+          return merged;
+        })
       : [{ brush, at, atMm, radius, radiusMm, strength, invert, symmetryX, symmetry, detail, dynamicTopology, delta, depthMm, hardness }];
 
     const isFiniteVec3 = (p: unknown): p is number[] =>
