@@ -70,6 +70,32 @@ export const normalizeRgba = (
   rgba: unknown,
   fallbackAlpha = 1,
 ): [number, number, number, number] | undefined => {
+  if (typeof rgba === 'string') {
+    const s = rgba.trim();
+    const m6 = /^#([0-9a-fA-F]{6})([0-9a-fA-F]{2})?$/.exec(s);
+    if (m6) {
+      const rgb = m6[1];
+      const aHex = m6[2];
+      const r = parseInt(rgb.slice(0, 2), 16) / 255;
+      const g = parseInt(rgb.slice(2, 4), 16) / 255;
+      const b = parseInt(rgb.slice(4, 6), 16) / 255;
+      const alpha = aHex !== undefined ? parseInt(aHex, 16) / 255 : fallbackAlpha;
+      if (typeof alpha !== 'number' || !Number.isFinite(alpha) || alpha < 0 || alpha > 1) return undefined;
+      return [r, g, b, alpha];
+    }
+    const m3 = /^#([0-9a-fA-F]{3})([0-9a-fA-F])?$/.exec(s);
+    if (m3) {
+      const rgb = m3[1];
+      const aHex = m3[2];
+      const r = parseInt(rgb[0] + rgb[0], 16) / 255;
+      const g = parseInt(rgb[1] + rgb[1], 16) / 255;
+      const b = parseInt(rgb[2] + rgb[2], 16) / 255;
+      const alpha = aHex !== undefined ? parseInt(aHex + aHex, 16) / 255 : fallbackAlpha;
+      if (typeof alpha !== 'number' || !Number.isFinite(alpha) || alpha < 0 || alpha > 1) return undefined;
+      return [r, g, b, alpha];
+    }
+    return undefined;
+  }
   if (!Array.isArray(rgba) || (rgba.length !== 3 && rgba.length !== 4)) return undefined;
   for (let i = 0; i < rgba.length; i++) {
     const v = rgba[i];

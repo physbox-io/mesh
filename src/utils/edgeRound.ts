@@ -409,6 +409,9 @@ export type ClampedRoundingPlan =
   | { ok: false; maxFit: number };
 
 const MIN_CLAMPED_ROUND_SIZE_M = 1e-5; // 0.01 mm
+// Skip edges whose max fit is under 10% of the requested size so requesting a
+// 3 mm fillet on a faceted mesh doesn't emit dozens of 0.01–0.16 mm CSG slivers.
+const MIN_CLAMPED_RATIO = 0.1;
 
 /**
  * Plans rounding sizes for a selection of edges, clamping tight/short facet
@@ -444,6 +447,7 @@ export function planClampedRoundings(
     return { ok: false, maxFit: minFit };
   }
 
+  const minUseful = Math.max(MIN_CLAMPED_ROUND_SIZE_M, requestedSize * MIN_CLAMPED_RATIO);
   const buckets = new Map<number, { size: number; edges: RoundEdge[] }>();
   let clampedCount = 0;
   let skippedCount = 0;
@@ -452,7 +456,7 @@ export function planClampedRoundings(
     let size: number;
     if (edgeMax >= requestedSize - 1e-9) {
       size = requestedSize;
-    } else if (edgeMax >= MIN_CLAMPED_ROUND_SIZE_M) {
+    } else if (edgeMax >= minUseful) {
       size = Math.floor(edgeMax * 1e5) / 1e5;
       clampedCount++;
     } else {

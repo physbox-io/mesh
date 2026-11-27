@@ -321,7 +321,7 @@ function runMeshPaintSubdivision(
 
   const edgeKey = (u: number, v: number): number => {
     const cu = canon[u], cv = canon[v];
-    return cu < cv ? (cu << 16) | cv : (cv << 16) | cu;
+    return cu < cv ? cu * 1e7 + cv : cv * 1e7 + cu;
   };
 
   let curFaces = Uint32Array.from(faces);
@@ -330,11 +330,12 @@ function runMeshPaintSubdivision(
   for (let pass = 0; pass < MAX_MESH_SUBDIV_PASSES && vCount < MAX_MESH_PAINT_VERTICES; pass++) {
     const midpoints = new Map<number, number>();
     const maybeSplitEdge = (u: number, v: number) => {
-      if (dist2(u, v) <= maxEdge2) return;
-      const key = edgeKey(u, v);
+      const cu = canon[u], cv = canon[v];
+      if (cu === cv || dist2(cu, cv) <= maxEdge2) return;
+      const key = edgeKey(cu, cv);
       if (midpoints.has(key) || vCount >= MAX_MESH_PAINT_VERTICES) return;
       const m = vCount++;
-      const u3 = u * 3, v3 = v * 3, m3 = m * 3;
+      const u3 = cu * 3, v3 = cv * 3, m3 = m * 3;
       posBuf[m3] = 0.5 * (posBuf[u3] + posBuf[v3]);
       posBuf[m3 + 1] = 0.5 * (posBuf[u3 + 1] + posBuf[v3 + 1]);
       posBuf[m3 + 2] = 0.5 * (posBuf[u3 + 2] + posBuf[v3 + 2]);
@@ -472,7 +473,7 @@ export function coarsenPaintedMesh(
   };
   const edgeKey = (u: number, v: number): number => {
     const cu = canon[u], cv = canon[v];
-    return cu < cv ? (cu << 16) | cv : (cv << 16) | cu;
+    return cu < cv ? cu * 1e7 + cv : cv * 1e7 + cu;
   };
 
   // Top-down conforming emission: only mixed triangles initiate splits; uniform

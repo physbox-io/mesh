@@ -345,5 +345,15 @@ describe('faceted curves and per-edge clamping', () => {
     // Rejects when a single picked edge cannot fit, or when no edge fits.
     expect(planClampedRoundings([tight], 'chamfer', 0.0004).ok).toBe(false);
     expect(planClampedRoundings([roomy, tight], 'chamfer', 0.01).ok).toBe(false);
+
+    // Skips microscopic edges (< 10% of requested size) on large fillet requests
+    // rather than generating 0.01–0.16 mm CSG slivers.
+    const largePlan = planClampedRoundings([roomy, tight, tiny], 'chamfer', 0.003);
+    expect(largePlan.ok).toBe(true);
+    if (largePlan.ok) {
+      expect(largePlan.clampedCount).toBe(0);
+      expect(largePlan.skippedCount).toBe(2);
+      expect(largePlan.groups).toHaveLength(1);
+    }
   });
 });
