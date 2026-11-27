@@ -120,6 +120,9 @@ describe('silicone chain', () => {
     if (!r.ok) return;
     expect(r.pouredThrough).toBe('foot');
     expect(r.piece.volumeMm3 / 8000).toBeCloseTo(1, 1);
+    // Plugged wick hole must not leave a protruding wax spike through the silicone cover.
+    expect(r.piece.deviation!.maxMm).toBeLessThan(0.6);
+    expect(r.piece.deviation!.meanMm).toBeLessThan(0.2);
   }, 60000);
 
   it('stops at the mold face below the base groove flash even on a compact (<20 mm) mold', async () => {

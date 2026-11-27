@@ -500,7 +500,9 @@ export async function siliconeChain(
 
     // Poured through a hole, the casting stands as the master does already, with
     // the hole's stub on top to cut off; poured through the foot, it comes out
-    // upside down and is turned over.
+    // upside down and is turned over. When a wick or fixing hole was cast into
+    // the silicone, it is plugged during the pour so wax/resin does not fill
+    // the hole column through the silicone wall.
     if (pourHole) {
       // The stub is the hole's own column: found where the casting meets the
       // top, cut from the hole's foot up. The casting's bottom is the master's
@@ -514,6 +516,26 @@ export async function siliconeChain(
       const r = pourHole.diaMm / 2 + 0.05;
       const stub = own.take(wasm.Manifold.cylinder(level + 1 - cutZ, r, r, 32).translate([(m.min[0] + m.max[0]) / 2, (m.min[1] + m.max[1]) / 2, cutZ]));
       casting = own.take(casting.subtract(stub));
+    } else if (box.hole) {
+      // Plugged wick or fixing hole at the bottom of the inverted silicone mold:
+      // remove the column that entered the hole through the silicone cover so
+      // the simulated casting stops flush at the master's top.
+      const b = casting.boundingBox();
+      const holeDepth = box.report.fillZMm - (box.hole.footMm[2] + 0.5);
+      const cutZ = b.min[2] + holeDepth;
+      if (holeDepth > 0.05 && cutZ < level - 0.3) {
+        const mouth = casting.slice(b.min[2] + Math.min(0.3, holeDepth * 0.5));
+        if (!mouth.isEmpty()) {
+          const m = mouth.bounds();
+          const r = box.hole.diaMm / 2 + 0.05;
+          const plug = own.take(
+            wasm.Manifold.cylinder(holeDepth + 1, r, r, 32)
+              .translate([(m.min[0] + m.max[0]) / 2, (m.min[1] + m.max[1]) / 2, b.min[2] - 1]),
+          );
+          casting = own.take(casting.subtract(plug));
+        }
+        mouth.delete();
+      }
     }
     const raw = meshOf(casting);
     const volume = casting.volume();
