@@ -24,7 +24,8 @@ export type CollisionMode = 'auto' | 'hull' | 'decompose' | 'primitives' | 'hfie
 
 /** The hardware features a part can have cut into it; see utils/hardwareCuts.ts. */
 export type HardwareCutKind = 'nut_trap' | 'nut_slot' | 'counterbore' | 'insert' | 'insert_boss' | 'bearing' | 'oring' | 'seal_cord'
-  | 'rail_seat' | 'rod_clamp' | 'lm_housing' | 'snap_hook' | 'snap_catch';
+  | 'rail_seat' | 'rod_clamp' | 'lm_housing' | 'snap_hook' | 'snap_catch'
+  | 'magnet_pocket' | 'standoff' | 'threaded_hole';
 /**
  * Where an O-ring groove seals: in a face, against a lid pressed onto it; in a
  * bore's wall, around a shaft pushed through; or around a boss, inside the bore
@@ -38,7 +39,7 @@ export type HardwareBore = 'clearance' | 'tapped' | 'insert';
 export type HardwarePartPiece = 'inner' | 'carriage' | 'middle' | 'coil';
 
 /** The bought hardware that can be put in a scene; see utils/hardwareParts.ts. */
-export type CorePartKind = 'bearing' | 'screw' | 'nut' | 'shaft' | 'oring';
+export type CorePartKind = 'bearing' | 'screw' | 'nut' | 'shaft' | 'oring' | 'insert' | 'washer' | 'magnet';
 /**
  * Every kind of bought part. Each family past the core ones lives in a module
  * of its own (utils/linearParts.ts, utils/extrusionParts.ts) and adds its
@@ -82,6 +83,8 @@ export interface HardwarePart {
   seat?: string;
   /** A screw's: the body it fastened to the one it sits in, by a weld on that body. */
   fastens?: string;
+  /** For a magnet: 1 = north pole along +Z, -1 = north pole along -Z. */
+  polarity?: 1 | -1;
 }
 
 export interface SceneGeom {

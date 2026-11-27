@@ -49,6 +49,15 @@ export const INSERTS: Record<string, [number, number, number]> = {
   M6: [8, 12.7, 14], M8: [9.8, 12.5, 18],
 };
 
+/** Standard neodymium disc magnets: [diameter, thickness], mm. */
+export const MAGNETS: Record<string, [diameter: number, thickness: number]> = {
+  '6×2': [6, 2], '6×3': [6, 3], '8×2': [8, 2], '8×3': [8, 3],
+  '10×2': [10, 2], '10×3': [10, 3], '12×3': [12, 3], '15×3': [15, 3], '20×3': [20, 3],
+};
+
+/** Standard PCB / mounting standoff heights, mm. */
+export const STANDOFF_HEIGHTS = [4, 5, 6, 8, 10, 12, 15, 20] as const;
+
 /** Ball bearings: [outer diameter, bore, width], mm. */
 export const BEARINGS: Record<string, [number, number, number]> = {
   '623': [10, 3, 4], '624': [13, 4, 5], '625': [16, 5, 5], '626': [19, 6, 6], '688': [16, 8, 5],

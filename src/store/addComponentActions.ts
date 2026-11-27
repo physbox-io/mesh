@@ -50,7 +50,7 @@ export interface AddComponentActions {
    * rather than each under the last. Without one it goes at the top level and
    * is selected.
    */
-  addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'cable' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve' | 'ring' | 'sculpt' | 'lattice' | 'blob', position: number[], parentId?: string | null, opts?: AddPlacement) => string;
+  addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'cable' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve' | 'ring' | 'tray' | 'sculpt' | 'lattice' | 'blob', position: number[], parentId?: string | null, opts?: AddPlacement) => string;
   /** Adds a body; it is selected once built unless `select` is false. */
   addHardwareComponentNode: (hardwareNode: SceneNode, opts?: { select?: boolean }) => void;
 }
@@ -351,8 +351,17 @@ export function addComponentActions({ set, get }: SliceDeps): AddComponentAction
             { name: `${id}_hole`, type: 'ellipsoid', size: [0.03, 0.03, 0.035], csg: 'difference', pos: [0, 0, 0], rgba: [0.9, 0.25, 0.35, 1] },
           ];
           joints = [{ name: `${id}_free`, type: 'free' }];
+        } else if (type === 'tray') {
+          // Open-top hollow box / tray: 100×80×40 mm outer box with 3mm walls and
+          // floor. The cavity starts 3mm above the bottom and overshoots the top
+          // by 3mm so there is no coincident top face for CSG.
+          geoms = [
+            { name: `${id}_outer`, type: 'box', size: [0.05, 0.04, 0.02], mass: 1, rgba: [0.25, 0.62, 0.76, 1], condim: 3 },
+            { name: `${id}_cavity`, type: 'box', size: [0.047, 0.037, 0.02], csg: 'difference', pos: [0, 0, 0.003], rgba: [0.9, 0.25, 0.35, 1] },
+          ];
+          joints = [{ name: `${id}_free`, type: 'free' }];
         }
-        if (type !== 'mesh' && type !== 'openscad' && type !== 'pyramid' && type !== 'cone' && type !== 'torus' && type !== 'tube' && type !== 'ring' && type !== 'sculpt' && type !== 'lattice') {
+        if (type !== 'mesh' && type !== 'openscad' && type !== 'pyramid' && type !== 'cone' && type !== 'torus' && type !== 'tube' && type !== 'ring' && type !== 'tray' && type !== 'sculpt' && type !== 'lattice') {
           geoms = [{ name: `${id}_geom`, type: geomType, size, mass, rgba }];
         }
         if (type === 'blob') {
@@ -437,7 +446,7 @@ export function addComponentActions({ set, get }: SliceDeps): AddComponentAction
         ...(type === 'openscad' ? {
           scad: `// Example OpenSCAD Code\ndifference() {\n  cube([0.1, 0.1, 0.1], center=true);\n  sphere(d=0.12, $fn=16);\n}`
         } : {}),
-        ...(type === 'ring' ? {
+        ...(type === 'ring' || type === 'tray' ? {
           csgEnabled: true,
           csgCollision: 'auto' as const,
           csgSectors: CSG_DEFAULT_SECTORS,

@@ -556,3 +556,52 @@ export const PuttyIcon = () => (
     />
   </svg>
 );
+
+export const TrayIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
+    <defs>
+      <linearGradient id="tile-tray-inner" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stopColor="#164e63" />
+        <stop offset="100%" stopColor="#083344" />
+      </linearGradient>
+    </defs>
+    <ellipse cx="12" cy="21" rx="8" ry="1.5" className="fill-cyan-900/12 dark:fill-black/35" />
+    {/* Recessed inner cavity visible through open top */}
+    <polygon
+      points="12,5 18.5,8.5 12,12 5.5,8.5"
+      fill="url(#tile-tray-inner)"
+    />
+    {/* Inner back-left & back-right walls */}
+    <polygon
+      points="12,5 12,9.5 6.8,9.2 5.5,8.5"
+      className="fill-cyan-800/75 dark:fill-cyan-950/90"
+    />
+    <polygon
+      points="12,5 18.5,8.5 17.2,9.2 12,9.5"
+      className="fill-cyan-700/75 dark:fill-cyan-900/90"
+    />
+    {/* Outer front-left wall */}
+    <polygon
+      points="3,8.5 12,13.5 12,20 3,15"
+      className="fill-cyan-400/80 dark:fill-cyan-500/50 stroke-cyan-600 dark:stroke-cyan-400"
+      strokeWidth="1.3"
+      strokeLinejoin="round"
+    />
+    {/* Outer front-right wall */}
+    <polygon
+      points="12,13.5 21,8.5 21,15 12,20"
+      className="fill-cyan-600/85 dark:fill-cyan-700/60 stroke-cyan-600 dark:stroke-cyan-400"
+      strokeWidth="1.3"
+      strokeLinejoin="round"
+    />
+    {/* Top hollow rim */}
+    <path
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M12 3.5 L21 8.5 L12 13.5 L3 8.5 Z M12 5.4 L17.6 8.5 L12 11.6 L6.4 8.5 Z"
+      className="fill-cyan-200 dark:fill-cyan-300/70 stroke-cyan-600 dark:stroke-cyan-400"
+      strokeWidth="1.2"
+      strokeLinejoin="round"
+    />
+  </svg>
+);

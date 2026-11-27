@@ -74,6 +74,15 @@ export function FabricPalette({ onPlaced }: { onPlaced?: () => void }) {
     onPlaced?.();
   };
 
+  const addForm = () => {
+    const figure: BodyFigure = 'newForm' in chosen ? chosen.newForm : 'loose' in chosen ? chosen.loose : 'female';
+    const form = newFormNode(useStore.getState().sceneGraph.nodes, figure);
+    addClothNode(form);
+    frameForm(form);
+    setPick('');
+    onPlaced?.();
+  };
+
   const tile = 'py-1.5 px-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-[11px] font-semibold text-slate-600 dark:text-slate-300 hover:border-purple-300 hover:text-purple-700 dark:hover:text-purple-300 transition-colors cursor-pointer truncate';
   return (
     <div className="mt-4 pt-3 border-t border-slate-200 dark:border-slate-800">
@@ -84,10 +93,16 @@ export function FabricPalette({ onPlaced }: { onPlaced?: () => void }) {
       </button>
       {open && (
         <>
-          <button onClick={addSheet} title="A sheet of cloth over the selected body (or held up in the open): it drapes when the scene plays; tie its corners from its Cloth card"
-            className={`${tile} w-full mb-3`}>
-            Cloth sheet
-          </button>
+          <div className="grid grid-cols-2 gap-1.5 mb-3">
+            <button onClick={addSheet} title="A sheet of cloth over the selected body (or held up in the open): it drapes when the scene plays; tie its corners from its Cloth card"
+              className={tile}>
+              Cloth sheet
+            </button>
+            <button onClick={addForm} title="Add a standalone dress form to the scene to fit garments onto (switch female/male or measurements in its card)"
+              className={tile}>
+              Dress form
+            </button>
+          </div>
           <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">Garments</div>
           <div className="text-[10px] text-slate-500 dark:text-slate-400 mb-2 flex items-center gap-1.5">
             <span className="shrink-0">On</span>

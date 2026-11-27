@@ -92,6 +92,18 @@ export function HardwarePartCard({ node }: { node: SceneNode }) {
           Washer under the head
         </label>
       )}
+      {spec.kind === 'magnet' && (
+        <label className="flex items-center justify-between text-[11px] text-slate-600 dark:text-slate-300 cursor-pointer" title="Flip the magnet's North/South axis to switch between attraction and repulsion with opposing magnets.">
+          <span>Polarity ({spec.polarity === -1 ? 'N on −Z' : 'N on +Z'})</span>
+          <button
+            type="button"
+            onClick={() => setHardwarePart(node.id, { polarity: spec.polarity === -1 ? 1 : -1 })}
+            className="px-2 py-0.5 rounded border border-slate-200 dark:border-slate-700 text-[10px] font-semibold bg-white dark:bg-slate-800 hover:border-rose-400 cursor-pointer"
+          >
+            Flip N/S
+          </button>
+        </label>
+      )}
       {spec.kind === 'screw' && seatedInCut && (
         <div className="text-[10px] text-slate-500 dark:text-slate-400">
           {fastened ? <>Holds this part to <span className="font-semibold">{fastened.name}</span>.</> : unheldReason(graph, node)}

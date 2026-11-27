@@ -46,6 +46,7 @@ import {
   type WaterBasinWorld,
 } from '../utils/hydrostatics';
 import { bistableForce } from '../utils/flexure';
+import { collectMagnetBodies, applyMagnetForces, type MagnetBody } from '../utils/magnetForces';
 // Pure loop control for the headless run, kept in a module that can be
 // imported outside a Worker realm so it is testable (this file cannot be:
 // it assigns self.onmessage at module scope). See tests/headlessRun.test.ts.
@@ -1141,6 +1142,7 @@ let envWindGusting = false;
 let envDensity = 0;
 let envWaterLevel: number | null = null;
 let envWaterBasins: WaterBasinWorld[] = [];
+let magnetBodies: MagnetBody[] = [];
 let soundEnabled = false;
 
 interface BistableJointEntry {
@@ -4062,6 +4064,7 @@ const stepOnce = (stepSize: number): boolean => {
     applyDragForce();
     applyJointForces(data, linkForces);
     applyHydroAndFlexureForces(stepSize);
+    applyMagnetForces(magnetBodies, data);
 
     const aeroDiagnostics: Record<string, AeroDiagnostic> = {};
     const scriptStart = performance.now();
@@ -4525,6 +4528,7 @@ const doBuild = (
   pendingWake.clear(); // body ids from the old model mean nothing in this one
   envWaterBasins = collectWaterBasins(sceneGraph.nodes);
   rebuildHydroAndFlexureCaches();
+  magnetBodies = collectMagnetBodies(sceneGraph.nodes, bodyIdCache, model);
   scriptCache = {};
 
   // Explicit seed state (from the main thread's live mirror) takes priority
@@ -4740,6 +4744,7 @@ const runHeadless = async (
   const mj = mujoco;
 
   const savedModel = model, savedData = data, savedSceneGraph = sceneGraph;
+  const savedMagnetBodies = magnetBodies;
   const savedCachedHydro = cachedHydroByNodeId;
   const savedHydroByBodyId = hydroByBodyId;
   const savedBistableJoints = bistableJoints;
@@ -4823,6 +4828,7 @@ const runHeadless = async (
     rebuildBreakableWelds();
     watchImpacts();
     rebuildHydroAndFlexureCaches(headlessHydroModels, headlessWaterLevel, headlessWaterBasins);
+    magnetBodies = collectMagnetBodies(sceneGraph.nodes, bodyIdCache, model);
 
     seedActuatorCtrl(sceneGraph.nodes, data);
     mujoco.mj_forward(model, data);
@@ -4910,6 +4916,7 @@ const runHeadless = async (
       watchImpacts();
       pendingWake.clear();
       rebuildHydroAndFlexureCaches(undefined, headlessWaterLevel, headlessWaterBasins);
+      magnetBodies = collectMagnetBodies(sceneGraph.nodes, bodyIdCache, model);
       scriptCache = {};
       if (carried) carryByJointName(carried, nextModel, nextData);
       else mj.mj_forward(nextModel, nextData);
@@ -4928,6 +4935,7 @@ const runHeadless = async (
         data!.xfrc_applied.fill(0);
         data!.qfrc_applied.fill(0);
         applyHydroAndFlexureForces(timestep, headlessWaterLevel, headlessWaterBasins);
+        applyMagnetForces(magnetBodies, data!);
         lastAero = {};
         const t0 = performance.now();
         executeScripts(sceneGraph.nodes, lastAero);
@@ -5017,6 +5025,7 @@ const runHeadless = async (
     pendingWake.clear();
     for (const id of savedPendingWake) pendingWake.add(id);
     bodyIdCache = savedBodyIdCache; jointIdCache = savedJointIdCache;
+    magnetBodies = savedMagnetBodies;
     geomIdCache = savedGeomIdCache; geomNameCache = savedGeomNameCache; actuatorIdCache = savedActuatorIdCache;
     cachedHydroByNodeId = savedCachedHydro;
     hydroByBodyId = savedHydroByBodyId;

@@ -19,7 +19,7 @@
 import * as THREE from 'three';
 import type { HardwareBore, HardwareCutKind, SceneGeom, SceneNode, SealType } from '../types/scene';
 import { metricThread } from './metricThreads';
-import { BOLTS, HEX_NUTS, CLEARANCE_HOLES, COUNTERBORES, INSERTS, BEARINGS, O_RINGS, SEAL_CORDS, WASHERS } from './hardwareSizes';
+import { BOLTS, HEX_NUTS, CLEARANCE_HOLES, COUNTERBORES, INSERTS, BEARINGS, MAGNETS, O_RINGS, SEAL_CORDS, WASHERS } from './hardwareSizes';
 import { planSealGroove, sealGrooveProblem } from './sealGrooves';
 import { LM_UU, MGN } from './linearParts';
 import { probeRay, surfaceUnder } from './csg';
@@ -266,6 +266,18 @@ export const HARDWARE_KINDS: Record<HardwareCutKind, HardwareKindInfo> = {
   snap_catch: {
     label: 'Snap catch', sizes: Object.keys(SNAP_SIZES), defaultSize: 'M', defaultFitMm: 0.3,
     hint: 'The window a snap hook\'s lip clicks into, through the wall. Same size as the hook.',
+  },
+  magnet_pocket: {
+    label: 'Magnet pocket', sizes: Object.keys(MAGNETS), defaultSize: '8×3', defaultFitMm: 0.15,
+    hint: 'A blind circular pocket sized for a press-fit neodymium disc magnet.',
+  },
+  standoff: {
+    label: 'PCB standoff', sizes: ['M2', 'M2.5', 'M3', 'M4', 'M5'], defaultSize: 'M3', bores: ['tapped', 'insert', 'clearance'], defaultBore: 'tapped', defaultFitMm: 0,
+    hint: 'A cylindrical PCB / mounting standoff post stood on the surface, bored for a thread, heat-set insert, or clearance screw.',
+  },
+  threaded_hole: {
+    label: 'Threaded hole', sizes: BOLTS, defaultSize: 'M3', defaultFitMm: 0,
+    hint: 'A metric tapped hole cut directly into the part for a machine screw.',
   },
 };
 
@@ -540,6 +552,31 @@ export function hardwareCutGeoms(spec: HardwareCutSpec, nodeId: string, host?: S
       const [od, length] = LM_UU[size];
       // The rod goes right through, with room round it: the bushing runs on it, not the part.
       return [cut('pocket', (od + fit) / 2, length), cut('rod', Number(size) / 2 + 1, 0)];
+    }
+    case 'magnet_pocket': {
+      const [dia, thick] = MAGNETS[size];
+      return [cut('pocket', (dia + fit) / 2, thick + 0.1)];
+    }
+    case 'standoff': {
+      const [hole, insertDepth, outside] = INSERTS[size];
+      const heightMm = spec.lengthMm && spec.lengthMm > 0 ? spec.lengthMm : 8;
+      const lenTag = { length: m(heightMm) };
+      const post: SceneGeom = { ...cut('boss', outside / 2, heightMm), csg: 'union' };
+      delete post.rgba;
+      post.hardware = { ...post.hardware!, ...lenTag };
+      const boreDepth = bore === 'insert' ? Math.min(heightMm, insertDepth) : heightMm;
+      const into = bore === 'tapped' ? cut('bore', 0, boreDepth, tapped(size))
+        : bore === 'clearance' ? cut('bore', CLEARANCE_HOLES[size] / 2, boreDepth)
+          : cut('bore', (hole + fit) / 2, boreDepth);
+      into.hardware = { ...into.hardware!, ...lenTag };
+      return [post, into];
+    }
+    case 'threaded_hole': {
+      const t = metricThread(size);
+      const depth = spec.lengthMm && spec.lengthMm > 0 ? spec.lengthMm : (t ? t[1] * 2.5 : 8);
+      const boreGeom = cut('bore', 0, depth, tapped(size));
+      if (spec.lengthMm && spec.lengthMm > 0) boreGeom.hardware = { ...boreGeom.hardware!, length: m(depth) };
+      return [boreGeom];
     }
     default:
       return [];

@@ -337,7 +337,7 @@ function HardwareRow({ node, geom, index }: {
         </button>
       </div>
       <div className="flex gap-1 items-end">
-        <label className="flex-1 min-w-0" title={hw.kind === 'bearing' ? 'The bearing it is sized for.' : hw.kind === 'snap_hook' || hw.kind === 'snap_catch' ? 'S, M or L: a hook and its catch must be the same size.' : 'The bolt size it is sized for.'}>
+        <label className="flex-1 min-w-0" title={hw.kind === 'bearing' ? 'The bearing it is sized for.' : hw.kind === 'magnet_pocket' ? 'The disc magnet size it is sized for.' : hw.kind === 'snap_hook' || hw.kind === 'snap_catch' ? 'S, M or L: a hook and its catch must be the same size.' : 'The bolt size it is sized for.'}>
           <span className="block text-[9px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">Size</span>
           <select
             value={hw.size}
@@ -485,7 +485,8 @@ function RideOnRod({ node, group }: { node: SceneNode; group: string }) {
 }
 
 const HARDWARE_ORDER: HardwareCutKind[] = [
-  'nut_trap', 'nut_slot', 'counterbore', 'insert', 'insert_boss', 'bearing', 'oring', 'seal_cord', 'rail_seat', 'rod_clamp', 'lm_housing',
+  'nut_trap', 'nut_slot', 'counterbore', 'insert', 'insert_boss', 'standoff', 'threaded_hole',
+  'bearing', 'magnet_pocket', 'oring', 'seal_cord', 'rail_seat', 'rod_clamp', 'lm_housing',
   'snap_hook', 'snap_catch',
 ];
 

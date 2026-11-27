@@ -3,7 +3,7 @@ import { FabricPalette } from './FabricPalette';
 import type { SceneNode } from '../../types/scene';
 import type { PhysicsState } from '../../store/useStore';
 import type { HardwareCutKind, HardwarePartKind } from '../../types/scene';
-import { createDShaftHubNode } from '../../utils/hardwareComponents';
+import { createDShaftHubNode, createHingeNode } from '../../utils/hardwareComponents';
 import { applyFlexureToNode } from '../../utils/flexure';
 import { HARDWARE_KINDS } from '../../utils/hardwareCuts';
 import { HARDWARE_PARTS } from '../../utils/hardwareParts';
@@ -11,9 +11,10 @@ import { PaletteTile, type TileColor, type TileSpin } from './PaletteTile';
 import { ExtrusionTiles } from './ExtrusionTiles';
 import {
   CubeIcon, SphereIcon, CylinderIcon, PoleIcon, GearIcon, WedgeIcon, PyramidIcon, ConeIcon, TorusIcon,
-  TubeIcon, EllipsoidIcon, RingIcon, SculptIcon, LatticeIcon, CurveIcon, PulleyIcon, RopeIcon, MeshIcon, ScadIcon, PuttyIcon,
+  TubeIcon, TrayIcon, EllipsoidIcon, RingIcon, SculptIcon, LatticeIcon, CurveIcon, PulleyIcon, RopeIcon, MeshIcon, ScadIcon, PuttyIcon,
 } from './shapeIcons';
 import { InsertBossIcon, NutTrapIcon, NutSlotIcon, CounterboreIcon, BearingPocketIcon, DShaftHubIcon, BearingIcon, CapScrewIcon, HexNutIcon, ShaftIcon, ORingGrooveIcon, RimSealIcon,
+  ORingIcon, HeatSetInsertIcon, WasherIcon, MagnetPocketIcon, MagnetIcon, HingeIcon, StandoffIcon, ThreadedHoleIcon,
   LinearRailIcon, RodBushingIcon, DrawerRunnerIcon, RailSeatIcon, RodSocketIcon, BushingHousingIcon, SnapHookIcon, SnapCatchIcon,
   SpringIcon, StepperIcon } from './hardwareIcons';
 import { Frame } from 'lucide-react';
@@ -66,6 +67,7 @@ const PART_TILES: PartTile[] = [
   { type: 'cone', label: 'Cone', title: 'Cone (Convex mesh)', color: 'sky', spin: 'group-hover:-rotate-3', Icon: ConeIcon },
   { type: 'torus', label: 'Torus', title: 'Torus (Ring mesh)', color: 'violet', spin: 'group-hover:rotate-6', Icon: TorusIcon },
   { type: 'tube', label: 'Tube', title: 'Tube (Hollow cylinder)', color: 'emerald', spin: 'group-hover:-rotate-3', Icon: TubeIcon },
+  { type: 'tray', label: 'Hollow Box', title: 'Hollow Box / Tray (open-top box container; resize outer box or inner cavity in Inspector)', color: 'cyan', spin: 'group-hover:rotate-3', Icon: TrayIcon },
   { type: 'ellipsoid', label: 'Ellipsoid', title: 'Ellipsoid primitive', color: 'amber', spin: 'group-hover:rotate-6', Icon: EllipsoidIcon },
   // A boolean body: an ellipsoid minus a piercing ellipsoid.
   { type: 'ring', label: 'Ring', title: 'Ring (an ellipsoid with a second ellipsoid subtracted; a boolean body you can reshape)', color: 'rose', spin: 'group-hover:-rotate-6', Icon: RingIcon },
@@ -87,10 +89,13 @@ const MODELLING_TILES: PartTile[] = [
 /** The hardware cut into a selected part. Sizes are picked afterwards, in its Cut panel. */
 const CUT_TILES: { kind: HardwareCutKind; label: string; color: TileColor; spin: TileSpin; slow?: boolean; Icon: () => React.JSX.Element }[] = [
   { kind: 'insert_boss', label: 'Insert Boss', color: 'emerald', spin: 'group-hover:-rotate-3', Icon: InsertBossIcon },
+  { kind: 'standoff', label: 'PCB Standoff', color: 'emerald', spin: 'group-hover:rotate-3', Icon: StandoffIcon },
+  { kind: 'threaded_hole', label: 'Threaded Hole', color: 'cyan', spin: 'group-hover:rotate-6', Icon: ThreadedHoleIcon },
   { kind: 'nut_trap', label: 'Nut Trap', color: 'blue', spin: 'group-hover:rotate-6', Icon: NutTrapIcon },
   { kind: 'nut_slot', label: 'Nut Slot', color: 'blue', spin: 'group-hover:-rotate-6', Icon: NutSlotIcon },
   { kind: 'counterbore', label: 'Counterbore', color: 'cyan', spin: 'group-hover:-rotate-3', Icon: CounterboreIcon },
   { kind: 'bearing', label: 'Bearing Pocket', color: 'amber', spin: 'group-hover:rotate-45', slow: true, Icon: BearingPocketIcon },
+  { kind: 'magnet_pocket', label: 'Magnet Pocket', color: 'rose', spin: 'group-hover:-rotate-3', Icon: MagnetPocketIcon },
   { kind: 'oring', label: 'O-ring Groove', color: 'rose', spin: 'group-hover:rotate-45', slow: true, Icon: ORingGrooveIcon },
   { kind: 'seal_cord', label: 'Rim Seal', color: 'rose', spin: 'group-hover:-rotate-3', Icon: RimSealIcon },
   { kind: 'rail_seat', label: 'Rail Seat', color: 'rose', spin: 'group-hover:rotate-3', Icon: RailSeatIcon },
@@ -105,6 +110,10 @@ const BOUGHT_TILES: { kind: HardwarePartKind; spin: TileSpin; Icon: () => React.
   { kind: 'bearing', spin: 'group-hover:rotate-45', Icon: BearingIcon },
   { kind: 'screw', spin: 'group-hover:rotate-6', Icon: CapScrewIcon },
   { kind: 'nut', spin: 'group-hover:-rotate-6', Icon: HexNutIcon },
+  { kind: 'washer', spin: 'group-hover:rotate-45', Icon: WasherIcon },
+  { kind: 'insert', spin: 'group-hover:-rotate-3', Icon: HeatSetInsertIcon },
+  { kind: 'oring', spin: 'group-hover:rotate-45', Icon: ORingIcon },
+  { kind: 'magnet', spin: 'group-hover:rotate-6', Icon: MagnetIcon },
   { kind: 'shaft', spin: 'group-hover:rotate-3', Icon: ShaftIcon },
   { kind: 'mgn_rail', spin: 'group-hover:-rotate-3', Icon: LinearRailIcon },
   { kind: 'linear_rod', spin: 'group-hover:rotate-3', Icon: RodBushingIcon },
@@ -235,6 +244,15 @@ export const ComponentPalette: React.FC<ComponentPaletteProps> = ({
             spin="group-hover:-rotate-6"
             icon={<DShaftHubIcon />}
             onClick={() => onAddHardwareNode(createDShaftHubNode(5.0))}
+          />
+          <PaletteTile
+            button
+            label="Hinge"
+            title="3D-printable print-in-place knuckle hinge with two articulated leaves on a real hinge joint"
+            color="indigo"
+            spin="group-hover:-rotate-3"
+            icon={<HingeIcon />}
+            onClick={() => onAddHardwareNode(createHingeNode())}
           />
           <PaletteTile
             button

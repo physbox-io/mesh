@@ -30,7 +30,7 @@ export interface HardwarePartActions {
    * Changes a part's size, length or washer. A seated part's size is its cut's
    * size, so that changes the cut, and the part follows.
    */
-  setHardwarePart: (partId: string, changes: Partial<Pick<HardwarePart, 'size' | 'lengthMm' | 'washer'>>) => void;
+  setHardwarePart: (partId: string, changes: Partial<Pick<HardwarePart, 'size' | 'lengthMm' | 'washer' | 'polarity'>>) => void;
   /**
    * Welds a body to a moving piece — a rail's carriage, a rod's bushing, a
    * runner's drawer member — so it rides it. Returns why not, or null.

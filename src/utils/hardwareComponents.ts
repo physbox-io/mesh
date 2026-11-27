@@ -73,3 +73,138 @@ scale(0.001) {
     children: [],
   };
 }
+
+/**
+ * Creates a 2-body articulated 3D-printable print-in-place knuckle hinge with
+ * real MuJoCo hinge kinematics. Lies flat on the XY print bed with leaves
+ * extending along -X and +X, thickness along Z, and the hinge pin axis along Y.
+ */
+export function createHingeNode(lengthMm = 40, widthMm = 32, thicknessMm = 4): SceneNode {
+  const id = `hinge_${lengthMm}x${widthMm}_${Math.random().toString(36).slice(2, 7)}`;
+  const L = lengthMm / 1000;
+  const leafH = thicknessMm / 1000;
+  const pinR = (thicknessMm * 0.65) / 1000;
+  const leafSpan = (widthMm / 2) / 1000 - pinR * 0.6;
+  const leafCenterX = pinR * 0.6 + leafSpan / 2;
+
+  const segL = L / 5;
+  const gap = 0.0003; // 0.3mm print-in-place axial clearance between knuckles
+  const segHalfL = Math.max(0.0002, (segL - gap) / 2);
+
+  const leafColor = [0.22, 0.56, 0.78, 1];
+  const pinColor = [0.16, 0.44, 0.64, 1];
+
+  return {
+    id,
+    name: `Print-in-Place Hinge (${lengthMm}×${widthMm}mm)`,
+    pos: [0, 0, thicknessMm / 2000 + 0.01],
+    rot: [0, 0, 0],
+    type: 'body',
+    isHardwareComponent: true,
+    hardwareType: 'knuckle_hinge',
+    hardwareSpec: { lengthMm, widthMm, thicknessMm },
+    geoms: [
+      {
+        name: `${id}_leaf_a`,
+        type: 'box',
+        size: [leafSpan / 2, L / 2, leafH / 2],
+        pos: [-leafCenterX, 0, 0],
+        rgba: leafColor,
+        mass: 0.0045,
+        condim: 3,
+      },
+      {
+        name: `${id}_knuckle_0`,
+        type: 'cylinder',
+        size: [pinR, segHalfL],
+        pos: [0, -2 * segL, 0],
+        euler: [90, 0, 0],
+        rgba: leafColor,
+        mass: 0.0005,
+        condim: 3,
+      },
+      {
+        name: `${id}_knuckle_2`,
+        type: 'cylinder',
+        size: [pinR, segHalfL],
+        pos: [0, 0, 0],
+        euler: [90, 0, 0],
+        rgba: leafColor,
+        mass: 0.0005,
+        condim: 3,
+      },
+      {
+        name: `${id}_knuckle_4`,
+        type: 'cylinder',
+        size: [pinR, segHalfL],
+        pos: [0, 2 * segL, 0],
+        euler: [90, 0, 0],
+        rgba: leafColor,
+        mass: 0.0005,
+        condim: 3,
+      },
+      {
+        name: `${id}_pin`,
+        type: 'cylinder',
+        size: [pinR * 0.55, (L * 0.96) / 2],
+        pos: [0, 0, 0],
+        euler: [90, 0, 0],
+        rgba: pinColor,
+        role: 'visual',
+      },
+    ],
+    joints: [{ name: `${id}_free`, type: 'free' }],
+    children: [
+      {
+        id: `${id}_leaf_b`,
+        name: 'Moving Leaf',
+        pos: [0, 0, 0],
+        rot: [0, 0, 0],
+        type: 'body',
+        geoms: [
+          {
+            name: `${id}_leaf_b_plate`,
+            type: 'box',
+            size: [leafSpan / 2, L / 2, leafH / 2],
+            pos: [leafCenterX, 0, 0],
+            rgba: leafColor,
+            mass: 0.0045,
+            condim: 3,
+          },
+          {
+            name: `${id}_knuckle_1`,
+            type: 'cylinder',
+            size: [pinR, segHalfL],
+            pos: [0, -segL, 0],
+            euler: [90, 0, 0],
+            rgba: leafColor,
+            mass: 0.00075,
+            condim: 3,
+          },
+          {
+            name: `${id}_knuckle_3`,
+            type: 'cylinder',
+            size: [pinR, segHalfL],
+            pos: [0, segL, 0],
+            euler: [90, 0, 0],
+            rgba: leafColor,
+            mass: 0.00075,
+            condim: 3,
+          },
+        ],
+        joints: [
+          {
+            name: `${id}_hinge`,
+            type: 'hinge',
+            axis: [0, 1, 0],
+            pos: [0, 0, 0],
+            limited: true,
+            range: [-180, 180],
+            damping: 0.004,
+          },
+        ],
+        children: [],
+      },
+    ],
+  };
+}

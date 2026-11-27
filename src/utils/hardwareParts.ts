@@ -41,7 +41,7 @@ import { csgFrameOffset, csgSourceGeoms, fromtoFrame, geomMatrixOf, sourcePositi
 import { hardwareSpecOf } from './hardwareCuts';
 import { getNodeWorldTransform } from './laserCutExporter';
 import {
-  BEARINGS, BOLTS, BUTT_HINGES, CAP_SCREW_HEADS, CLEARANCE_HOLES, HANDLES, HASP_LATCHES, HEX_NUTS, O_RINGS,
+  BEARINGS, BOLTS, BUTT_HINGES, CAP_SCREW_HEADS, CLEARANCE_HOLES, HANDLES, HASP_LATCHES, HEX_NUTS, INSERTS, MAGNETS, O_RINGS,
   SCREW_LENGTHS, SEAL_CORDS, SHAFTS, WASHERS, WOOD_SCREW_LENGTHS, WOOD_SCREWS, screwLengthAtLeast, screwLengthAtMost,
 } from './hardwareSizes';
 import { loopLengthMm, rimCentreline } from './sealGrooves';
@@ -248,6 +248,18 @@ const CORE_PARTS: Record<CorePartKind, HardwarePartInfo> = {
     label: 'O-ring', sizes: [...Object.keys(O_RINGS), ...SEAL_CORDS], defaultSize: '20×2',
     hint: 'A nitrile O-ring, or O-ring cord cut to length, lying in the groove it seals.',
   },
+  insert: {
+    label: 'Heat-set insert', sizes: Object.keys(INSERTS), defaultSize: 'M3',
+    hint: 'A knurled brass heat-set threaded insert for 3D-printed bosses and holes.',
+  },
+  washer: {
+    label: 'Washer', sizes: BOLTS, defaultSize: 'M3',
+    hint: 'An ISO 7089 plain steel washer.',
+  },
+  magnet: {
+    label: 'Magnet', sizes: Object.keys(MAGNETS), defaultSize: '8×3',
+    hint: 'A nickel-plated N42 neodymium disc magnet with simulated dipole attraction and repulsion.',
+  },
 };
 
 /** Every kind of bought part: the core ones here, then each family's from its own module. */
@@ -270,13 +282,13 @@ export const NO_CUT_SEATS: readonly string[] = ['bore', 'frame', 'rail'];
 /** The parts that go in each kind of hardware cut, the one it is made for first. */
 export const PARTS_FOR_CUT: Record<HardwareCutKind, HardwarePartKind[]> = {
   bearing: ['bearing'],
-  counterbore: ['screw'],
+  counterbore: ['screw', 'washer'],
   nut_trap: ['nut'],
   // Not seated yet: its nut is buried under the face, which the nut seat in
   // seatFor (measured down from the face) does not place.
   nut_slot: [],
-  insert: ['screw'],
-  insert_boss: ['screw'],
+  insert: ['screw', 'insert'],
+  insert_boss: ['screw', 'insert'],
   oring: ['oring'],
   seal_cord: ['oring'],
   rail_seat: ['mgn_rail'],
@@ -286,6 +298,9 @@ export const PARTS_FOR_CUT: Record<HardwareCutKind, HardwarePartKind[]> = {
   // Printed, not bought: nothing goes in them.
   snap_hook: [],
   snap_catch: [],
+  magnet_pocket: ['magnet'],
+  standoff: ['screw', 'insert'],
+  threaded_hole: ['screw'],
 };
 
 export { isBoughtIn };
@@ -308,6 +323,7 @@ export function normalizePart(spec: HardwarePartSpec): HardwarePart {
     delete out.lengthMm;
   }
   if (spec.kind !== 'screw' || !spec.washer) delete out.washer;
+  if (spec.kind !== 'magnet') delete out.polarity;
   // Cord is cut to the groove it goes in, so its length is the groove's.
   if (spec.kind === 'oring' && spec.path) out.lengthMm = Math.round(loopLengthMm(spec.path));
   return out;
@@ -322,6 +338,9 @@ export function hardwarePartName(spec: HardwarePartSpec): string {
     case 'nut': return `${p.size} nut`;
     case 'shaft': return `Ø${p.size}×${p.lengthMm} shaft`;
     case 'oring': return O_RINGS[p.size] ? `${p.size} O-ring` : `Ø${p.size} cord, ${p.lengthMm ?? 0} mm`;
+    case 'insert': return `${p.size} heat-set insert`;
+    case 'washer': return `${p.size} washer`;
+    case 'magnet': return `${p.size} magnet`;
     default: return HARDWARE_PARTS[p.kind].name?.(p) ?? HARDWARE_PARTS[p.kind].label;
   }
 }
@@ -404,6 +423,34 @@ export function hardwarePartNode(spec: HardwarePartSpec, id: string): SceneNode 
         name: `${id}_ring`, type: 'mesh', size: [1], rgba: [...NITRILE], dynamic: true,
         mass: +(Math.max(volume * RUBBER, 1e-6)).toFixed(7), condim: 3, ...shape,
       }];
+      break;
+    }
+    case 'insert': {
+      const [hole, depth] = INSERTS[p.size];
+      const thread = metricThread(p.size);
+      const minor = thread ? thread[1] - 1.0825 * thread[2] : hole * 0.6;
+      const vol = Math.PI * (mm(hole / 2) ** 2 - mm(minor / 2) ** 2) * mm(depth);
+      node.geoms = [
+        ringGeom(`${id}_insert`, mm(hole / 2), mm(minor / 2), mm(depth), 0, BRASS_COLOR, {
+          mass: +(Math.max(vol * BRASS, 1e-7)).toFixed(7),
+        }),
+      ];
+      break;
+    }
+    case 'washer': {
+      const [idDia, od, thick] = WASHERS[p.size];
+      node.geoms = [ringGeom(`${id}_washer`, mm(od / 2), mm(idDia / 2), mm(thick), 0, BRIGHT)];
+      break;
+    }
+    case 'magnet': {
+      const [dia, thick] = MAGNETS[p.size];
+      const sign = p.polarity === -1 ? -1 : 1;
+      node.geoms = [
+        cylinderGeom(`${id}_magnet`, mm(dia / 2), mm(thick), 0, BRIGHT, {
+          mass: +(Math.PI * mm(dia / 2) ** 2 * mm(thick) * 7500).toFixed(7),
+        }),
+        visual(cylinderGeom(`${id}_north`, mm(dia * 0.22), mm(0.08), mm(sign * (thick / 2 + 0.04)), [0.85, 0.22, 0.22, 1])),
+      ];
       break;
     }
     default:
@@ -523,6 +570,7 @@ function quiet(node: SceneNode) {
 const SEAT_PIECE: Record<HardwareCutKind, string> = {
   bearing: 'pocket', nut_trap: 'pocket', nut_slot: 'slot', counterbore: 'head', insert: 'bore', insert_boss: 'bore', oring: 'groove', seal_cord: 'groove',
   rail_seat: 'channel', rod_clamp: 'bore', lm_housing: 'pocket', snap_hook: 'hook', snap_catch: 'window',
+  magnet_pocket: 'pocket', standoff: 'bore', threaded_hole: 'bore',
 };
 
 export interface Seat {
@@ -673,6 +721,18 @@ export function seatFor(host: SceneNode, group: string, kind?: AllHardwarePartKi
       const length = mm(lengthMm ?? HARDWARE_PARTS.linear_rod.defaultLengthMm!);
       const centre = entry.clone().addScaledVector(n, -reach + length / 2);
       return { pos: at(centre), quat, part: { kind: 'linear_rod', size: spec.size, lengthMm: +(length * 1000).toFixed(3) } };
+    }
+    case 'insert': {
+      const depth = mm(INSERTS[spec.size][1]);
+      return { pos: at(entry.clone().addScaledVector(n, -depth / 2)), quat, part: { kind: 'insert', size: spec.size } };
+    }
+    case 'washer': {
+      const thick = mm(WASHERS[spec.size][2]);
+      return { pos: at(entry.clone().addScaledVector(n, -(reach - thick / 2))), quat, part: { kind: 'washer', size: spec.size } };
+    }
+    case 'magnet': {
+      const thick = mm(MAGNETS[spec.size][1]);
+      return { pos: at(entry.clone().addScaledVector(n, -thick / 2)), quat, part: { kind: 'magnet', size: spec.size } };
     }
     default:
       return null;
