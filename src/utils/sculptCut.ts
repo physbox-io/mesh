@@ -32,6 +32,7 @@
 // ---------------------------------------------------------------------------
 
 import type { ManifoldToplevel, Manifold as ManifoldT } from 'manifold-3d';
+import manifoldWasmUrl from 'manifold-3d/manifold.wasm?url';
 import { createSculptMesh, meshBounds, type SculptMesh } from './sculptMesh';
 import { buildGroove, grooveAlongSurface, type CarveProfile, type GrooveSpec } from './sculptCarve';
 
@@ -53,8 +54,7 @@ export function loadManifold(): Promise<ManifoldToplevel> {
       // A window or a worker is a Vite bundle; neither is Node (even when a test shims `window`).
       const isNode = Boolean((globalThis as { process?: { versions?: { node?: string } } }).process?.versions?.node);
       if (!isNode && (typeof window !== 'undefined' || typeof (globalThis as { importScripts?: unknown }).importScripts === 'function')) {
-        const { default: wasmUrl } = await import('manifold-3d/manifold.wasm?url');
-        config = { locateFile: () => wasmUrl };
+        config = { locateFile: () => manifoldWasmUrl };
       }
       const wasm = await Module(config);
       wasm.setup();
