@@ -847,8 +847,6 @@ function minCurvatureRadius(
     if (angle < 1e-4) continue;
     const va = vtx(mesh.pos, Math.floor(key / KEY));
     const vb = vtx(mesh.pos, key % KEY);
-    const mid: Vec3 = [(va[0] + vb[0]) * 0.5, (va[1] + vb[1]) * 0.5, (va[2] + vb[2]) * 0.5];
-    if (nearBoundary(mid)) continue;
     // Across the edge, not along it: two long facets of a cylinder have their
     // middles far apart up the axis, and that distance says nothing about how
     // tightly the surface turns round it.
@@ -856,7 +854,10 @@ function minCurvatureRadius(
     const d = sub(centroid(list[0]), centroid(list[1]));
     const t = dot(d, along);
     const across = len([d[0] - along[0] * t, d[1] - along[1] * t, d[2] - along[2] * t]);
-    if (across >= 1e-4) maxK = Math.max(maxK, angle / across);
+    if (across < 1e-4 || angle / across <= maxK) continue;
+    const mid: Vec3 = [(va[0] + vb[0]) * 0.5, (va[1] + vb[1]) * 0.5, (va[2] + vb[2]) * 0.5];
+    if (nearBoundary(mid)) continue;
+    maxK = angle / across;
   }
   return maxK > 0 ? 1 / maxK : Infinity;
 }

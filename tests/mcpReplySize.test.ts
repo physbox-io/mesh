@@ -9,7 +9,7 @@ import {
 
 describe('MCP reply size', () => {
   it('exports MCP_REPLY_LIMIT_CHARS as an alias for MCP_REPLY_LIMIT_BYTES', () => {
-    expect(MCP_REPLY_LIMIT_BYTES).toBe(30 * 1024 * 1024);
+    expect(MCP_REPLY_LIMIT_BYTES).toBe(90 * 1024 * 1024);
     expect(MCP_REPLY_LIMIT_CHARS).toBe(MCP_REPLY_LIMIT_BYTES);
   });
 

@@ -319,6 +319,7 @@ export function printSplitActions({ set, get }: SliceDeps): PrintSplitActions {
             const world = worlds.get(n.id);
             if (world) {
               for (const g of resolveCsgGeoms(n, 'render')) {
+                if (g.type === 'plane') continue;
                 const gm = world.clone().multiply(getGeomFrame(g).matrix);
                 const rv = g.renderVertices;
                 if (g.type === 'mesh' && rv && rv.length >= 3) {
