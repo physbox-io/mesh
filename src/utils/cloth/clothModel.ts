@@ -33,7 +33,7 @@ import { beltPaths, beltPieces, LAP_OFF, pocketPieces, standPiece, type AddOnPie
 import { attachedPieces } from './garmentAttached';
 import { collarPieces, lapelPieces } from './garmentCollars';
 import { fullSides, panelEdgeEase } from './garmentFullness';
-import { openWedges } from './openWedges';
+import { openWedges, pieceWedges } from './openWedges';
 import { cutEdges, type FlatEdge } from './patternEdges';
 
 /** A piece as it is cut: its points flat, metres, v up the body; its outline in order round it; how much it had to stretch to lie flat; its trims, by point. */
@@ -729,7 +729,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     // share becomes a stitch between their copies, closed when the scene plays.
     const asPieces = spec.layout === 'pieces';
     if (asPieces) { x0 = []; mass = []; }
-    const copies = new Map<number, number[]>(), copyPanel = new Map<number, number[]>();
+    const copies = new Map<number, number[]>(), copyWedge = new Map<number, number[]>();
     // Points on an open seam (a jacket's front) belong to the cloth on each
     // side of the cut separately: round each, its panels fall into wedges
     // parted by the open edges there (openWedges), and each wedge past the
@@ -740,7 +740,6 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     const wedges = openWedges(shell);
     /** Each open point's particle per wedge (the first wedge to reach it keeps the point), and the first panel in each wedge. */
     const wedgeParticle = new Map<number, Map<number, number>>(), wedgePanel = new Map<number, Map<number, number>>();
-    const wedgeHere = (g: number, k: number) => wedges.wedgeOf.get(g)?.get(k) ?? 0;
     const trimList = trimPoints(shell.points, [...shell.edges, ...shell.seams, ...(shell.marks ?? [])], settings.trims ?? [], shell.tris);
     const sliderDrawn = new Set<TrimPlace>();
     const pointDrawn = new Set<TrimPlace>();
@@ -835,9 +834,10 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       let facing = [0, -1, 0];
       if (!asPieces && openPoints.size) {
         const own = new Map<number, number>();
+        const localWedge = pieceWedges(wedges, shell.tris, piece, k);
         piece.points.forEach((g, local) => {
           if (!openPoints.has(g)) return;
-          const w = wedgeHere(g, k);
+          const w = localWedge[local];
           const at = wedgeParticle.get(g) ?? wedgeParticle.set(g, new Map()).get(g)!;
           const by = wedgePanel.get(g) ?? wedgePanel.set(g, new Map()).get(g)!;
           if (!at.has(w)) {
@@ -858,10 +858,11 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
         const along = centre[0] * n[0] + centre[1] * n[1] + PIECE_STAND_OFF;
         const zMean = piece.uv.reduce((acc, q) => acc + q[1], 0) / piece.uv.length;
         for (const [u, v] of piece.uv) x0.push(toWorld([n[0] * along + right[0] * u, n[1] * along + right[1] * u, Math.max(0.02, centre[2] + v - zMean)]));
+        const pieceWedge = pieceWedges(wedges, shell.tris, piece, k);
         for (let i = 0; i < piece.uv.length; i++) {
           const g = piece.points[i];
           mass.push(0);
-          if (g >= 0) { (copies.get(g) ?? copies.set(g, []).get(g)!).push(base + i); (copyPanel.get(g) ?? copyPanel.set(g, []).get(g)!).push(k); }
+          if (g >= 0) { (copies.get(g) ?? copies.set(g, []).get(g)!).push(base + i); (copyWedge.get(g) ?? copyWedge.set(g, []).get(g)!).push(pieceWedge[i]); }
         }
         particleOf = (local: number) => base + local;
         facing = new THREE.Vector3(n[0], n[1], n[2]).transformDirection(world).toArray();
@@ -1048,9 +1049,9 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       for (const [p, g] of spreadStitches) { const to = copies.get(g)?.[0]; if (to !== undefined) addStitch(p, to, sewTime); }
       // An open point's copies sewn only to the others on their side of the cut.
       for (const [g, list] of copies.entries()) {
-        const ks = copyPanel.get(g)!, last = new Map<number, number>();
+        const ks = copyWedge.get(g)!, last = new Map<number, number>();
         list.forEach((p, i) => {
-          const w = openPoints.has(g) ? wedgeHere(g, ks[i]) : 0, prev = last.get(w);
+          const w = openPoints.has(g) ? ks[i] : 0, prev = last.get(w);
           if (prev !== undefined) addStitch(prev, p, sewTime);
           last.set(w, p);
         });
@@ -1077,8 +1078,8 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     /** The particle each wedge round an open point has: worn, its own; as pieces, the first copy of it on a panel in that wedge. */
     const wedgeParticles = (g: number): Map<number, number> => {
       if (!asPieces) return wedgeParticle.get(g) ?? new Map();
-      const out = new Map<number, number>(), ks = copyPanel.get(g) ?? [];
-      (copies.get(g) ?? []).forEach((p, i) => { const w = wedgeHere(g, ks[i]); if (!out.has(w)) out.set(w, p); });
+      const out = new Map<number, number>(), ks = copyWedge.get(g) ?? [];
+      (copies.get(g) ?? []).forEach((p, i) => { const w = ks[i]; if (!out.has(w)) out.set(w, p); });
       return out;
     };
     /** The copies facing each other across the cut at an open point, to fasten (each pair once). */
