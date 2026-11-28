@@ -4,7 +4,7 @@ import { clampBodyForm, bodyLandmarks } from '../src/utils/cloth/bodyForm';
 import { garmentShell } from '../src/utils/cloth/garmentShell';
 import { clothModel } from '../src/utils/cloth/clothModel';
 import { bodyFormNode, garmentNode } from '../src/utils/cloth/clothNodes';
-import { openWedges } from '../src/utils/cloth/openWedges';
+import { openWedges, pieceWedges } from '../src/utils/cloth/openWedges';
 import type { GarmentDraft } from '../src/types/cloth';
 
 const form = clampBodyForm({});
@@ -42,6 +42,21 @@ describe('an opening crossed by a closed seam', () => {
     const w = openWedges({ ...s, panels: [{ tris: [0, 1, 2, 3, 4, 5, 6, 7] }] });
     expect(new Set(w.wedgeOf.get(0)!.values()).size).toBe(1);
     expect(w.across.get(0)!.length).toBe(0);
+  });
+
+  it('splits a slit inside one panel by the side each of its points is on', () => {
+    const s = crossShell([0, 1, 2, 3]);
+    s.seams = [{ path: [1, 0, 3], open: true }];
+    const shell = { ...s, panels: [{ tris: [0, 1, 2, 3, 4, 5, 6, 7] }] };
+    const w = openWedges(shell);
+    // The piece cut from it: point 0 twice (locals 0 and 9), one per side; 1 and 3 likewise.
+    const right = [[0, 1, 5], [0, 5, 2], [0, 2, 6], [0, 6, 3]], left = [[9, 13, 7], [9, 7, 4], [9, 4, 8], [9, 8, 10]];
+    const points = [0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 1, 3, 0, 3];
+    // locals 10 (point 1) and 13 (point 3) are the left side's copies
+    points[10] = 1; points[13] = 3;
+    const wedge = pieceWedges(w, shell.tris, { points, tris: [...right, ...left].flat() }, 0);
+    expect(wedge[0]).not.toBe(wedge[9]);
+    expect(new Set(w.wedgeOf.get(0)!.values()).size).toBe(1);
   });
 
   for (const layout of ['worn', 'pieces'] as const) {
