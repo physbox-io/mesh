@@ -12,7 +12,7 @@ import { GarmentSculptPanel } from './GarmentSculptPanel';
 import { GarmentCurvesPanel } from './GarmentCurvesPanel';
 import { ClothArrangePanel } from './ClothArrangePanel';
 import { ClothWarnings } from './ClothWarnings';
-import { DRAFT_SLIDERS, DRAFT_SWITCHES, FABRICS, GARMENT_KINDS, LIMBS, type DraftUnit } from './garmentFields';
+import { DRAFT_SLIDERS, DRAFT_SWITCHES, FABRICS, GARMENT_KINDS, LIMBS, sleevesApart, type DraftUnit } from './garmentFields';
 
 const SCALE: Record<DraftUnit, number> = { mm: 1000, '%': 100, '×': 1, '': 1 };
 const DECIMALS: Record<DraftUnit, number> = { mm: 0, '%': 0, '×': 2, '': 0 };
@@ -98,7 +98,7 @@ export function GarmentDraftCard({ node }: { node: SceneNode }) {
         </div>
       )}
       {DRAFT_SLIDERS.filter((f) => f.shows(s)).map((f) => (
-        <DraftSlider key={f.key} label={f.label} tip={f.tip} value={s[f.key] as number} min={f.min} max={f.max} step={f.step} unit={f.unit}
+        <DraftSlider key={f.key} label={f.label} tip={f.tip} value={(s[f.key] as number | undefined) ?? f.unset?.(s) ?? 0} min={f.min} max={f.max} step={f.step} unit={f.unit}
           onChange={(v) => set(f.key, (f.unit === '' ? Math.round(v) : v) as never, true)} />
       ))}
       <div className="flex flex-wrap gap-x-3 gap-y-1">
@@ -108,6 +108,15 @@ export function GarmentDraftCard({ node }: { node: SceneNode }) {
             {f.label}
           </label>
         ))}
+        {!s.over && s.top === 'neck' && (
+          <label className="flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300 cursor-pointer" title="Each sleeve its own length, 0 for none on that side (one-shoulder, asymmetric); off, both the Sleeve length">
+            <input type="checkbox" className="accent-purple-600" checked={sleevesApart(s)}
+              onChange={(e) => setDraft(e.target.checked
+                ? { ...draft, sleeveL: s.sleeve, sleeveR: s.sleeve }
+                : { ...draft, sleeve: Math.max(s.sleeveL ?? s.sleeve, s.sleeveR ?? s.sleeve), sleeveL: undefined, sleeveR: undefined })} />
+            Each sleeve
+          </label>
+        )}
       </div>
       <GarmentDetails draft={draft} s={s} setDraft={setDraft} />
       <GarmentSculptPanel nodeId={node.id} draft={draft} setDraft={setDraft} />

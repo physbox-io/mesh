@@ -18,12 +18,18 @@ export interface DraftSliderField {
   unit: DraftUnit;
   /** Whether it applies to a draft with these settings. */
   shows: (s: GarmentSettings & GarmentDraft) => boolean;
+  /** What it shows when the draft leaves it unset, if not the kind's default (a side's sleeve: the sleeve). */
+  unset?: (s: GarmentSettings & GarmentDraft) => number;
 }
 
 const tube = (s: GarmentSettings & GarmentDraft) => !!s.over;
 const fromNeck = (s: GarmentSettings & GarmentDraft) => !s.over && s.top === 'neck';
 const fromBand = (s: GarmentSettings & GarmentDraft) => !s.over && s.top !== 'neck';
 const body = (s: GarmentSettings & GarmentDraft) => !s.over;
+/** Each sleeve set on its own (`sleeveL`/`sleeveR`), the one Sleeve length then only for a side left unset. */
+export const sleevesApart = (s: GarmentSettings & GarmentDraft) => s.sleeveL !== undefined || s.sleeveR !== undefined;
+/** Whether it has a sleeve on either side. */
+export const hasSleeves = (s: GarmentSettings & GarmentDraft) => Math.max(s.sleeveL ?? s.sleeve, s.sleeveR ?? s.sleeve) > 0;
 
 export const DRAFT_SLIDERS: DraftSliderField[] = [
   { key: 'length', label: 'Length', tip: 'Hem below the waist (trousers: waistband to hem). Past the floor, it lies on it.', min: 0.05, max: 1.6, step: 0.005, unit: 'mm', shows: body },
@@ -32,9 +38,11 @@ export const DRAFT_SLIDERS: DraftSliderField[] = [
   { key: 'flare', label: 'Flare', tip: 'Hem round over hip round (trousers: hem over thigh). 1 hangs straight.', min: 0.5, max: 4, step: 0.05, unit: '×', shows: body },
   { key: 'train', label: 'Train', tip: 'Extra length at the centre back, tapering off to the sides.', min: 0, max: 1.5, step: 0.01, unit: 'mm', shows: body },
   { key: 'neckline', label: 'Neckline', tip: 'How far the front neckline drops below the neck point.', min: 0, max: 0.3, step: 0.005, unit: 'mm', shows: fromNeck },
-  { key: 'sleeve', label: 'Sleeve', tip: 'From the shoulder point; 0 for sleeveless.', min: 0, max: 0.75, step: 0.005, unit: 'mm', shows: fromNeck },
-  { key: 'cuff', label: 'Cuff', tip: 'Round the sleeve at its end; 0 for as wide as the sleeve.', min: 0, max: 0.4, step: 0.005, unit: 'mm', shows: (s) => fromNeck(s) && s.sleeve > 0 },
-  { key: 'armhole', label: 'Armhole drop', tip: 'Armhole cut this much deeper than a set-in sleeve: deep, a batwing.', min: 0, max: 0.3, step: 0.005, unit: 'mm', shows: (s) => fromNeck(s) && s.sleeve > 0 },
+  { key: 'sleeve', label: 'Sleeve', tip: 'From the shoulder point; 0 for sleeveless.', min: 0, max: 0.75, step: 0.005, unit: 'mm', shows: (s) => fromNeck(s) && !sleevesApart(s) },
+  { key: 'sleeveL', label: 'Left sleeve', tip: 'The wearer\'s left sleeve, from the shoulder point; 0 for none on that side.', min: 0, max: 0.75, step: 0.005, unit: 'mm', shows: (s) => fromNeck(s) && sleevesApart(s), unset: (s) => s.sleeve },
+  { key: 'sleeveR', label: 'Right sleeve', tip: 'The wearer\'s right sleeve, from the shoulder point; 0 for none on that side.', min: 0, max: 0.75, step: 0.005, unit: 'mm', shows: (s) => fromNeck(s) && sleevesApart(s), unset: (s) => s.sleeve },
+  { key: 'cuff', label: 'Cuff', tip: 'Round the sleeve at its end; 0 for as wide as the sleeve.', min: 0, max: 0.4, step: 0.005, unit: 'mm', shows: (s) => fromNeck(s) && hasSleeves(s) },
+  { key: 'armhole', label: 'Armhole drop', tip: 'Armhole cut this much deeper than a set-in sleeve: deep, a batwing.', min: 0, max: 0.3, step: 0.005, unit: 'mm', shows: (s) => fromNeck(s) && hasSleeves(s) },
   { key: 'from', label: 'From', tip: 'Where along the limb it starts: 0 at the root, 100% at its end (toe, fingertips, crown).', min: 0, max: 1, step: 0.01, unit: '%', shows: tube },
   { key: 'to', label: 'To', tip: 'Where along the limb it ends.', min: 0, max: 1, step: 0.01, unit: '%', shows: tube },
   { key: 'gores', label: 'Panels', tip: 'Panels round it, cut along it: a dome wants more (a hat six), a sock two.', min: 1, max: 12, step: 1, unit: '', shows: tube },

@@ -3,6 +3,7 @@ import type { GarmentSettings } from '../../utils/cloth/garments';
 import { edgeOf } from '../../utils/cloth/edgeProfile';
 import { RangeInput } from '../RangeInput';
 import { SliderValue } from '../SliderValue';
+import { hasSleeves } from './garmentFields';
 import { COLLARS, FASTENINGS, HEMS, LIMB_ENDS, NECKLINES, edgeStyle, withEdge, type ChoiceStyle, type EdgeStyle } from './garmentStyles';
 
 const label = 'text-xs text-slate-500 dark:text-slate-400 font-medium';
@@ -30,7 +31,7 @@ export function GarmentDetails({ draft, s, setDraft }: { draft: GarmentDraft; s:
       {fromNeck && <EdgePicker title="Neckline" along="neckline" styles={NECKLINES} draft={draft} setDraft={setDraft} />}
       {!s.over && <EdgePicker title="Hem" along="hem" styles={HEMS} draft={draft} setDraft={setDraft} max={0.6} />}
       {!s.over && s.top !== 'neck' && <EdgePicker title="Top edge" along="top" styles={HEMS} draft={draft} setDraft={setDraft} max={0.3} />}
-      {fromNeck && s.sleeve > 0 && <EdgePicker title="Sleeve ends" along="cuff" styles={LIMB_ENDS} draft={draft} setDraft={setDraft} max={0.6} />}
+      {fromNeck && hasSleeves(s) && <EdgePicker title="Sleeve ends" along="cuff" styles={LIMB_ENDS} draft={draft} setDraft={setDraft} max={0.6} />}
       {s.over && !s.cap && <EdgePicker title="End" along="end" styles={LIMB_ENDS} draft={draft} setDraft={setDraft} max={0.4} />}
       {fromNeck && <ChoicePicker title="Collar" styles={COLLARS} draft={merged} setDraft={setDraft} />}
       {fromNeck && s.opening && <ChoicePicker title="Fastening" styles={FASTENINGS} draft={merged} setDraft={setDraft} />}
