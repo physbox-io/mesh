@@ -266,8 +266,6 @@ export interface ClothRenderGroup {
   trims?: ClothTrim[];
   /** Printed SVG pattern on this group. */
   pattern?: ClothPatternPrint;
-  /** Its colour is the garment's times this, and follows it as it changes (a back a shade darker); unset, its own. */
-  tint?: number;
   /** Particle drawn at each of the group's vertices. */
   particles: number[];
   /** Triangles, as indices into `particles`. */
