@@ -1,7 +1,7 @@
 import type { SceneNode } from '../../../types/scene';
 import { ClothArrangePanel } from '../ClothArrangePanel';
 import { ClothFastenPanel } from './ClothFastenPanel';
-import { cardCls } from './garmentUi';
+import { cardCls } from './garmentStyle';
 import { useClothPieces, useGarmentWriters } from './useGarmentDraft';
 
 /** A cloth's Physics tab: how it is arranged as it starts, and the points of it held together. */

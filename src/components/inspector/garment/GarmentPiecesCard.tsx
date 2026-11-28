@@ -2,7 +2,8 @@ import { SettledColorInput } from '../../SettledInputs';
 import type { SceneNode } from '../../../types/scene';
 import type { ClothMaterialName, GarmentPieceFabric } from '../../../types/cloth';
 import { FABRICS } from '../garmentFields';
-import { cardCls, Heading, hex, labelCls, removeCls, rgbaOf, selectCls } from './garmentUi';
+import { Heading } from './garmentUi';
+import { cardCls, hex, labelCls, removeCls, rgbaOf, selectCls } from './garmentStyle';
 import { useClothPieces, useGarmentWriters } from './useGarmentDraft';
 
 /**

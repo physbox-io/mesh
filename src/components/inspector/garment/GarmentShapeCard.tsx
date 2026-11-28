@@ -5,7 +5,7 @@ import { GarmentSculptPanel } from '../GarmentSculptPanel';
 import { GarmentCurvesPanel } from '../GarmentCurvesPanel';
 import { GarmentDartsPanel } from './GarmentDartsPanel';
 import { GarmentFullnessPanel } from './GarmentFullnessPanel';
-import { cardCls } from './garmentUi';
+import { cardCls } from './garmentStyle';
 import { useGarmentWriters } from './useGarmentDraft';
 
 /** A garment's Shape tab: its edges, collar and lapels, darts, gathers and pleats, pockets and belt, sculpt and drawn lines. */

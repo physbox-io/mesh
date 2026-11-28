@@ -1,6 +1,7 @@
 import type { ClothFastening, ClothPoint, ClothSpec, GarmentTrim } from '../../../types/cloth';
 import { TRIM_KINDS } from '../../../utils/cloth/clothValidate';
-import { Heading, labelCls, removeCls, selectCls, smallButtonCls } from './garmentUi';
+import { Heading } from './garmentUi';
+import { labelCls, removeCls, selectCls, smallButtonCls } from './garmentStyle';
 
 const mm = (v: number) => Math.round(v * 1000);
 

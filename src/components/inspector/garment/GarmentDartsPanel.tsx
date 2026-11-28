@@ -1,5 +1,6 @@
 import type { BodyHeight, GarmentDart, GarmentDraft, GarmentPoint } from '../../../types/cloth';
-import { Check, FieldSlider, Heading, labelCls, removeCls, selectCls, smallButtonCls } from './garmentUi';
+import { Check, FieldSlider, Heading } from './garmentUi';
+import { labelCls, removeCls, selectCls, smallButtonCls } from './garmentStyle';
 
 const HEIGHTS: BodyHeight[] = ['hps', 'shoulder', 'bust', 'waist', 'hip', 'crotch'];
 const DIRECTIONS: { id: string; label: string; v: number[] }[] = [
