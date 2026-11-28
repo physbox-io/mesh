@@ -2,7 +2,8 @@ import type { ClothMaterialName, GarmentDraft, GarmentFullness } from '../../../
 import { capEase } from '../../../utils/cloth/garmentFullness';
 import { garmentSettings } from '../../../utils/cloth/garments';
 import { FULLNESS_KINDS } from '../../../utils/cloth/clothValidate';
-import { Check, FieldSlider, Heading, labelCls, removeCls, selectCls, smallButtonCls } from './garmentUi';
+import { Check, FieldSlider, Heading } from './garmentUi';
+import { labelCls, removeCls, selectCls, smallButtonCls } from './garmentStyle';
 
 const KIND_LABEL: Record<NonNullable<GarmentFullness['kind']>, string> = { ease: 'Eased', gather: 'Gathered', knife: 'Knife pleats', box: 'Box pleats', inverted: 'Inverted pleats' };
 const pleated = (k?: GarmentFullness['kind']) => k === 'knife' || k === 'box' || k === 'inverted';

@@ -22,8 +22,8 @@ export const GARMENT_DEFAULTS: Record<GarmentKind, GarmentSettings> = {
   // the waist to a narrow cuff.
   gown: { top: 'neck', ease: 0.06, length: 1.07, flare: 3, train: 0.7, sleeve: 0.5, cuff: 0.2, armhole: 0.2, neckline: 0.15, fitted: true, material: 'taffeta', rgba: [0.42, 0.18, 0.55, 1] },
   // Worn over a shirt: roomier, to the hip, long sleeves to a fitted cuff.
-  // Its zip open, studded round the neck and the cuffs.
-  jacket: { top: 'neck', opening: true, trims: [{ kind: 'zipper', along: 'opening', fastened: false }, { kind: 'stud', along: 'neckline', spacing: 0.022 }, { kind: 'stud', along: 'cuff', spacing: 0.018 }], ease: 0.22, length: 0.24, flare: 1, train: 0, sleeve: 0.6, cuff: 0.3, armhole: 0.02, neckline: 0.11, fitted: false, material: 'leather', rgba: [0.12, 0.1, 0.09, 1] },
+  // A plain woven jacket, zipped up the front; a look (leather, studs) is the draft's.
+  jacket: { top: 'neck', opening: true, trims: [{ kind: 'zipper', along: 'opening', fastened: true }], ease: 0.22, length: 0.24, flare: 1, train: 0, sleeve: 0.6, cuff: 0.3, armhole: 0.02, neckline: 0.11, fitted: false, material: 'woven', rgba: [0.17, 0.21, 0.3, 1] },
   // Waistband just below the waist, to the ankle, the leg tapering a little.
   // Round any span of a limb (over, from, to; capped or open): a sleeve on
   // its own, a leg warmer, a cuff.
