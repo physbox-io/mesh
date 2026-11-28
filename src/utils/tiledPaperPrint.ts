@@ -18,7 +18,7 @@
 // a new tab/window (or downloads it as a standalone `.html` printable packet
 // when pop-ups are blocked).
 
-export type PaperFormat = 'a4' | 'letter';
+export type PaperFormat = 'a4' | 'letter' | 'tabloid' | 'cardstock_12x12';
 
 export interface PaperSpec {
   id: PaperFormat;
@@ -48,7 +48,48 @@ export const PAPER_SPECS: Record<PaperFormat, PaperSpec> = {
     marginMm: 12,
     overlapMm: 10,
   },
+  tabloid: {
+    id: 'tabloid',
+    label: 'Tabloid (11 × 17 in)',
+    widthMm: 279.4,
+    heightMm: 431.8,
+    marginMm: 12,
+    overlapMm: 10,
+  },
+  cardstock_12x12: {
+    id: 'cardstock_12x12',
+    label: '12 × 12 in',
+    widthMm: 304.8,
+    heightMm: 304.8,
+    marginMm: 12,
+    overlapMm: 10,
+  },
 };
+
+/** How a paper tiles a drawing: the printable window, and how far apart neighbouring pages start. */
+export function tileGeometry(paper: PaperFormat): { printableW: number; printableH: number; stepX: number; stepY: number } {
+  const sp = PAPER_SPECS[paper];
+  const printableW = sp.widthMm - 2 * sp.marginMm, printableH = sp.heightMm - 2 * sp.marginMm;
+  return { printableW, printableH, stepX: Math.max(20, printableW - sp.overlapMm), stepY: Math.max(20, printableH - sp.overlapMm) };
+}
+
+/** A rectangle of the drawing, mm. */
+export interface DrawnRect { x: number; y: number; w: number; h: number }
+
+/** The grid a drawing tiles to, and which of its pages hold anything of `occupied` (every page when unset). */
+export function tilePages(widthMm: number, heightMm: number, paper: PaperFormat, occupied?: DrawnRect[]): { cols: number; rows: number; printed: boolean[][]; count: number } {
+  const g = tileGeometry(paper);
+  const cols = Math.max(1, widthMm <= g.printableW ? 1 : 1 + Math.ceil((widthMm - g.printableW) / g.stepX));
+  const rows = Math.max(1, heightMm <= g.printableH ? 1 : 1 + Math.ceil((heightMm - g.printableH) / g.stepY));
+  let count = 0;
+  const printed = Array.from({ length: rows }, (_, r) => Array.from({ length: cols }, (_, c) => {
+    const x = c * g.stepX, y = r * g.stepY;
+    const hit = !occupied || occupied.some((o) => o.x < x + g.printableW && o.x + o.w > x && o.y < y + g.printableH && o.y + o.h > y);
+    if (hit) count++;
+    return hit;
+  }));
+  return { cols, rows, printed, count };
+}
 
 export interface TiledPage {
   row: number;
@@ -107,7 +148,12 @@ export function parseMmSvg(svg: string): {
  */
 export function tileSvgForHomePrint(
   sourceSvg: string,
-  options?: { paper?: PaperFormat; title?: string }
+  options?: {
+    paper?: PaperFormat;
+    title?: string;
+    /** What of the drawing is worth printing: pages that hold none of it are left out (a pattern's blank corners). */
+    occupied?: DrawnRect[];
+  }
 ): TiledPrintDocument {
   const paper = PAPER_SPECS[options?.paper ?? 'a4'];
   const title = options?.title?.trim() || '1:1 Pattern';
@@ -120,16 +166,19 @@ export function tileSvgForHomePrint(
   const halfOverlapX = (printableW - stepX) / 2;
   const halfOverlapY = (printableH - stepY) / 2;
 
-  const cols = Math.max(1, widthMm <= printableW ? 1 : 1 + Math.ceil((widthMm - printableW) / stepX));
-  const rows = Math.max(1, heightMm <= printableH ? 1 : 1 + Math.ceil((heightMm - printableH) / stepY));
-  const totalPages = cols * rows;
+  // Rects in the drawing's own coordinates, shifted by its viewBox origin.
+  const grid = tilePages(widthMm, heightMm, paper.id, options?.occupied?.map((o) => ({ ...o, x: o.x - minX, y: o.y - minY })));
+  const { cols, rows } = grid;
+  const totalPages = grid.count;
+  let pageNumber = 0;
 
   const fmt = (n: number) => Number(n.toFixed(2));
   const pages: TiledPage[] = [];
 
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      const pageNumber = r * cols + c + 1;
+      if (!grid.printed[r][c]) continue;
+      pageNumber++;
       const srcX = c * stepX;
       const srcY = r * stepY;
       const clipId = `tile-clip-${r}-${c}`;
@@ -171,14 +220,14 @@ export function tileSvgForHomePrint(
           : '';
 
       const neighborHints: string[] = [];
-      if (c < cols - 1) {
+      if (c < cols - 1 && grid.printed[r][c + 1]) {
         const hintX = seamR + halfOverlapX / 2;
         const hintY = (seamT + seamB) / 2;
         neighborHints.push(
           `<text x="${fmt(hintX)}" y="${fmt(hintY)}" transform="rotate(90 ${fmt(hintX)} ${fmt(hintY)})" font-family="sans-serif" font-size="2.8" text-anchor="middle" fill="#64748b">Join → Row ${r + 1} Col ${c + 2}</text>`
         );
       }
-      if (r < rows - 1) {
+      if (r < rows - 1 && grid.printed[r + 1][c]) {
         const hintX = (seamL + seamR) / 2;
         const hintY = seamB + halfOverlapY / 2 + 1;
         neighborHints.push(
@@ -224,7 +273,7 @@ export function tileSvgForHomePrint(
     }
   }
 
-  const pageSizeCss = paper.id === 'a4' ? 'A4 portrait' : 'letter portrait';
+  const pageSizeCss = paper.id === 'a4' ? 'A4 portrait' : paper.id === 'letter' ? 'letter portrait' : `${paper.widthMm}mm ${paper.heightMm}mm`;
   const html = [
     `<!DOCTYPE html>`,
     `<html lang="en">`,
@@ -254,7 +303,7 @@ export function tileSvgForHomePrint(
     `<body>`,
     `  <div class="print-bar">`,
     `    <div>`,
-    `      <strong>${escXml(title)} · ${totalPages} ${totalPages === 1 ? 'sheet' : 'sheets'} (${rows}×${cols} grid, ${paper.label})</strong><br>`,
+    `      <strong>${escXml(title)} · ${totalPages} ${totalPages === 1 ? 'sheet' : 'sheets'} (${rows}×${cols} grid${totalPages < rows * cols ? `, ${rows * cols - totalPages} blank left out` : ''}, ${paper.label})</strong><br>`,
     `      <span>In your printer dialog, set <b>Scale: 100% / Actual Size</b> and <b>Margins: None</b>. Verify the 50 × 50 mm square on Page 1 with a ruler, trim along the dashed seam lines (leaving the outer overlap strip as a glue/tape tab if desired), and match the corner diamonds.</span>`,
     `    </div>`,
     `    <button class="print-btn" onclick="window.print()">Print 1:1 Sheets</button>`,
@@ -275,7 +324,7 @@ export function tileSvgForHomePrint(
  */
 export function openTiledPrintWindow(
   sourceSvg: string,
-  options?: { paper?: PaperFormat; title?: string; fileStem?: string }
+  options?: { paper?: PaperFormat; title?: string; fileStem?: string; occupied?: DrawnRect[] }
 ): void {
   const doc = tileSvgForHomePrint(sourceSvg, options);
   const blob = new Blob([doc.html], { type: 'text/html;charset=utf-8' });

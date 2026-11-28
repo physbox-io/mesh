@@ -11,7 +11,8 @@ import type { SceneNode } from '../../types/scene';
 import type { ModelMirror } from '../../types/sceneLayer';
 import { clothModel } from './clothModel';
 import { clothWorldMatrix } from './clothFrame';
-import { layoutPattern, patternSvg, type PatternLayout, type PatternPiece } from './patternSvg';
+import { layoutPattern, layoutRects, patternSvg, type PatternLayout, type PatternLayoutOptions, type PatternPiece } from './patternSvg';
+import { tileGeometry, tilePages, tileSvgForHomePrint, type PaperFormat } from '../tiledPaperPrint';
 
 /** The pattern's defaults, shared by the editor and MCP. */
 export const DEFAULT_PATTERN_OPTIONS = {
@@ -82,6 +83,43 @@ export function garmentPatternPieces(
   return { pieces, warnings, built };
 }
 
+/**
+ * The sheet width that prints the pattern on the fewest pages of `paper`:
+ * the pieces packed into 1, 2, 3 ... pages across, the pages they leave
+ * blank not printed.
+ */
+export function printWidth(pieces: PatternPiece[], options: PatternLayoutOptions, paper: PaperFormat): { widthMm: number; pages: number } {
+  const g = tileGeometry(paper);
+  let best: { widthMm: number; pages: number } | null = null;
+  for (let k = 1; k <= 8; k++) {
+    const widthMm = g.printableW + (k - 1) * g.stepX;
+    const L = layoutPattern(pieces, { ...options, widthMm });
+    if (L.width > widthMm + 0.5 && k < 8) continue;
+    const pages = tilePages(L.width, L.height, paper, layoutRects(L)).count;
+    if (!best || pages < best.pages) best = { widthMm, pages };
+  }
+  return best!;
+}
+
+export interface PatternPrint {
+  paper: PaperFormat;
+  /** Pages printed (blank ones left out). */
+  pages: number;
+  /** The print-ready packet: every page, tiled 1:1, with join marks and a test square. */
+  html: string;
+  /** Each printed page alone, as an SVG. */
+  pageSvgs: string[];
+}
+
+/** The pattern laid out for `paper` and tiled onto its pages. */
+export function printPattern(pieces: PatternPiece[], title: string, options: PatternLayoutOptions, paper: PaperFormat): PatternPrint & { svg: string; layout: PatternLayout } {
+  const { widthMm } = printWidth(pieces, options, paper);
+  const layout = layoutPattern(pieces, { ...options, widthMm });
+  const svg = patternSvg(pieces, title, { ...options, widthMm });
+  const doc = tileSvgForHomePrint(svg, { paper, title: `${title} sewing pattern`, occupied: layoutRects(layout) });
+  return { paper, pages: doc.pages.length, html: doc.html, pageSvgs: doc.pages.map((p) => p.svg), svg, layout };
+}
+
 export interface ClothPatternUnfoldResult {
   ok: true;
   svg: string;
@@ -89,6 +127,14 @@ export interface ClothPatternUnfoldResult {
   seamAllowanceMm: number;
   pieceNames: string[];
   warnings: string[];
+  /** The tiled home print, when a paper was asked for. */
+  print?: PatternPrint;
+  /** The fabrics the pieces are cut from. */
+  fabrics: string[];
+  /** The pieces, as cut. */
+  pieces: PatternPiece[];
+  /** The layout options used. */
+  options: PatternLayoutOptions;
 }
 
 export interface ClothPatternUnfoldError {
@@ -102,7 +148,7 @@ export function exportClothPatternUnfold(
   clothNodes: SceneNode[],
   allSceneNodes: SceneNode[],
   modelFlexes: ModelMirror['flexes'] | undefined,
-  options?: { seamAllowanceMm?: number; title?: string; stale?: Set<string> },
+  options?: { seamAllowanceMm?: number; title?: string; stale?: Set<string>; paper?: PaperFormat },
 ): ClothPatternUnfoldResult | ClothPatternUnfoldError {
   const seamAllowanceMm = Math.max(0, options?.seamAllowanceMm ?? DEFAULT_PATTERN_OPTIONS.seamAllowanceMm);
   const { pieces, warnings } = garmentPatternPieces(clothNodes, allSceneNodes, modelFlexes, { stale: options?.stale });
@@ -110,12 +156,20 @@ export function exportClothPatternUnfold(
     return { ok: false, error: 'No flat 2D garment pattern pieces could be extracted from the selected cloth bodies.', warnings };
   }
   const title = options?.title ?? (clothNodes.length === 1 ? `${clothNodes[0].name || clothNodes[0].id} pattern` : 'garment pattern');
-  const layout = layoutPattern(pieces, { seamAllowanceMm });
+  const fabrics = [...new Set(pieces.map((p) => p.fabric).filter((f): f is string => !!f))];
+  const opts: PatternLayoutOptions = { seamAllowanceMm };
+  if (options?.paper) {
+    const pr = printPattern(pieces, title, opts, options.paper);
+    if (pr.layout.pieces.length === 0) return { ok: false, error: 'Cloth pattern pieces had degenerate outlines (fewer than 3 points).', warnings };
+    const { svg, layout, ...print } = pr;
+    return { ok: true, svg, layout, seamAllowanceMm, pieceNames: layout.pieces.map((p) => p.name), warnings, print, fabrics, pieces, options: opts };
+  }
+  const layout = layoutPattern(pieces, opts);
   if (layout.pieces.length === 0) {
     return { ok: false, error: 'Cloth pattern pieces had degenerate outlines (fewer than 3 points).', warnings };
   }
-  const svg = patternSvg(pieces, title, { seamAllowanceMm });
-  return { ok: true, svg, layout, seamAllowanceMm, pieceNames: layout.pieces.map((p) => p.name), warnings };
+  const svg = patternSvg(pieces, title, opts);
+  return { ok: true, svg, layout, seamAllowanceMm, pieceNames: layout.pieces.map((p) => p.name), warnings, fabrics, pieces, options: opts };
 }
 
 /**

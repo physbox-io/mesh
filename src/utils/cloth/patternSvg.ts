@@ -33,6 +33,8 @@ export interface PatternPiece {
 export interface PatternLayoutOptions {
   /** Outward seam allowance in millimetres (0 = net sewing lines only). */
   seamAllowanceMm?: number;
+  /** The sheet's width, mm, margins included: the pieces are packed across it and the sheet runs as long as it must. Unset: about square. */
+  widthMm?: number;
 }
 
 export interface PatternLayout {
@@ -51,12 +53,14 @@ export interface PatternLayout {
     channels: string[];
     /** Darts: their stitching lines (a double-ended dart's loop; a wedge's legs are on sewPath) and where to mark their points. */
     darts: { stitch?: string; points: { x: number; y: number }[] }[];
+    /** The cutting line's points, placed. */
+    outlinePts: { x: number; y: number }[];
   }[];
   width: number;
   height: number;
 }
 
-const MM = 1000, GAP = 30, MARGIN = 20;
+const MM = 1000, GAP = 15, MARGIN = 20;
 
 /** Where a dart's point is marked: 10 mm back from it toward its middle (hidden in the stitching), or at it if the dart is short. */
 function pointBack(tip: { x: number; y: number }, toward: { x: number; y: number }) {
@@ -81,8 +85,21 @@ interface Drawn {
   x0: number; y0: number; x1: number; y1: number;
 }
 
+/** Drawn pieces by piece and options: laying out again (another sheet width, another paper) does not offset every outline again. */
+const drawnCache = new WeakMap<PatternPiece, Map<string, Drawn | null>>();
+
 /** One piece in its own frame. */
 function drawPiece(p: PatternPiece, sa: number): Drawn | null {
+  const key = JSON.stringify([sa]);
+  let byKey = drawnCache.get(p);
+  if (!byKey) drawnCache.set(p, (byKey = new Map()));
+  if (byKey.has(key)) return byKey.get(key)!;
+  const d = drawPieceNow(p, sa);
+  byKey.set(key, d);
+  return d;
+}
+
+function drawPieceNow(p: PatternPiece, sa: number): Drawn | null {
   if (p.outline.length < 3) return null;
   const at = (i: number): Pt => ({ x: p.uv[i][0] * MM, y: -p.uv[i][1] * MM });
   // A dart is folded and stitched, never cut: a wedge slit in from the edge
@@ -140,26 +157,94 @@ function place(d: Drawn, x: number, y: number): PatternLayout['pieces'][number] 
     marks: d.marks.map((mk) => ({ ...mk, x: mk.x + dx, y: mk.y + dy })),
     channels: d.channels.map((c) => pathOf(c, dx, dy, false)),
     darts: d.darts.map((dt) => ({ ...(dt.stitch ? { stitch: pathOf(dt.stitch, dx, dy) } : {}), points: dt.points.map((q) => ({ x: q.x + dx, y: q.y + dy })) })),
+    outlinePts: d.cut[0].map((q) => ({ x: q.x + dx, y: q.y + dy })),
   };
 }
 
 /** Room under each piece for its label. */
 const LABEL = 18;
 
-/** The pieces in a row, each in its own box; everything in mm, y down the page. */
+/**
+ * Rectangles packed into a strip `width` wide, each as high up as it will go
+ * (a skyline, tallest first): where each goes, and how long the strip runs.
+ * One wider than the strip is put at its left edge, over it.
+ */
+export function packRects(rects: { w: number; h: number }[], width: number, gap: number): { at: Pt[]; length: number } {
+  let sky: { x: number; w: number; y: number }[] = [{ x: 0, w: Math.max(width, ...rects.map((r) => r.w)), y: 0 }];
+  const at: Pt[] = new Array(rects.length);
+  const order = rects.map((_, i) => i).sort((i, j) => rects[j].h - rects[i].h || rects[j].w - rects[i].w);
+  let length = 0;
+  for (const i of order) {
+    const r = rects[i];
+    let best: Pt | null = null;
+    for (const seg of sky) {
+      const x = seg.x;
+      if (x + r.w > width + 1e-6 && x > 0) continue;
+      let y = 0;
+      for (const o of sky) if (o.x < x + r.w - 1e-9 && o.x + o.w > x + 1e-9) y = Math.max(y, o.y);
+      if (!best || y < best.y - 1e-9 || (Math.abs(y - best.y) < 1e-9 && x < best.x)) best = { x, y };
+    }
+    const p = best ?? { x: 0, y: length };
+    at[i] = p;
+    length = Math.max(length, p.y + r.h);
+    // The skyline raised over it, a gap clear.
+    const x0 = p.x, x1 = p.x + r.w + gap, top = p.y + r.h + gap;
+    const next: typeof sky = [];
+    for (const o of sky) {
+      if (o.x + o.w <= x0 || o.x >= x1) { next.push(o); continue; }
+      if (o.x < x0) next.push({ x: o.x, w: x0 - o.x, y: o.y });
+      if (o.x + o.w > x1) next.push({ x: x1, w: o.x + o.w - x1, y: o.y });
+    }
+    next.push({ x: x0, w: x1 - x0, y: top });
+    next.sort((u, v) => u.x - v.x);
+    // Neighbours at one height merged, so a later piece sees the run as one.
+    sky = next.reduce<typeof sky>((acc, o) => {
+      const last = acc[acc.length - 1];
+      if (last && Math.abs(last.y - o.y) < 1e-9 && Math.abs(last.x + last.w - o.x) < 1e-9) last.w += o.w; else acc.push({ ...o });
+      return acc;
+    }, []);
+  }
+  return { at, length };
+}
+
+/** The pieces packed onto one sheet, grain down the page; everything in mm, y down the page. */
 export function layoutPattern(pieces: PatternPiece[], options?: PatternLayoutOptions): PatternLayout {
   const sa = Math.max(0, options?.seamAllowanceMm ?? 0);
-  let x = MARGIN, height = 0;
-  const out: PatternLayout['pieces'] = [];
-  for (const p of [...pieces].sort((a, b) => a.name.localeCompare(b.name))) {
-    const d = drawPiece(p, sa);
-    if (!d) continue;
-    const placed = place(d, x, MARGIN);
-    out.push(placed);
-    x += placed.w + GAP;
-    height = Math.max(height, placed.h + LABEL);
+  const drawn = [...pieces].sort((a, b) => a.name.localeCompare(b.name)).map((p) => drawPiece(p, sa)).filter((d): d is Drawn => !!d);
+  const rects = drawn.map((d) => ({ w: d.x1 - d.x0, h: d.y1 - d.y0 + LABEL }));
+  const area = rects.reduce((acc, r) => acc + (r.w + GAP) * (r.h + GAP), 0);
+  const widest = Math.max(0, ...rects.map((r) => r.w));
+  const inner = Math.max(widest, options?.widthMm ? options.widthMm - 2 * MARGIN : Math.sqrt(area));
+  const { at, length } = packRects(rects, inner, GAP);
+  const out = drawn.map((d, i) => place(d, MARGIN + at[i].x, MARGIN + at[i].y));
+  const used = Math.max(0, ...out.map((p) => p.x + p.w)) + MARGIN;
+  return { pieces: out, width: Math.max(100, options?.widthMm ?? 0, used), height: length + 2 * MARGIN };
+}
+
+/** What of a layout is drawn on, label room included: the pages worth printing. */
+export function layoutRects(L: PatternLayout): { x: number; y: number; w: number; h: number }[] {
+  // Each piece in strips across it, as wide as it is at that height: a page
+  // over a piece's empty corner is not worth printing.
+  const STRIP = 15, out: { x: number; y: number; w: number; h: number }[] = [];
+  for (const p of L.pieces) {
+    const pts = p.outlinePts.length ? p.outlinePts : [{ x: p.x, y: p.y }, { x: p.x + p.w, y: p.y + p.h }];
+    for (let y = p.y; y < p.y + p.h; y += STRIP) {
+      const y1 = Math.min(p.y + p.h, y + STRIP);
+      let lo = Infinity, hi = -Infinity;
+      for (let i = 0; i < pts.length; i++) {
+        const a = pts[i], b = pts[(i + 1) % pts.length];
+        if (Math.max(a.y, b.y) < y || Math.min(a.y, b.y) > y1) continue;
+        for (const yy of [Math.max(y, Math.min(a.y, b.y)), Math.min(y1, Math.max(a.y, b.y))]) {
+          const t = Math.abs(b.y - a.y) < 1e-9 ? 0 : (yy - a.y) / (b.y - a.y);
+          const xs = Math.abs(b.y - a.y) < 1e-9 ? [a.x, b.x] : [a.x + t * (b.x - a.x)];
+          for (const x of xs) { lo = Math.min(lo, x); hi = Math.max(hi, x); }
+        }
+      }
+      if (hi >= lo) out.push({ x: lo, y, w: hi - lo, h: y1 - y });
+    }
+    out.push({ x: p.x + Math.max(0, p.w / 2 - 70), y: p.y + p.h, w: Math.min(p.w, 140), h: LABEL });
   }
-  return { pieces: out, width: Math.max(100, x - GAP + MARGIN), height: height + 2 * MARGIN };
+  return out;
 }
 
 const escXml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');

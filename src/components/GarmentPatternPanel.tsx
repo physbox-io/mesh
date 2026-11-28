@@ -4,9 +4,10 @@ import { useStore } from '../store/useStore';
 import type { SceneNode } from '../types/scene';
 import type { ModelMirror } from '../types/sceneLayer';
 import { layoutPattern, patternSvg } from '../utils/cloth/patternSvg';
-import { DEFAULT_PATTERN_OPTIONS, garmentPatternPieces } from '../utils/cloth/patternExport';
+import { DEFAULT_PATTERN_OPTIONS, garmentPatternPieces, printPattern, printWidth } from '../utils/cloth/patternExport';
 import { downloadBlob } from '../utils/downloadBlob';
-import { openTiledPrintWindow, type PaperFormat } from '../utils/tiledPaperPrint';
+import { openTiledPrintWindow, PAPER_SPECS, type PaperFormat } from '../utils/tiledPaperPrint';
+import { layoutRects } from '../utils/cloth/patternSvg';
 
 /** Overlay colours on the pattern preview. */
 const OVERLAY = { boning: '#d97706', zipper: '#2563eb', trim: '#334' };
@@ -33,6 +34,8 @@ export function GarmentPatternPanel({ nodes, title, fill }: {
   const pieces = useMemo(() => garmentPatternPieces(nodes, sceneNodes, model?.flexes, { build: false }).pieces, [nodes, sceneNodes, model]);
   const layout = useMemo(() => layoutPattern(pieces, { seamAllowanceMm }), [pieces, seamAllowanceMm]);
   const u = layout.width / 250;
+  // Packed to print on the fewest pages of the paper chosen, blank pages left out.
+  const pages = useMemo(() => (pieces.length ? printWidth(pieces, { seamAllowanceMm }, paperFormat).pages : 0), [pieces, seamAllowanceMm, paperFormat]);
   const legend = useMemo(() => {
     const kinds = new Set(layout.pieces.flatMap((p) => p.marks.map((m) => m.kind)));
     const out: [string, string, boolean][] = [];
@@ -109,16 +112,18 @@ export function GarmentPatternPanel({ nodes, title, fill }: {
           aria-label="Home printer paper size"
           className="px-2 py-1.5 border border-slate-200 dark:border-slate-700 rounded-lg text-[11px] font-semibold bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 cursor-pointer"
         >
-          <option value="a4">A4</option>
-          <option value="letter">US Letter</option>
+          {(Object.keys(PAPER_SPECS) as PaperFormat[]).map((k) => <option key={k} value={k}>{PAPER_SPECS[k].label}</option>)}
         </select>
         <button
           type="button"
-          onClick={() => openTiledPrintWindow(svg(), { paper: paperFormat, title: `${title} Sewing Pattern`, fileStem: `${fileStem(title)}_pattern` })}
+          onClick={() => {
+            const pr = printPattern(pieces, title, { seamAllowanceMm }, paperFormat);
+            openTiledPrintWindow(pr.svg, { paper: paperFormat, title: `${title} sewing pattern`, fileStem: `${fileStem(title)}_pattern`, occupied: layoutRects(pr.layout) });
+          }}
           className="flex items-center justify-center gap-1.5 flex-1 py-1.5 px-2.5 border border-indigo-200 dark:border-indigo-800 rounded-lg text-xs font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/40 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 transition-colors shadow-xs cursor-pointer"
-          title="Tile 1:1 onto A4 or US Letter sheets with corner alignment diamonds and a 50 × 50 mm ruler scale box, ready for any home printer and scissors"
+          title="Packed to print 1:1 on the fewest pages, blank pages left out, with corner alignment diamonds and a 50 × 50 mm test square"
         >
-          <Printer className="w-3.5 h-3.5" /> Print 1:1 on {paperFormat === 'a4' ? 'A4' : 'Letter'}
+          <Printer className="w-3.5 h-3.5" /> Print 1:1 ({pages} page{pages === 1 ? '' : 's'})
         </button>
       </div>
     </>
