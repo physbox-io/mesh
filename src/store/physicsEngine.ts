@@ -464,6 +464,18 @@ export function silenceAllLiveAcoustics(): void {
   silenceFrictionVoices();
 }
 
+/**
+ * Before a planned recycle: the cloth's state now, from the worker about to
+ * go (frames carry one only about once a second). Kept as it was if the
+ * worker does not answer.
+ */
+export const refreshClothStateForRecycle = async () => {
+  const c = physicsWorkerClientSingleton;
+  if (!c) return;
+  const s = await c.getClothState().catch(() => undefined);
+  if (s) lastClothState = s;
+};
+
 export const recycleWorker = () => {
   silenceAllLiveAcoustics();
   physicsWorkerClientSingleton?.terminate();
@@ -719,7 +731,8 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
       // Kept beside the qpos mirror, from the same frame, so a recycle seeds
       // the new worker's scripts from the moment its bodies are seeded from.
       lastScriptState = snap.scriptState;
-      lastClothState = snap.clothState;
+      // Frames carry it only about once a second: keep the last until then.
+      if (snap.clothState) lastClothState = snap.clothState;
       noteWorkerFrame(snap.time);
       const data = store().getState().data;
       if (data) {

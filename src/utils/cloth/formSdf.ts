@@ -90,7 +90,12 @@ export function meshSdf(g: Grid, points: number[][], tris: ArrayLike<number>): F
       }
     }
   }
-  // Outside: reachable from the grid's edge without crossing the band's inside.
+  // Outside: reachable from the grid's edge without crossing the band's
+  // inside. The flood carries on through band cells clearly outside (by
+  // their nearest face), not only through the cells beyond the band: stopped
+  // at the band, air reached only through a gap of a few cells (a hollow's
+  // narrow mouth) read as inside the body.
+  const skin = 0.5 * h;
   const outside = new Uint8Array(N);
   const stack = new Int32Array(N);
   let sp = 0;
@@ -101,13 +106,13 @@ export function meshSdf(g: Grid, points: number[][], tris: ArrayLike<number>): F
       if (jkEdge) {
         for (let i = 0; i < nx; i++) {
           const idx = jkOff + i;
-          if (!outside[idx] && !(fixed[idx] && d[idx] < 0)) { outside[idx] = 1; if (!fixed[idx]) stack[sp++] = idx; }
+          if (!outside[idx] && !(fixed[idx] && d[idx] < 0)) { outside[idx] = 1; if (!fixed[idx] || d[idx] >= skin) stack[sp++] = idx; }
         }
       } else {
         const i0 = jkOff;
-        if (!outside[i0] && !(fixed[i0] && d[i0] < 0)) { outside[i0] = 1; if (!fixed[i0]) stack[sp++] = i0; }
+        if (!outside[i0] && !(fixed[i0] && d[i0] < 0)) { outside[i0] = 1; if (!fixed[i0] || d[i0] >= skin) stack[sp++] = i0; }
         const i1 = jkOff + nx - 1;
-        if (!outside[i1] && !(fixed[i1] && d[i1] < 0)) { outside[i1] = 1; if (!fixed[i1]) stack[sp++] = i1; }
+        if (!outside[i1] && !(fixed[i1] && d[i1] < 0)) { outside[i1] = 1; if (!fixed[i1] || d[i1] >= skin) stack[sp++] = i1; }
       }
     }
   }
@@ -117,12 +122,12 @@ export function meshSdf(g: Grid, points: number[][], tris: ArrayLike<number>): F
     const rem = idx - k * nyNx;
     const j = (rem / nx) | 0;
     const i = rem - j * nx;
-    if (i > 0) { const ni = idx - 1; if (!outside[ni] && !(fixed[ni] && d[ni] < 0)) { outside[ni] = 1; if (!fixed[ni]) stack[sp++] = ni; } }
-    if (i < nx - 1) { const ni = idx + 1; if (!outside[ni] && !(fixed[ni] && d[ni] < 0)) { outside[ni] = 1; if (!fixed[ni]) stack[sp++] = ni; } }
-    if (j > 0) { const ni = idx - nx; if (!outside[ni] && !(fixed[ni] && d[ni] < 0)) { outside[ni] = 1; if (!fixed[ni]) stack[sp++] = ni; } }
-    if (j < ny - 1) { const ni = idx + nx; if (!outside[ni] && !(fixed[ni] && d[ni] < 0)) { outside[ni] = 1; if (!fixed[ni]) stack[sp++] = ni; } }
-    if (k > 0) { const ni = idx - nyNx; if (!outside[ni] && !(fixed[ni] && d[ni] < 0)) { outside[ni] = 1; if (!fixed[ni]) stack[sp++] = ni; } }
-    if (k < nz - 1) { const ni = idx + nyNx; if (!outside[ni] && !(fixed[ni] && d[ni] < 0)) { outside[ni] = 1; if (!fixed[ni]) stack[sp++] = ni; } }
+    if (i > 0) { const ni = idx - 1; if (!outside[ni] && !(fixed[ni] && d[ni] < 0)) { outside[ni] = 1; if (!fixed[ni] || d[ni] >= skin) stack[sp++] = ni; } }
+    if (i < nx - 1) { const ni = idx + 1; if (!outside[ni] && !(fixed[ni] && d[ni] < 0)) { outside[ni] = 1; if (!fixed[ni] || d[ni] >= skin) stack[sp++] = ni; } }
+    if (j > 0) { const ni = idx - nx; if (!outside[ni] && !(fixed[ni] && d[ni] < 0)) { outside[ni] = 1; if (!fixed[ni] || d[ni] >= skin) stack[sp++] = ni; } }
+    if (j < ny - 1) { const ni = idx + nx; if (!outside[ni] && !(fixed[ni] && d[ni] < 0)) { outside[ni] = 1; if (!fixed[ni] || d[ni] >= skin) stack[sp++] = ni; } }
+    if (k > 0) { const ni = idx - nyNx; if (!outside[ni] && !(fixed[ni] && d[ni] < 0)) { outside[ni] = 1; if (!fixed[ni] || d[ni] >= skin) stack[sp++] = ni; } }
+    if (k < nz - 1) { const ni = idx + nyNx; if (!outside[ni] && !(fixed[ni] && d[ni] < 0)) { outside[ni] = 1; if (!fixed[ni] || d[ni] >= skin) stack[sp++] = ni; } }
   }
   // Unsigned distance beyond the band, by fast sweeping, from the band's.
   const u = new Float32Array(N);
