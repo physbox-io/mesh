@@ -24,7 +24,7 @@ import { SelfContacts } from './clothSelf';
 import { BoardShapes, type Board } from './clothBoards';
 import { contourStep, findCrossings, trianglesNear, untangleMesh, type UntangleMesh } from './clothUntangle';
 import { ClothCcd } from './clothCcd';
-import { colliderContactInto, type Collider, type ContactOut } from './clothColliders';
+import { colliderContactInto, colliderLipschitz, type Collider, type ContactOut } from './clothColliders';
 import { clothBendRigidity } from './clothMesh';
 
 /** Substep, seconds. */
@@ -55,6 +55,8 @@ const SLIDER_LONG = 0.03, SLIDER_THROAT = 0.01, ZIP_CLOSE_SPEED = 0.5, ZIP_REACH
 const PRESEW_REST = 0.5;
 /** Its step meanwhile, seconds. */
 const PRESEW_STEP = 1 / 200;
+/** How near (m, box to box) a cloth carried over a rebuild must be to one that changed to be let move as that settles (carryCloths). */
+const CARRY_REACH = 0.03;
 /**
  * The most wall-clock time the sewing and settling before the first frame may
  * take, ms. A garment built badly through itself (a ruffle sewn in a spiral
@@ -170,6 +172,23 @@ export class ClothSim {
   private stitches: Int32Array; private stitchGap: Float64Array; private stitchSew: Float64Array;
   /** Whether each stitch holds (a zip's pair, only where it is done up), and the gap a zip's pair is closing from (m, down to 0 at ZIP_CLOSE_SPEED). */
   private stitchOn: Uint8Array; private stitchClose: Float64Array;
+  /** Each cloth's own stitches, [from, to) in `stitches`; and the stitches of ties from one cloth to another, which come after them. */
+  private pieceStitchFrom: Int32Array; private pieceStitchTo: Int32Array;
+  private tieStitches: { k: number; from: number; to: number }[] = [];
+  /**
+   * Set by `carryCloths`: which particles were carried over as they were
+   * (held still while the rest is sewn and settled unless `carryFree`), and
+   * the clock and accumulator the carried cloth was at.
+   */
+  private carryHeld: Uint8Array | null = null;
+  private carryFree: Uint8Array | null = null;
+  private carryPiece: Uint8Array | null = null;
+  private carryStitch: Uint8Array | null = null;
+  /** Which cloths a settle after carrying (carryCloths) needs: what moves, and what it can meet. */
+  private carryInvolved: boolean[] | null = null;
+  /** The lookups the colliders and ties were last posed from (setPoses), to pose a sim of some of this cloth alike. */
+  private posedBy: [(body: string) => THREE.Matrix4 | null, (geom: number) => THREE.Matrix4 | null] | null = null;
+  private carryClock = 0; private carryAccumulator = 0;
   /** Each zip: its cloth, its trim, its pairs' stitches and places up the run (0-1), its length (m), how far it is done up and where its slider is being moved to. */
   private zips: { cloth: string; trim: number; stitch: Int32Array; at: Float64Array; length: number; fastened: number; want: number }[] = [];
   private zipGrabbed = -1;
@@ -239,6 +258,18 @@ export class ClothSim {
   private nearest: Float64Array;
   private skip: Uint8Array;
   private activeCollideIdx: Int32Array;
+  /**
+   * Per particle and collider, the distance it read last, where the particle
+   * was, and the collider's pose then (colGen; -1 none): a point that cannot
+   * have come within the margin since (the distance changes no faster than
+   * colLip per metre) is not asked again in a pass that only pushes. Null
+   * where the table would be too large.
+   */
+  private colD: Float64Array | null = null;
+  private colP: Float64Array | null = null;
+  private colAt: Int32Array | null = null;
+  private colGen: Int32Array;
+  private colLip: Float64Array;
   private accumulator = 0;
   /** Cloth against cloth along each stretch of substeps (clothCcd): where the stretch began, and how many substeps it is. */
   private ccd: ClothCcd | null = null;
@@ -264,6 +295,7 @@ export class ClothSim {
     const tacksList: { p: number; a: number; b: number; c: number; w0: number; w1: number; w2: number; offset: number; lift: boolean }[] = [];
     this.ties = [];
     const nPieces = this.pieces.length;
+    this.pieceStitchFrom = new Int32Array(nPieces); this.pieceStitchTo = new Int32Array(nPieces);
     this.pieceFlatArea = new Float64Array(nPieces);
     this.pieceChord = new Float64Array(nPieces);
     this.pieceAccForceSum = new Float64Array(nPieces);
@@ -338,10 +370,12 @@ export class ClothSim {
         BS.push(m.bendSign ? m.bendSign[k] : undefined);
       }
       for (let k = 0; k < m.limits.length; k += 2) { LP.push(base + m.limits[k], base + m.limits[k + 1]); LR.push(m.limitRest[k / 2]); }
+      this.pieceStitchFrom[pi] = S.length / 2;
       for (let k = 0; k < m.stitches.length; k += 2) {
         S.push(base + m.stitches[k], base + m.stitches[k + 1]);
         SS.push(m.stitchSew ? m.stitchSew[k / 2] : m.sewTime);
       }
+      this.pieceStitchTo[pi] = S.length / 2;
       let flatArea = 0;
       let minX0 = Infinity, maxX0 = -Infinity, minY0 = Infinity, maxY0 = -Infinity, minZ0 = Infinity, maxZ0 = -Infinity;
       for (let vp = 0; vp < m.x0.length; vp += 3) {
@@ -384,7 +418,7 @@ export class ClothSim {
     }
     // Ties to another cloth: sewn to its nearest point where the two start,
     // the stitch closing over the sew time.
-    for (const { model: m, base } of this.pieces) {
+    for (const [pi, { model: m, base }] of this.pieces.entries()) {
       for (const t of m.ties) {
         if (!t.cloth) continue;
         const target = this.pieces.find((q) => q.model.name === t.cloth);
@@ -396,7 +430,7 @@ export class ClothSim {
           const d = (this.x[k] - this.x[i]) ** 2 + (this.x[k + 1] - this.x[i + 1]) ** 2 + (this.x[k + 2] - this.x[i + 2]) ** 2;
           if (d < bd && target.model.invMass[j] > 0) { bd = d; best = j; }
         }
-        if (best >= 0) { S.push(base + t.particle, target.base + best); SS.push(m.sewTime); }
+        if (best >= 0) { this.tieStitches.push({ k: S.length / 2, from: pi, to: this.pieces.indexOf(target) }); S.push(base + t.particle, target.base + best); SS.push(m.sewTime); }
       }
     }
     // Zips: every pair along each, held only where it is done up.
@@ -486,6 +520,13 @@ export class ClothSim {
     for (const pc of this.pieces) for (const b of pc.model.boards ?? []) boards.push({ ...b, particles: b.particles.map((q) => pc.base + q) });
     this.boards = new BoardShapes(boards, this.n);
     this.clearBudget = new Float64Array(n); this.nearest = new Float64Array(n); this.skip = new Uint8Array(n); this.activeCollideIdx = new Int32Array(n);
+    this.colGen = new Int32Array(colliders.length);
+    this.colLip = Float64Array.from(colliders, (c) => colliderLipschitz(c));
+    if (n * colliders.length <= 4_000_000) {
+      this.colD = new Float64Array(n * colliders.length);
+      this.colP = new Float64Array(3 * n * colliders.length);
+      this.colAt = new Int32Array(n * colliders.length).fill(-1);
+    }
     this.tiePrevLambda = new Float64Array(this.ties.length);
     this.tieFastLambda = new Float64Array(this.ties.length);
     this.tieAvgLambda = new Float64Array(this.ties.length);
@@ -532,6 +573,7 @@ export class ClothSim {
    * Call before advancing; static bodies need it only once.
    */
   setPoses(bodyWorld: (body: string) => THREE.Matrix4 | null, geomWorld: (geom: number) => THREE.Matrix4 | null = () => null) {
+    this.posedBy = [bodyWorld, geomWorld];
     const corner = this.poseCorner;
     const nextMat = ClothSim.poseNext;
     let maxStepDisp = 0;
@@ -568,6 +610,8 @@ export class ClothSim {
       }
       this.world[i].copy(nextMat);
       this.inv[i].copy(nextMat).invert();
+      // A new pose: what each point read of it before no longer holds.
+      this.colGen[i]++;
       // Its bounds in the world, grown by the cloth's thickness: most points
       // are turned away by six comparisons, not a transform and a distance.
       let lo0 = Infinity, lo1 = Infinity, lo2 = Infinity, hi0 = -Infinity, hi1 = -Infinity, hi2 = -Infinity;
@@ -616,25 +660,60 @@ export class ClothSim {
     }
   }
 
-  /** Moves the cloth on by `dt`, in whole substeps (the remainder carries over). */
-  advance(dt: number, env: ClothEnv) {
+  /** The env of an advance not yet finished (`finish`), and whether its continuous collision is due before its next substep. */
+  private owedEnv: ClothEnv | null = null;
+  private ccdOwed = false;
+
+  /** Whether an advance stopped at its deadline with work left (`finish` runs it). */
+  get busy() { return this.owedEnv !== null; }
+
+  /**
+   * Moves the cloth on by `dt`, in whole substeps (the remainder carries
+   * over). Past `deadline` (performance.now() ms) it stops between two pieces
+   * of work (a substep, a continuous-collision pass) and returns false, for
+   * `finish` to run the rest exactly as it would have: same poses, same env,
+   * same order. One piece always runs.
+   */
+  advance(dt: number, env: ClothEnv, deadline = Infinity): boolean {
+    // One owed still: done first, so nothing runs out of order.
+    if (this.owedEnv) this.finish();
     this.accumulator += dt;
-    if (this.accumulator < CLOTH_SUBSTEP) return;
+    if (this.accumulator < CLOTH_SUBSTEP) return true;
     const h = CLOTH_SUBSTEP;
     let steps = 0;
     let total = this.accumulator;
     while (total >= h) { steps++; total -= h; }
     this.substepMoveScale = 1 / steps;
-    while (this.accumulator >= h) {
+    this.owedEnv = env;
+    return this.finish(deadline);
+  }
+
+  /** Runs what an advance stopped at its deadline left; true once it is all done. */
+  finish(deadline = Infinity): boolean {
+    const env = this.owedEnv;
+    if (!env) return true;
+    const h = CLOTH_SUBSTEP, timed = deadline !== Infinity;
+    let worked = false;
+    for (;;) {
+      if (this.ccdOwed) {
+        if (worked && timed && performance.now() > deadline) return false;
+        this.collideAlong(this.ccdSince * h);
+        worked = true;
+      }
+      if (this.accumulator < h) break;
+      if (worked && timed && performance.now() > deadline) return false;
       this.externalForces(env);
       this.substep(h, env);
       this.accumulator -= h;
-      if (++this.ccdSince >= CCD_EVERY) this.collideAlong(this.ccdSince * h);
+      worked = true;
+      if (++this.ccdSince >= CCD_EVERY) this.ccdOwed = true;
     }
+    this.owedEnv = null;
     this.substepMoveScale = 1;
     for (let ci = 0; ci < this.colliders.length; ci++) {
       if (this.worldInit[ci]) this.prevWorld[ci].copy(this.world[ci]);
     }
+    return true;
   }
 
   /** The continuous collision, built once: every cloth triangle, sewn points joined. */
@@ -655,6 +734,7 @@ export class ClothSim {
   private collideAlong(span: number) {
     const x = this.x, from = this.ccdFrom;
     this.ccdSince = 0;
+    this.ccdOwed = false;
     if (!from) { this.ccdFrom = Float64Array.from(x); return; }
     const before = this.ccdBefore;
     before.set(x);
@@ -822,6 +902,15 @@ export class ClothSim {
       this.settled = true;
       return;
     }
+    if (this.settleInvolved()) return;
+    // Cloth carried over a rebuild (carryCloths) as it was: held still while
+    // the rest is sewn and settled, its seams as sewn as they were.
+    const carryHeld = this.carryHeld, carryFree = this.carryFree, carryStitch = this.carryStitch;
+    const isCarried = (i: number) => Boolean(carryHeld?.[i] || carryFree?.[i]);
+    const fullW = carryHeld ? this.w.slice() : null;
+    const carriedSew = carryStitch ? this.stitchSew.slice() : null, carriedGap = carryStitch ? this.stitchGap.slice() : null;
+    const carriedV = carryHeld ? this.v.slice() : null;
+    if (carryHeld) for (let i = 0; i < this.n; i++) if (carryHeld[i]) this.w[i] = 0;
     // Untangling (clothUntangle) is not run yet: on garments the tacks, which
     // hold layers a fabric's thickness apart, pull back what it parts, and the
     // crossings grew (gathers and pleats 129 -> 711 over 300 steps; with tacks
@@ -854,10 +943,13 @@ export class ClothSim {
     // shows its cloth at rest: run through its sew time and a moment more,
     // then the clock starts with every stitch closed.
     let sewing = 0;
-    for (let k = 0; k < this.stitchGap.length; k++) if (this.stitchOn[k] && this.stitchSew[k] > 0 && this.stitchGap[k] > 0.002) sewing = Math.max(sewing, this.stitchSew[k]);
+    // Not what was carried over still closing: it goes on closing as the scene runs, as it was.
+    const open = (k: number) => this.stitchOn[k] && this.stitchSew[k] > 0 && this.stitchGap[k] > 0.002 && !carryStitch?.[k];
+    for (let k = 0; k < this.stitchGap.length; k++) if (open(k)) sewing = Math.max(sewing, this.stitchSew[k]);
     const dropped: number[] = [], pulls: { p: number; route: number[][]; started: boolean }[] = [];
-    for (const pc of this.pieces) for (const i of pc.model.drop ?? []) dropped.push(pc.base + i);
-    for (const pc of this.pieces) for (const pl of pc.model.pulls ?? []) pulls.push({ p: pc.base + pl.particle, route: [...(pl.via ?? []), pl.to], started: false });
+    // Not what was carried over: dropped and pulled into place already.
+    this.pieces.forEach((pc, pi) => { if (!this.carryPiece?.[pi]) for (const i of pc.model.drop ?? []) dropped.push(pc.base + i); });
+    this.pieces.forEach((pc, pi) => { if (!this.carryPiece?.[pi]) for (const pl of pc.model.pulls ?? []) pulls.push({ p: pc.base + pl.particle, route: [...(pl.via ?? []), pl.to], started: false }); });
     if (sewing > 0 || dropped.length || pulls.length) {
       // Only what is being sewn on moves meanwhile: of the two pieces each
       // open stitch joins, the smaller (a piece onto a garment's panel, a
@@ -872,14 +964,16 @@ export class ClothSim {
       for (let i = 0; i < n; i++) { const r = find(i); size.set(r, (size.get(r) ?? 0) + 1); }
       const moving = new Set<number>();
       for (let k = 0; k < this.stitchGap.length; k++) {
-        if (!(this.stitchOn[k] && this.stitchSew[k] > 0 && this.stitchGap[k] > 0.002)) continue;
-        const a = find(this.stitches[2 * k]), b = find(this.stitches[2 * k + 1]);
-        moving.add((size.get(a) ?? 0) <= (size.get(b) ?? 0) ? a : b);
+        if (!open(k)) continue;
+        const pa = this.stitches[2 * k], pb = this.stitches[2 * k + 1], a = find(pa), b = find(pb);
+        // Never what was carried over, sewn already: what is sewn onto it moves.
+        const ca = isCarried(pa), cb = isCarried(pb);
+        moving.add(ca !== cb ? (ca ? b : a) : (size.get(a) ?? 0) <= (size.get(b) ?? 0) ? a : b);
       }
       for (const i of dropped) moving.add(find(i));
       for (const pl of pulls) moving.add(find(pl.p));
       const held = this.w.slice(), floats = this.floatUntil.slice();
-      for (let i = 0; i < n; i++) if (!moving.has(find(i))) this.w[i] = 0;
+      for (let i = 0; i < n; i++) if (!moving.has(find(i)) && !carryFree?.[i]) this.w[i] = 0;
       // In longer steps than a running scene's: only drawn together and let hang here.
       const env: ClothEnv = { gravity: [0, 0, -9.81], wind: [0, 0, 0], airDensity: 1.2 };
       this.externalForces(env);
@@ -963,8 +1057,40 @@ export class ClothSim {
     this.untangle();
     this.ccdFrom = Float64Array.from(this.x);
     this.ccdSince = 0;
+    if (fullW) this.w.set(fullW);
+    // Moving as it was, if it was: held still here, it was not stopped.
+    if (carryHeld && carriedV) for (let i = 0; i < this.n; i++) if (carryHeld[i]) for (let c = 0; c < 3; c++) this.v[3 * i + c] = carriedV[3 * i + c];
+    if (carryStitch && carriedSew && carriedGap) for (let k = 0; k < carryStitch.length; k++) if (carryStitch[k]) { this.stitchSew[k] = carriedSew[k]; this.stitchGap[k] = carriedGap[k]; }
+    if (carryHeld) this.rebaseCarried();
     this.syncAeroBaselines();
     this.settled = true;
+  }
+
+  /**
+   * After a settle that carried cloth over (carryCloths): the clock goes on
+   * from where the carried cloth was, and what was sewn and settled new has
+   * its sewing, floating and ties put off by as long, so it carries on from
+   * where it is as it would have from 0.
+   */
+  private rebaseCarried() {
+    const T = this.carryClock, held = this.carryHeld!, free = this.carryFree!, carriedStitch = this.carryStitch!;
+    this.carryHeld = this.carryFree = this.carryPiece = this.carryStitch = null; this.carryInvolved = null;
+    if (T <= 0) return;
+    for (let i = 0; i < this.n; i++) if (!held[i] && !free[i] && this.floatUntil[i] > 0) this.floatUntil[i] += T;
+    for (let k = 0; k < carriedStitch.length; k++) {
+      const sew = this.stitchSew[k];
+      if (carriedStitch[k] || sew <= 0) continue;
+      // gap (1 - (t - T) / sew) as gap' (1 - t / sew').
+      this.stitchGap[k] *= (sew + T) / sew; this.stitchSew[k] = sew + T;
+    }
+    for (const tie of this.ties) {
+      if (held[tie.p] || free[tie.p]) continue;
+      const aw = tie.anchorWorld, sew = Math.max(1e-6, tie.sew);
+      if (aw) tie.from = tie.from.map((f, c) => (f * (sew + T) - aw[c] * T) / sew);
+      tie.sew = sew + T;
+    }
+    this.time = T; this.accumulator = this.carryAccumulator;
+    this.recomputeMaxFloatUntil();
   }
 
   /** Synchronizes rest/current bend & edge baselines after settle/untangle/restore so frame 1 reports zero false strain jump. */
@@ -1239,7 +1365,7 @@ export class ClothSim {
       }
       // Once a substep, on the last pass: the constraints have moved the cloth
       // by then, and friction after it holds what this sets.
-      if (this.self.active && pass === STRETCH_PASSES - 1) this.self.collide(x, prev, true);
+      if (this.self.active && pass === STRETCH_PASSES - 1) this.self.collide(x, prev, true, this.settled);
       this.solveTacks();
       this.applyFriction();
     }
@@ -1618,6 +1744,8 @@ export class ClothSim {
       const d12 = (we[12] - pe[12]) * ms, d13 = (we[13] - pe[13]) * ms, d14 = (we[14] - pe[14]) * ms;
       const moved = Math.abs(d12) + Math.abs(d13) + Math.abs(d14) + Math.abs(d0) + Math.abs(d5) + Math.abs(d10) > 1e-12;
       const mu = c.friction;
+      const lip = this.colLip[ci], gen = this.colGen[ci], colD = this.colD, colP = this.colP, colAt = this.colAt;
+      const cache = colD !== null && lip < Infinity;
       for (let ai = 0; ai < nActive; ai++) {
         const i = activeCollideIdx[ai];
         const k = 3 * i;
@@ -1636,11 +1764,23 @@ export class ClothSim {
           }
           continue;
         }
+        const slot = i * nCol + ci;
+        // Not near enough to it at the last read to have reached the margin
+        // since: it would read no contact. A pass that measures each point's
+        // clearance (updateBudget) still reads every one.
+        if (cache && !updateBudget && colAt![slot] === gen) {
+          const s3 = 3 * slot, mx = px - colP![s3], my = py - colP![s3 + 1], mz = pz - colP![s3 + 2];
+          if (colD![slot] - lip * Math.sqrt(mx * mx + my * my + mz * mz) - 1e-9 >= margin) continue;
+        }
         // Into the collider's frame (no allocation).
         const lx = e[0] * px + e[4] * py + e[8] * pz + e[12];
         const ly = e[1] * px + e[5] * py + e[9] * pz + e[13];
         const lz = e[2] * px + e[6] * py + e[10] * pz + e[14];
         const ok = colliderContactInto(c, lx, ly, lz, hitScratch);
+        if (cache) {
+          if (ok) { colD![slot] = hitScratch.d; const s3 = 3 * slot; colP![s3] = px; colP![s3 + 1] = py; colP![s3 + 2] = pz; colAt![slot] = gen; }
+          else colAt![slot] = -1;
+        }
         if (updateBudget) {
           // No answer near a body (just outside its exact bounds, say): look again next substep.
           const d = ok ? hitScratch.d : CLOTH_THICKNESS;
@@ -1696,11 +1836,11 @@ export class ClothSim {
   }
 
   /** The render groups, with where each starts in the render buffer. */
-  renderLayout(): { name: string; vertadr: number; vertnum: number; elems: number[]; rgba: number[]; material: ClothMaterialName; flat?: FlatPattern; trims?: ClothTrim[]; pattern?: ClothPatternPrint }[] {
+  renderLayout(): { name: string; vertadr: number; vertnum: number; elems: number[]; rgba: number[]; tint?: number; material: ClothMaterialName; flat?: FlatPattern; trims?: ClothTrim[]; pattern?: ClothPatternPrint }[] {
     const out: ReturnType<ClothSim['renderLayout']> = [];
     let adr = 0;
     for (const { model } of this.pieces) for (const g of model.groups) {
-      out.push({ name: g.name, vertadr: adr, vertnum: g.particles.length, elems: g.tris.slice(), rgba: g.rgba, material: g.material, flat: g.flat, trims: g.trims, pattern: g.pattern });
+      out.push({ name: g.name, vertadr: adr, vertnum: g.particles.length, elems: g.tris.slice(), rgba: g.rgba, ...(g.tint !== undefined ? { tint: g.tint } : {}), material: g.material, flat: g.flat, trims: g.trims, pattern: g.pattern });
       adr += g.particles.length;
     }
     return out;
@@ -2403,7 +2543,163 @@ export class ClothSim {
     const m = (this.tangleMesh ??= untangleMesh(this.n, this.tris, this.stitches)), crossings = findCrossings(this.x, m);
     this.ccdOf().setTangled(crossings);
     this.ccdFrom = Float64Array.from(this.x); this.ccdSince = 0;
+    // An advance left owed belonged to the state just replaced.
+    this.owedEnv = null; this.ccdOwed = false; this.substepMoveScale = 1;
     this.syncAeroBaselines();
+    return true;
+  }
+
+  /**
+   * Copies cloths' state from `from` into this sim, cloth by cloth (`pairs`
+   * maps a cloth here to the same cloth there; one whose particles or
+   * stitches do not match is skipped): where each particle is and how fast
+   * it moves, how long it floats, its seams, ties and zips as far sewn and
+   * done up as they are. Its stitches are marked in `stitchMask` (each closed
+   * tie between two copied cloths too). Returns which cloths here were copied.
+   */
+  private copyCloths(from: ClothSim, pairs: [number, number][], stitchMask: Uint8Array): boolean[] {
+    const copied = new Array<boolean>(this.pieces.length).fill(false);
+    const copyStitch = (ka: number, kb: number) => {
+      stitchMask[ka] = 1;
+      this.stitchSew[ka] = from.stitchSew[kb]; this.stitchGap[ka] = from.stitchGap[kb];
+      this.stitchOn[ka] = from.stitchOn[kb]; this.stitchClose[ka] = from.stitchClose[kb];
+    };
+    for (const [pi, pj] of pairs) {
+      const a = this.pieces[pi], b = from.pieces[pj];
+      if (!a || !b) continue;
+      const n = a.model.x0.length / 3;
+      const sa = this.pieceStitchTo[pi] - this.pieceStitchFrom[pi], sb = from.pieceStitchTo[pj] - from.pieceStitchFrom[pj];
+      if (b.model.x0.length / 3 !== n || sa !== sb) continue;
+      copied[pi] = true;
+      this.x.set(from.x.subarray(3 * b.base, 3 * (b.base + n)), 3 * a.base);
+      this.prev.set(from.x.subarray(3 * b.base, 3 * (b.base + n)), 3 * a.base);
+      this.v.set(from.v.subarray(3 * b.base, 3 * (b.base + n)), 3 * a.base);
+      this.floatUntil.set(from.floatUntil.subarray(b.base, b.base + n), a.base);
+      for (let k = 0; k < sa; k++) copyStitch(this.pieceStitchFrom[pi] + k, from.pieceStitchFrom[pj] + k);
+    }
+    const toFrom = new Map(pairs.filter(([pi]) => copied[pi]));
+    // A tie from one cloth to another, when both ends are copied: in order among the ties between the same two.
+    const tieGroups = (ts: { k: number; from: number; to: number }[], key: (t: { from: number; to: number }) => string) => {
+      const g = new Map<string, number[]>();
+      for (const t of ts) { const q = key(t); if (!g.has(q)) g.set(q, []); g.get(q)!.push(t.k); }
+      return g;
+    };
+    const theirs = tieGroups(from.tieStitches, (t) => `${t.from}>${t.to}`);
+    for (const [q, ks] of tieGroups(this.tieStitches.filter((t) => copied[t.from] && copied[t.to]), (t) => `${toFrom.get(t.from)}>${toFrom.get(t.to)}`)) {
+      const kb = theirs.get(q);
+      if (kb && kb.length === ks.length) ks.forEach((ka, i) => copyStitch(ka, kb[i]));
+    }
+    // Ties to bodies, by cloth and particle.
+    const pieceOf = (sim: ClothSim, p: number) => sim.pieces.findIndex((pc) => p >= pc.base && p < pc.base + pc.model.x0.length / 3);
+    const fromTies = new Map(from.ties.map((t) => { const pj = pieceOf(from, t.p); return [`${pj}:${t.p - from.pieces[pj].base}`, t]; }));
+    for (const t of this.ties) {
+      const pi = pieceOf(this, t.p);
+      if (!copied[pi]) continue;
+      const o = fromTies.get(`${toFrom.get(pi)}:${t.p - this.pieces[pi].base}`);
+      if (o) { t.from = o.from.slice(); t.sew = o.sew; t.anchorWorld = o.anchorWorld && o.anchorWorld.slice(); }
+    }
+    const fromZips = new Map(from.zips.map((z) => [`${z.cloth}#${z.trim}`, z]));
+    for (const z of this.zips) {
+      const pi = this.pieces.findIndex((pc) => pc.model.name === z.cloth);
+      const o = fromZips.get(`${z.cloth}#${z.trim}`);
+      if (pi < 0 || !copied[pi] || !o || o.stitch.length !== z.stitch.length) continue;
+      z.fastened = o.fastened; z.want = o.want;
+      z.stitch.forEach((ka, i) => copyStitch(ka, o.stitch[i]));
+    }
+    this.recomputeMaxFloatUntil();
+    return copied;
+  }
+
+  /**
+   * Carries some cloths over from `from` (a build of the same scene before an
+   * edit) as they were (copyCloths). The rest are new or changed and are
+   * sewn and settled by `settleNow` from where they were modelled, with the
+   * carried ones held still, except what lies over or against them: a carried
+   * cloth of the same or a higher layer near a changed one (or tied to it) is
+   * let move as it settles, so a changed inner garment pushes what is worn
+   * over it out rather than coming through it. Cloth near none of what moves
+   * is left out of the settle altogether. Returns which cloths were carried.
+   */
+  carryCloths(from: ClothSim, pairs: [number, number][]): boolean[] {
+    if (this.time !== 0 || this.settled) return new Array<boolean>(this.pieces.length).fill(false);
+    const stitchMask = new Uint8Array(this.stitchGap.length);
+    const carried = this.copyCloths(from, pairs, stitchMask);
+    if (!carried.some(Boolean)) return carried;
+    // What lies over or against what changed moves as it settles (and so on
+    // outward, from what that moves): the layers keep an outer cloth off an
+    // inner, not the other way, so held still it would be come through.
+    const boxes = this.pieces.map(({ base, model }) => {
+      const b = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+      for (let i = base; i < base + model.x0.length / 3; i++) for (let c = 0; c < 3; c++) {
+        const v = this.x[3 * i + c];
+        if (v < b[c]) b[c] = v; if (v > b[3 + c]) b[3 + c] = v;
+      }
+      return b;
+    });
+    const near = (p: number, q: number) => [0, 1, 2].every((c) => boxes[p][c] - CARRY_REACH <= boxes[q][3 + c] && boxes[q][c] - CARRY_REACH <= boxes[p][3 + c]);
+    const tied = (p: number, q: number) => this.pieces[p].model.ties.some((t) => t.cloth === this.pieces[q].model.name);
+    const moves = carried.map((c) => !c);
+    for (let grew = true; grew;) {
+      grew = false;
+      for (let d = 0; d < this.pieces.length; d++) {
+        if (moves[d]) continue;
+        const D = this.pieces[d].model;
+        for (let c = 0; c < this.pieces.length && !moves[d]; c++) {
+          if (moves[c] && c !== d && ((D.layer >= this.pieces[c].model.layer && near(c, d)) || tied(d, c))) { moves[d] = true; grew = true; }
+        }
+      }
+    }
+    // Held still, it is only in the settle for what moves to meet.
+    this.carryInvolved = this.pieces.map((_, d) => moves[d] || moves.some((m, c) => m && (near(c, d) || tied(c, d) || tied(d, c))));
+    this.carryPiece = Uint8Array.from(carried, Number);
+    this.carryStitch = stitchMask;
+    this.carryHeld = new Uint8Array(this.n); this.carryFree = new Uint8Array(this.n);
+    this.pieces.forEach(({ base, model }, pi) => { if (carried[pi]) (moves[pi] ? this.carryFree! : this.carryHeld!).fill(1, base, base + model.x0.length / 3); });
+    this.carryClock = from.time; this.carryAccumulator = from.accumulator;
+    return carried;
+  }
+
+  /**
+   * The settle after carrying cloth over (carryCloths), when some of the
+   * cloth is near none of what moves: run on a sim of only what is, posed
+   * as here, and copied back. Cloth anywhere in the scene
+   * costs a settle's every substep, held still or not.
+   */
+  private settleInvolved(): boolean {
+    const involved = this.carryInvolved;
+    if (!involved || involved.every(Boolean)) return false;
+    const idx = involved.flatMap((v, pi) => (v ? [pi] : []));
+    const sub = new ClothSim(idx.map((pi) => this.pieces[pi].model), this.colliders);
+    // Posed as this is (its colliders and its ties' anchors), from the same lookups.
+    if (this.posedBy) sub.setPoses(...this.posedBy);
+    const into = idx.map((pi, si) => [si, pi] as [number, number]);
+    const carriedHere = idx.map((pi) => this.carryPiece![pi] === 1);
+    // Into it as carried (only the carried), held or free as here.
+    const subStitch = new Uint8Array(sub.stitchGap.length);
+    sub.copyCloths(this, into.filter(([si]) => carriedHere[si]), subStitch);
+    sub.carryPiece = Uint8Array.from(carriedHere, Number);
+    sub.carryStitch = subStitch;
+    sub.carryHeld = new Uint8Array(sub.n); sub.carryFree = new Uint8Array(sub.n);
+    idx.forEach((pi, si) => {
+      const a = this.pieces[pi], b = sub.pieces[si], n = a.model.x0.length / 3;
+      sub.carryHeld!.set(this.carryHeld!.subarray(a.base, a.base + n), b.base);
+      sub.carryFree!.set(this.carryFree!.subarray(a.base, a.base + n), b.base);
+    });
+    sub.carryClock = this.carryClock; sub.carryAccumulator = this.carryAccumulator;
+    sub.settleNow();
+    // And back, settled.
+    this.copyCloths(sub, idx.map((pi, si) => [pi, si] as [number, number]), new Uint8Array(this.stitchGap.length));
+    this.time = sub.time; this.accumulator = sub.accumulator;
+    this.settleCut = sub.settleCut; this.untangled = sub.untangled;
+    this.carryHeld = this.carryFree = this.carryPiece = this.carryStitch = null; this.carryInvolved = null;
+    this.prev.set(this.x);
+    this.boards.resetWarm();
+    const m = (this.tangleMesh ??= untangleMesh(this.n, this.tris, this.stitches));
+    this.ccdOf().setTangled(findCrossings(this.x, m));
+    this.ccdFrom = Float64Array.from(this.x); this.ccdSince = 0;
+    this.clearBudget.fill(0);
+    this.syncAeroBaselines();
+    this.settled = true;
     return true;
   }
 }

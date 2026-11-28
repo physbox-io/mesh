@@ -40,6 +40,12 @@ const ZONE_ROUNDS = 40;
 /** The hash's cell, metres: about a cloth triangle. */
 const CELL = 0.012;
 const MIN_REACH = 0.06;
+/**
+ * How far (on each axis) every point may stray from where the pair cache was
+ * made and the cache still hold every pair that can meet: draped cloth moves
+ * under a millimetre over a look's eight substeps.
+ */
+const CACHE_HALF = 0.003;
 
 const nextPow2 = (v: number) => {
   let p = 1024;
@@ -99,6 +105,22 @@ export class ClothCcd {
   private pB = new Float64Array(0); private moved = new Uint8Array(0);
   private tB = new Float64Array(0); private tRange = new Int32Array(0); private tStamp = new Int32Array(0); private tStampGen = 0;
   private eB = new Float64Array(0); private eRange = new Int32Array(0); private eStamp = new Int32Array(0); private eStampGen = 0;
+  /**
+   * The pair cache: where the points were when it was made, and every point
+   * against triangle and edge against edge whose boxes there, grown by
+   * CACHE_HALF, overlap (CSR). While every point stays that near, no other
+   * pair can meet, so a look need test only these; finding none (the usual
+   * case) it is done, finding any it looks again in full, for the same answer
+   * in the same order. Most looks on draped cloth meet nothing, and hashing
+   * all of it every look was all of their cost.
+   */
+  private cX: Float64Array | null = null;
+  private cPtStart = new Int32Array(0); private cPt = new Int32Array(1024);
+  private cEeStart = new Int32Array(0); private cEe = new Int32Array(1024);
+  /** Looks the cache has served, and looks to wait before making another after one that served under two. */
+  private cacheUses = 0;
+  private cacheCooldown = 0;
+  private cacheBackoff = 2;
 
   /** `root`: each point's representative after joining sewn points (they may meet). */
   constructor(n: number, tris: Int32Array, root: Int32Array) {
@@ -173,7 +195,7 @@ export class ClothCcd {
    */
   resolve(x0: Float64Array, x1: Float64Array, w: Float64Array): CcdStats {
     const stats: CcdStats = { met: 0, pushes: 0, zones: 0, zonePoints: 0, frozen: false };
-    let hits = this.detect(x0, x1, null);
+    let hits = this.firstLook(x0, x1);
     stats.met = hits.length;
     if (!hits.length) return stats;
     // After the first look only pairs with a point the response moved can
@@ -235,6 +257,217 @@ export class ClothCcd {
       stats.frozen = true;
     }
     return stats;
+  }
+
+  /** The first look of a resolve: through the pair cache while it holds (see cX), making it afresh when it does not. */
+  private firstLook(x0: Float64Array, x1: Float64Array): Hit[] {
+    if (this.cX && this.cacheHolds(x0, x1)) {
+      this.cacheUses++;
+      return this.anyCachedHit(x0, x1) ? this.detect(x0, x1, null) : [];
+    }
+    // Moving too fast for a cache to last: wait a few looks before another,
+    // twice as many each time it happens again (an untangle or a settle).
+    if (this.cX) {
+      if (this.cacheUses < 2) { this.cacheBackoff = Math.min(64, this.cacheBackoff * 2); this.cacheCooldown = this.cacheBackoff; }
+      else this.cacheBackoff = 2;
+    }
+    this.cX = null;
+    const hits = this.detect(x0, x1, null);
+    if (this.cacheCooldown > 0) this.cacheCooldown--;
+    else if (!hits.length) this.makeCache(x1);
+    return hits;
+  }
+
+  /** Whether every point, at both ends of the step, is within CACHE_HALF (each axis) of where the cache was made. */
+  private cacheHolds(x0: Float64Array, x1: Float64Array): boolean {
+    const c = this.cX!, m = CACHE_HALF;
+    for (let k = 0; k < c.length; k++) {
+      const a = x0[k] - c[k], b = x1[k] - c[k];
+      if (a > m || a < -m || b > m || b < -m) return false;
+    }
+    return true;
+  }
+
+  /** The pair cache from positions `x`: every pair detect could test while each point stays within CACHE_HALF of here. */
+  private makeCache(x: Float64Array) {
+    const T = this.tris, nt = T.length / 3, E = this.edges, ne = E.length / 2, n = this.n, root = this.root;
+    const buckets = this.buckets, mask = this.mask, g = CACHE_HALF + ETA;
+    let maxEdge2 = 0;
+    for (let e = 0; e < ne; e++) {
+      const a = 3 * E[2 * e], b = 3 * E[2 * e + 1];
+      const dx = x[a] - x[b], dy = x[a + 1] - x[b + 1], dz = x[a + 2] - x[b + 2], d = dx * dx + dy * dy + dz * dz;
+      if (d <= 4 && d > maxEdge2) maxEdge2 = d;
+    }
+    const cell = Math.max(CELL, Math.sqrt(maxEdge2) / 2), inv = 1 / cell;
+    if (this.tB.length < 6 * nt) { this.tB = new Float64Array(6 * nt); this.tRange = new Int32Array(6 * nt); this.tStamp = new Int32Array(nt); this.tStampGen = 0; }
+    if (this.eB.length < 6 * ne) { this.eB = new Float64Array(6 * ne); this.eRange = new Int32Array(6 * ne); this.eStamp = new Int32Array(ne); this.eStampGen = 0; }
+    const tB = this.tB, tRange = this.tRange, eB = this.eB, eRange = this.eRange, start = this.start, cur = this.cur;
+    // Boxes of each primitive's corners, each grown by g.
+    const boxOf = (B: Float64Array, R: Int32Array, o: number, idx: ArrayLike<number>, from: number, count: number) => {
+      let l0 = Infinity, l1 = Infinity, l2 = Infinity, h0 = -Infinity, h1 = -Infinity, h2 = -Infinity;
+      for (let q = 0; q < count; q++) {
+        const k = 3 * idx[from + q];
+        if (x[k] < l0) l0 = x[k]; if (x[k] > h0) h0 = x[k];
+        if (x[k + 1] < l1) l1 = x[k + 1]; if (x[k + 1] > h1) h1 = x[k + 1];
+        if (x[k + 2] < l2) l2 = x[k + 2]; if (x[k + 2] > h2) h2 = x[k + 2];
+      }
+      B[o] = l0 - g; B[o + 1] = l1 - g; B[o + 2] = l2 - g; B[o + 3] = h0 + g; B[o + 4] = h1 + g; B[o + 5] = h2 + g;
+      R[o] = Math.floor(B[o] * inv); R[o + 1] = Math.floor(B[o + 1] * inv); R[o + 2] = Math.floor(B[o + 2] * inv);
+      R[o + 3] = Math.floor(B[o + 3] * inv); R[o + 4] = Math.floor(B[o + 4] * inv); R[o + 5] = Math.floor(B[o + 5] * inv);
+    };
+    // Triangles into the hash.
+    start.fill(0);
+    let total = 0;
+    for (let t = 0; t < nt; t++) {
+      const o = 6 * t;
+      boxOf(tB, tRange, o, T, 3 * t, 3);
+      for (let a = tRange[o]; a <= tRange[o + 3]; a++) for (let b = tRange[o + 1]; b <= tRange[o + 4]; b++) for (let c = tRange[o + 2]; c <= tRange[o + 5]; c++) { start[hash(a, b, c, mask) + 1]++; total++; }
+    }
+    for (let b = 0; b < buckets; b++) start[b + 1] += start[b];
+    if (this.entries.length < total) this.entries = new Int32Array(Math.ceil(total * 1.3));
+    const triEntries = this.entries;
+    cur.set(start.subarray(0, buckets));
+    for (let t = 0; t < nt; t++) {
+      const o = 6 * t;
+      for (let a = tRange[o]; a <= tRange[o + 3]; a++) for (let b = tRange[o + 1]; b <= tRange[o + 4]; b++) for (let c = tRange[o + 2]; c <= tRange[o + 5]; c++) triEntries[cur[hash(a, b, c, mask)]++] = t;
+    }
+    // Each point's triangles: boxes overlapping, not sewn to it.
+    if (this.cPtStart.length < n + 1) this.cPtStart = new Int32Array(n + 1);
+    const ptStart = this.cPtStart, stamp = this.tStamp, onCloth = this.onCloth;
+    let gen = this.tStampGen, np = 0;
+    for (let p = 0; p < n; p++) {
+      ptStart[p] = np;
+      if (!onCloth[p]) continue;
+      const k = 3 * p, pl0 = x[k] - g, pl1 = x[k + 1] - g, pl2 = x[k + 2] - g, ph0 = x[k] + g, ph1 = x[k + 1] + g, ph2 = x[k + 2] + g, rp = root[p];
+      if (++gen >= 0x7fffffff) { stamp.fill(0); gen = 1; }
+      const ax = Math.floor(pl0 * inv), bx = Math.floor(ph0 * inv), ay = Math.floor(pl1 * inv), by = Math.floor(ph1 * inv), az = Math.floor(pl2 * inv), bz = Math.floor(ph2 * inv);
+      for (let a = ax; a <= bx; a++) for (let b = ay; b <= by; b++) for (let c = az; c <= bz; c++) {
+        const hb = hash(a, b, c, mask);
+        for (let e = start[hb], eEnd = start[hb + 1]; e < eEnd; e++) {
+          const t = triEntries[e];
+          if (stamp[t] === gen) continue;
+          stamp[t] = gen;
+          const q = 6 * t;
+          if (ph0 < tB[q] || ph1 < tB[q + 1] || ph2 < tB[q + 2] || pl0 > tB[q + 3] || pl1 > tB[q + 4] || pl2 > tB[q + 5]) continue;
+          if (rp === root[T[3 * t]] || rp === root[T[3 * t + 1]] || rp === root[T[3 * t + 2]]) continue;
+          if (np >= this.cPt.length) { const grown = new Int32Array(this.cPt.length * 2); grown.set(this.cPt); this.cPt = grown; }
+          this.cPt[np++] = t;
+        }
+      }
+    }
+    ptStart[n] = np;
+    this.tStampGen = gen;
+    // Edges into the hash, then each edge's later edges: boxes overlapping, no point sewn across.
+    const eStart = this.eStart;
+    eStart.fill(0);
+    total = 0;
+    for (let e = 0; e < ne; e++) {
+      const o = 6 * e;
+      boxOf(eB, eRange, o, E, 2 * e, 2);
+      for (let a = eRange[o]; a <= eRange[o + 3]; a++) for (let b = eRange[o + 1]; b <= eRange[o + 4]; b++) for (let c = eRange[o + 2]; c <= eRange[o + 5]; c++) { eStart[hash(a, b, c, mask) + 1]++; total++; }
+    }
+    for (let b = 0; b < buckets; b++) eStart[b + 1] += eStart[b];
+    if (this.eEntries.length < total) this.eEntries = new Int32Array(Math.ceil(total * 1.3));
+    const edgeEntries = this.eEntries;
+    cur.set(eStart.subarray(0, buckets));
+    for (let e = 0; e < ne; e++) {
+      const o = 6 * e;
+      for (let a = eRange[o]; a <= eRange[o + 3]; a++) for (let b = eRange[o + 1]; b <= eRange[o + 4]; b++) for (let c = eRange[o + 2]; c <= eRange[o + 5]; c++) edgeEntries[cur[hash(a, b, c, mask)]++] = e;
+    }
+    if (this.cEeStart.length < ne + 1) this.cEeStart = new Int32Array(ne + 1);
+    const eeStart = this.cEeStart, eStamp = this.eStamp;
+    let eGen = this.eStampGen, nee = 0;
+    for (let e = 0; e < ne; e++) {
+      eeStart[e] = nee;
+      if (++eGen >= 0x7fffffff) { eStamp.fill(0); eGen = 1; }
+      const o = 6 * e, ra0 = root[E[2 * e]], ra1 = root[E[2 * e + 1]];
+      const el0 = eB[o], el1 = eB[o + 1], el2 = eB[o + 2], eh0 = eB[o + 3], eh1 = eB[o + 4], eh2 = eB[o + 5];
+      for (let a = eRange[o]; a <= eRange[o + 3]; a++) for (let b = eRange[o + 1]; b <= eRange[o + 4]; b++) for (let c = eRange[o + 2]; c <= eRange[o + 5]; c++) {
+        const hb = hash(a, b, c, mask);
+        for (let qq = eStart[hb], qEnd = eStart[hb + 1]; qq < qEnd; qq++) {
+          const f = edgeEntries[qq];
+          if (f <= e || eStamp[f] === eGen) continue;
+          eStamp[f] = eGen;
+          const q = 6 * f;
+          if (eh0 < eB[q] || eh1 < eB[q + 1] || eh2 < eB[q + 2] || el0 > eB[q + 3] || el1 > eB[q + 4] || el2 > eB[q + 5]) continue;
+          const rb0 = root[E[2 * f]], rb1 = root[E[2 * f + 1]];
+          if (ra0 === rb0 || ra0 === rb1 || ra1 === rb0 || ra1 === rb1) continue;
+          if (nee >= this.cEe.length) { const grown = new Int32Array(this.cEe.length * 2); grown.set(this.cEe); this.cEe = grown; }
+          this.cEe[nee++] = f;
+        }
+      }
+    }
+    eeStart[ne] = nee;
+    this.eStampGen = eGen;
+    this.cX = Float64Array.from(x);
+    this.cacheUses = 0;
+  }
+
+  /** Whether any cached pair meets along the step, by the very tests detect makes of it. */
+  private anyCachedHit(x0: Float64Array, x1: Float64Array): boolean {
+    const T = this.tris, nt = T.length / 3, E = this.edges, ne = E.length / 2, n = this.n;
+    if (this.pB.length < 6 * n) { this.pB = new Float64Array(6 * n); this.moved = new Uint8Array(n); }
+    const pB = this.pB, moved = this.moved;
+    let nMoved = 0;
+    for (let i = 0; i < n; i++) {
+      const k = 3 * i, o = 6 * i, a0 = x0[k], a1 = x0[k + 1], a2 = x0[k + 2], b0 = x1[k], b1 = x1[k + 1], b2 = x1[k + 2];
+      pB[o] = (a0 < b0 ? a0 : b0) - ETA; pB[o + 1] = (a1 < b1 ? a1 : b1) - ETA; pB[o + 2] = (a2 < b2 ? a2 : b2) - ETA;
+      pB[o + 3] = (a0 < b0 ? b0 : a0) + ETA; pB[o + 4] = (a1 < b1 ? b1 : a1) + ETA; pB[o + 5] = (a2 < b2 ? b2 : a2) + ETA;
+      const mv = a0 !== b0 || a1 !== b1 || a2 !== b2;
+      moved[i] = mv ? 1 : 0;
+      if (mv) nMoved++;
+    }
+    if (nMoved === 0) return false;
+    // Swept boxes of the triangles and edges, as detect makes them.
+    const tB = this.tB, eB = this.eB;
+    for (let t = 0; t < nt; t++) {
+      const o = 6 * t, p0 = 6 * T[3 * t], p1 = 6 * T[3 * t + 1], p2 = 6 * T[3 * t + 2];
+      for (let a = 0; a < 3; a++) {
+        const l = pB[p0 + a] < pB[p1 + a] ? pB[p0 + a] : pB[p1 + a], h = pB[p0 + 3 + a] > pB[p1 + 3 + a] ? pB[p0 + 3 + a] : pB[p1 + 3 + a];
+        tB[o + a] = l < pB[p2 + a] ? l : pB[p2 + a]; tB[o + 3 + a] = h > pB[p2 + 3 + a] ? h : pB[p2 + 3 + a];
+      }
+    }
+    for (let e = 0; e < ne; e++) {
+      const o = 6 * e, p0 = 6 * E[2 * e], p1 = 6 * E[2 * e + 1];
+      for (let a = 0; a < 3; a++) {
+        eB[o + a] = pB[p0 + a] < pB[p1 + a] ? pB[p0 + a] : pB[p1 + a];
+        eB[o + 3 + a] = pB[p0 + 3 + a] > pB[p1 + 3 + a] ? pB[p0 + 3 + a] : pB[p1 + 3 + a];
+      }
+    }
+    const anyTangled = this.anyTangled, tangledPoint = this.tangledPoint, tangledTri = this.tangledTri, hasFree = !!this.freePairs;
+    const ptStart = this.cPtStart, pt = this.cPt;
+    for (let p = 0; p < n; p++) {
+      const s0 = ptStart[p], s1 = ptStart[p + 1];
+      if (s0 === s1) continue;
+      const o = 6 * p, mvP = moved[p];
+      const pl0 = pB[o], pl1 = pB[o + 1], pl2 = pB[o + 2], ph0 = pB[o + 3], ph1 = pB[o + 4], ph2 = pB[o + 5];
+      for (let e = s0; e < s1; e++) {
+        const t = pt[e], t3 = 3 * t, i0 = T[t3], i1 = T[t3 + 1], i2 = T[t3 + 2];
+        if (!mvP && !moved[i0] && !moved[i1] && !moved[i2]) continue;
+        const q = 6 * t;
+        if (ph0 < tB[q] || ph1 < tB[q + 1] || ph2 < tB[q + 2] || pl0 > tB[q + 3] || pl1 > tB[q + 4] || pl2 > tB[q + 5]) continue;
+        if (hasFree && this.freeOf(p, i0)) continue;
+        if (anyTangled && tangledPoint[p] && tangledTri[t] && pointTriDist(x0, p, i0, i1, i2) < AT_CROSSING) continue;
+        if (pointTriangle(x0, x1, p, i0, i1, i2)) return true;
+      }
+    }
+    const eeStart = this.cEeStart, ee = this.cEe;
+    for (let e = 0; e < ne; e++) {
+      const s0 = eeStart[e], s1 = eeStart[e + 1];
+      if (s0 === s1) continue;
+      const o = 6 * e, a0 = E[2 * e], a1 = E[2 * e + 1], mvA = moved[a0] || moved[a1];
+      const el0 = eB[o], el1 = eB[o + 1], el2 = eB[o + 2], eh0 = eB[o + 3], eh1 = eB[o + 4], eh2 = eB[o + 5];
+      for (let qq = s0; qq < s1; qq++) {
+        const f = ee[qq], b0 = E[2 * f], b1 = E[2 * f + 1];
+        if (!mvA && !moved[b0] && !moved[b1]) continue;
+        const q = 6 * f;
+        if (eh0 < eB[q] || eh1 < eB[q + 1] || eh2 < eB[q + 2] || el0 > eB[q + 3] || el1 > eB[q + 4] || el2 > eB[q + 5]) continue;
+        if (hasFree && this.freeOf(a0, b0)) continue;
+        if (anyTangled && (tangledPoint[a0] || tangledPoint[a1]) && (tangledPoint[b0] || tangledPoint[b1]) && segDist(x0, a0, a1, b0, b1) < AT_CROSSING) continue;
+        if (edgeEdge(x0, x1, a0, a1, b0, b1)) return true;
+      }
+    }
+    return false;
   }
 
   /** Every pair that meets along the step. */

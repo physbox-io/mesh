@@ -7,6 +7,8 @@ import type { OverloadCause } from '../utils/breakThresholds';
 import type { SceneGraph } from '../types/scene';
 import type { HydroBodyModel, WaterBasinWorld } from '../utils/hydrostatics';
 import type { ClothMaterialName, ClothPatternPrint } from '../types/cloth';
+import type { ClothModel } from '../utils/cloth/clothModel';
+import type { FlatEdge } from '../utils/cloth/patternEdges';
 import type { CoSimChannel } from '../utils/coSimLink';
 import type { ScriptStateMap } from '../utils/scriptState';
 import type { ConstraintReport } from '../utils/constraintResiduals';
@@ -92,10 +94,12 @@ export interface FlexInfo {
   /** Triangles as indices local to this flex, three each. */
   elems: number[];
   rgba: number[];
+  /** Its colour is its garment's times this, and follows the garment's live; unset, `rgba` is its own. */
+  tint?: number;
   /** The fabric, for how it is drawn. */
   material?: ClothMaterialName;
   /** The piece as it is cut, flat, for a garment modelled on a form (utils/cloth/clothModel FlatPattern). */
-  flat?: { uv: [number, number][]; outline: number[]; strain95: number; marks?: ClothTrimInfo[]; lines?: number[][]; darts?: number[][] };
+  flat?: { uv: [number, number][]; outline: number[]; strain95: number; marks?: ClothTrimInfo[]; lines?: number[][]; darts?: number[][]; ids?: number[]; edges?: FlatEdge[] };
   /** Studs, buttons, buttonholes, beads, zipper teeth riding on its vertices. */
   trims?: ClothTrimInfo[];
   /** Printed SVG pattern on this piece. */
@@ -145,7 +149,11 @@ export interface FrameSnapshot extends Partial<SimBuffers> {
   clothTies?: { name: string; newtons: number }[];
   /** How far each zip is done up this frame, 0-1 from the bottom: its cloth (body name), its index in the garment's trims (absent without any). */
   clothZips?: ClothZipState[];
-  /** Latest XPBD cloth state snapshot so the main thread can seed proactive worker recycles. */
+  /**
+   * A recent XPBD cloth state, so the main thread can seed a worker that
+   * replaces one that died. Sent about once a second, not every frame (up to
+   * 735 KB a frame); a planned recycle asks for the current one (GET_CLOTH_STATE).
+   */
   clothState?: ClothStateSnapshot;
 }
 
@@ -165,6 +173,12 @@ export interface BuiltResult extends Partial<SimBuffers> {
   jnt_qposadr?: number[]; jnt_dofadr?: number[];
   idMaps?: IdMaps;
   flexes?: FlexInfo[];
+  /**
+   * Which cloth layout `flexes` is (the same number while the cloth's models
+   * are the same). Left out of a reply when the build said it holds it
+   * already (BUILD's haveClothLayout); the client fills `flexes` back in.
+   */
+  clothLayoutId?: number;
   /** Cloth stitches as pairs of flexvert_xpos indices, drawn as one point. */
   clothStitches?: number[];
   /** Initial/carried XPBD cloth state snapshot after build. */
@@ -298,6 +312,10 @@ export type MainToWorkerMessage =
        */
       meshFiles?: { name: string; bytes: Uint8Array }[];
       dropMeshes?: string[];
+      /** Cloth models made on the main thread's pool (clothModelClient), by clothInputs' `exact` key: each sent once per worker. */
+      clothModels?: [string, ClothModel][];
+      /** The cloth layout (BuiltResult.clothLayoutId) the client holds from this worker's last build: not sent again if unchanged. */
+      haveClothLayout?: number;
       /**
        * Do not step the new model until RESUME: the main thread is still
        * drawing the old one, and anything simulated before it swaps is
@@ -349,6 +367,8 @@ export type MainToWorkerMessage =
   | { type: 'HEADLESS_IMPACT_REPLY'; id: string; rebuild?: HeadlessRebuild }
   | { type: 'GET_HISTORY'; id: string; query?: HistoryQuery }
   | { type: 'GET_TELEMETRY'; id: string }
+  /** The cloth's state now, to seed a worker about to replace this one. */
+  | { type: 'GET_CLOTH_STATE'; id: string }
   | { type: 'CLEAR_HISTORY' }
   /** A linked Volt's slice; see utils/coSimLink.ts. */
   | { type: 'STEP_FOR'; id: string; dtMs: number; inputs: Record<string, number>; outputs: string[] }
@@ -563,6 +583,7 @@ export type WorkerToMainMessage =
   | { type: 'HEADLESS_IMPACT'; id: string; event: ImpactEvent }
   | { type: 'HISTORY_RESULT'; id: string; history: HistoryFrame[]; total: number; stride: number }
   | { type: 'TELEMETRY_RESULT'; id: string; telemetry: TelemetryReply | null }
+  | { type: 'CLOTH_STATE'; id: string; clothState?: ClothStateSnapshot }
   | ({ type: 'SCRIPT_STATUS' } & ScriptStatus)
   /** After each build: what the cloth's specs name that is not in them (ClothWorld.warnings). */
   | { type: 'CLOTH_STATUS'; warnings: string[] }

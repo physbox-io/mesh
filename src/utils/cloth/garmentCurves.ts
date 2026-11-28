@@ -25,14 +25,26 @@ const NORMAL_WINDOW = 6;
 /** Points each side its move onto the surface is averaged over: about two triangles. */
 const OFFSET_WINDOW = 6;
 
+/**
+ * Which of a mirrored pair is the wearer's left (+x): the first of its
+ * measures, each of which the mirror negates, that is not zero; null where
+ * every one is (it is its own mirror image).
+ */
+export function mirrorSide(key: number[]): 'L' | 'R' | null {
+  for (const v of key) if (Math.abs(v) > 1e-9) return v > 0 ? 'L' : 'R';
+  return null;
+}
+
 /** Each line, and its mirror (named L and R) where it has one. */
 export function draftLines(lines: GarmentCurve[] | undefined): GarmentCurve[] {
   return (lines ?? []).flatMap((l) => {
     if (l.points.length < 2) return [];
     if (!l.mirror) return [l];
-    const side = (pts: number[][]) => (pts.reduce((a, p) => a + p[0], 0) >= 0 ? 'L' : 'R');
+    // Its side by where it lies on the whole, else point by point (a curve across the centre); its own mirror image, one line.
+    const side = mirrorSide([l.points.reduce((a, p) => a + p[0], 0), ...l.points.map((p) => p[0])]);
+    if (!side) return [l];
     const m: GarmentCurve = { ...l, points: l.points.map((p) => [-p[0], p[1], p[2]] as [number, number, number]) };
-    return [{ ...l, name: `${l.name}${side(l.points)}` }, { ...m, name: `${l.name}${side(m.points)}` }];
+    return [{ ...l, name: `${l.name}${side}` }, { ...m, name: `${l.name}${side === 'L' ? 'R' : 'L'}` }];
   });
 }
 

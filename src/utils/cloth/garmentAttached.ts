@@ -440,7 +440,7 @@ export function attachedPieces(list: GarmentAttachment[], runsOf: (along: string
           });
           if (bodyAlign < 0) facing = facing.map((f) => [-f[0], -f[1], -f[2]]);
         }
-        out.push({ name, rgba: a.rgba ?? colour, ...(a.material ? { material: a.material } : {}), ...(a.pattern ? { pattern: a.pattern } : {}), ...(a.materialOverrides ? { materialOverrides: a.materialOverrides } : {}), ...(rest3 ? { rest3 } : {}), facing, uv: mesh.uv, tris: mesh.tris, outline: a.outline.flatMap((_, k) => mesh.edgeVerts[`s${k}`].slice(0, -1)), start, tacks, ...(stitches.length ? { stitches } : {}), ...(swing > 1e-6 ? { drop: true } : {}), ...(selfStitches.length ? { selfStitches } : {}) });
+        out.push({ name, rgba: a.rgba ?? colour, ...(a.rgba ? {} : { tint: 1 }), ...(a.material ? { material: a.material } : {}), ...(a.pattern ? { pattern: a.pattern } : {}), ...(a.materialOverrides ? { materialOverrides: a.materialOverrides } : {}), ...(rest3 ? { rest3 } : {}), facing, uv: mesh.uv, tris: mesh.tris, outline: a.outline.flatMap((_, k) => mesh.edgeVerts[`s${k}`].slice(0, -1)), start, tacks, ...(stitches.length ? { stitches } : {}), ...(swing > 1e-6 ? { drop: true } : {}), ...(selfStitches.length ? { selfStitches } : {}) });
       }
     });
   }

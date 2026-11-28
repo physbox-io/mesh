@@ -120,25 +120,55 @@ function resample(pts: UV[], step: number, count?: number): UV[] {
   return out;
 }
 
-const inside = (poly: UV[], [x, y]: UV) => {
-  let c = false;
-  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-    const [xi, yi] = poly[i], [xj, yj] = poly[j];
-    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) c = !c;
-  }
-  return c;
-};
-
-const distToPoly = (poly: UV[], [x, y]: UV) => {
-  let d = Infinity;
+/**
+ * Point-in-outline and clearance tests for many points against one outline, each edge
+ * binned once (by row for the crossing count, by cell for the distance): the
+ * same tests on the same edges, only those that can matter, where every
+ * point tested every edge (a fine sheet's lattice, 25 s of it).
+ */
+function outlineIndex(poly: UV[], cell: number) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [x, y] of poly) { minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y); }
+  const nx = Math.max(1, Math.ceil((maxX - minX) / cell) + 1), ny = Math.max(1, Math.ceil((maxY - minY) / cell) + 1);
+  const rows: number[][] = Array.from({ length: ny }, () => []), cells = new Map<number, number[]>();
+  const cx = (x: number) => Math.min(nx - 1, Math.max(0, Math.floor((x - minX) / cell)));
+  const cy = (y: number) => Math.min(ny - 1, Math.max(0, Math.floor((y - minY) / cell)));
   for (let i = 0; i < poly.length; i++) {
     const [ax, ay] = poly[i], [bx, by] = poly[(i + 1) % poly.length];
-    const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy || 1;
-    const t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / l2));
-    d = Math.min(d, Math.hypot(x - ax - t * dx, y - ay - t * dy));
+    for (let r = cy(Math.min(ay, by)); r <= cy(Math.max(ay, by)); r++) rows[r].push(i);
+    for (let r = cy(Math.min(ay, by)); r <= cy(Math.max(ay, by)); r++) for (let c = cx(Math.min(ax, bx)); c <= cx(Math.max(ax, bx)); c++) {
+      const k = r * nx + c;
+      let list = cells.get(k);
+      if (!list) cells.set(k, (list = []));
+      list.push(i);
+    }
   }
-  return d;
-};
+  return {
+    inside([x, y]: UV): boolean {
+      if (y < minY || y > maxY) return false;
+      // Even-odd, along +u: each edge the same test as over the whole outline.
+      let c = false;
+      for (const i of rows[cy(y)]) {
+        const j = (i + 1) % poly.length;
+        const [xi, yi] = poly[j], [xj, yj] = poly[i];
+        if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) c = !c;
+      }
+      return c;
+    },
+    /** Whether it is farther than `r` from every edge. */
+    clearOf([x, y]: UV, r: number): boolean {
+      for (let row = cy(y - r); row <= cy(y + r); row++) for (let col = cx(x - r); col <= cx(x + r); col++) {
+        for (const i of cells.get(row * nx + col) ?? []) {
+          const [ax, ay] = poly[i], [bx, by] = poly[(i + 1) % poly.length];
+          const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy || 1;
+          const t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / l2));
+          if (!(Math.hypot(x - ax - t * dx, y - ay - t * dy) > r)) return false;
+        }
+      }
+      return true;
+    },
+  };
+}
 
 export interface PieceMesh {
   /** Pattern-space points; the outline's come first, in order. */
@@ -153,8 +183,13 @@ export interface PieceMesh {
   edgeVerts: Record<string, number[]>;
 }
 
-/** Boundary sampled at `step`, interior a triangular lattice, Delaunay, clipped to the outline. */
-export function meshOutline(edges: ClothEdge[], step: number, counts: Record<string, number> = {}): Omit<PieceMesh, 'pts' | 'start'> {
+/**
+ * Boundary sampled at `step`, interior a triangular lattice, Delaunay, clipped
+ * to the outline. `holes`: loops left open inside it (a double-ended dart),
+ * their points used as given, after the outline's; `holeVerts` are their
+ * points' indices, in the loops' order.
+ */
+export function meshOutline(edges: ClothEdge[], step: number, counts: Record<string, number> = {}, holes: UV[][] = []): Omit<PieceMesh, 'pts' | 'start'> & { holeVerts: number[][] } {
   if (edges.length === 0) throw new Error('a cloth piece needs at least one edge');
   const uv: UV[] = [];
   const ids: number[][] = [];
@@ -168,13 +203,17 @@ export function meshOutline(edges: ClothEdge[], step: number, counts: Record<str
   }
   for (let k = 0; k < ids.length; k++) ids[k][ids[k].length - 1] = ids[(k + 1) % ids.length][0];
   const outline = uv.slice();
+  const holeVerts = holes.map((h) => h.map((q) => { uv.push([q[0], q[1]]); return uv.length - 1; }));
+  const holeIndex = holes.map((h) => outlineIndex(h, 2 * step));
+  const inHole = (p: UV) => holeIndex.some((h) => h.inside(p));
   let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
   for (const [u, v] of outline) { minU = Math.min(minU, u); maxU = Math.max(maxU, u); minV = Math.min(minV, v); maxV = Math.max(maxV, v); }
   const dv = (step * Math.sqrt(3)) / 2;
+  const index = outlineIndex(outline, 2 * step);
   for (let row = 0, v = minV + dv / 2; v < maxV; v += dv, row++) {
     for (let u = minU + (row % 2 ? step / 2 : 0); u < maxU; u += step) {
       const p: UV = [u, v];
-      if (inside(outline, p) && distToPoly(outline, p) > step * 0.55) uv.push(p);
+      if (index.inside(p) && index.clearOf(p, step * 0.55) && !inHole(p) && holeIndex.every((h) => h.clearOf(p, step * 0.55))) uv.push(p);
     }
   }
   const all = delaunay(uv);
@@ -182,7 +221,7 @@ export function meshOutline(edges: ClothEdge[], step: number, counts: Record<str
   for (let t = 0; t < all.length; t += 3) {
     const a = all[t], b = all[t + 1], c = all[t + 2];
     const cx = (uv[a][0] + uv[b][0] + uv[c][0]) / 3, cy = (uv[a][1] + uv[b][1] + uv[c][1]) / 3;
-    if (!inside(outline, [cx, cy])) continue;
+    if (!index.inside([cx, cy]) || inHole([cx, cy])) continue;
     // Three collinear points along a straight edge make a zero-area sliver,
     // and a flex element with no area has no defined stiffness.
     const cross = (uv[b][0] - uv[a][0]) * (uv[c][1] - uv[a][1]) - (uv[c][0] - uv[a][0]) * (uv[b][1] - uv[a][1]);
@@ -192,7 +231,7 @@ export function meshOutline(edges: ClothEdge[], step: number, counts: Record<str
   }
   const edgeVerts: Record<string, number[]> = {};
   edges.forEach((e, k) => { edgeVerts[e.id] = ids[k]; });
-  return { uv, tris, edgeVerts };
+  return { uv, tris, edgeVerts, holeVerts };
 }
 
 // ---------- 3D ----------

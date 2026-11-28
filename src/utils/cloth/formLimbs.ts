@@ -38,9 +38,10 @@ export interface FormLimb {
   name: LimbName;
   path: LimbPath;
   /**
-   * A leg's line hung straight from its root, as it stands with the knee
-   * locked and the feet under the hips: what a garment over it is cut on
-   * (garmentShell). The same object as `path` when it stands so.
+   * The limb's line as a garment over it is drafted, whatever the pose: an
+   * arm with the elbow at its natural bend (DRAFT_ELBOW); a leg hung straight from its root, as it
+   * stands with the knee locked and the feet under the hips. What its pieces
+   * are cut on (garmentShell). The same object as `path` when it is so.
    */
   straight?: LimbPath;
   /** Root to end, along the line. */
@@ -51,6 +52,17 @@ export interface FormLimb {
   endCap?: number;
   section(s: number): LimbSectionAt;
 }
+
+/**
+ * The elbow's bend a sleeve is drafted at, degrees, whatever the form's pose:
+ * the arm as it hangs at rest, a little forward, as a sleeve is pitched.
+ * Straight (0), a fitted sleeve had no bend for its elbow darts to take up
+ * (7 mm wide where they were 10+) and stood its excess in the crook of a bent
+ * elbow, pinched into the arm; past RING_BEND (garmentPlan) it is cut round.
+ * Measured flat: a jacket sleeve 3.6% (3.5% straight), a fitted dress
+ * sleeve 5.0% (4.7%).
+ */
+export const DRAFT_ELBOW = 15;
 
 /** Where the elbow falls along the arm: the upper arm is the longer of the two. */
 const ELBOW_AT = 0.55;
@@ -166,6 +178,9 @@ function arm(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
   const rA = m.upperArm / (2 * Math.PI);
   const origin = [side * (m.shoulderWidth / 2 - P.shoulderR * 0.6), 0, P.shoulderZ - P.shoulderDrop - 0.01 * S];
   const path = makeLimbPath(origin, [side * Math.cos(th), 0, -Math.sin(th)], [0, -1, 0], m.armLength * ELBOW_AT, m.armLength, m.elbowBend, 0.08 * S);
+  // The arm as a sleeve over it is drafted, however it is posed: hanging with
+  // the elbow's natural bend (DRAFT_ELBOW).
+  const straight = m.elbowBend !== DRAFT_ELBOW ? makeLimbPath(origin, [side * Math.cos(th), 0, -Math.sin(th)], [0, -1, 0], m.armLength * ELBOW_AT, m.armLength, DRAFT_ELBOW, 0.08 * S) : path;
   const A = m.armLength;
   // Real proportions (a man's arm about 31, 26, 27 and 17 cm round at the
   // bicep, elbow, forearm and wrist), flowing smoothly through the wrist into
@@ -216,7 +231,7 @@ function arm(m: BodyFormMeasurements, side: 1 | -1): FormLimb {
     return { fwd, out: cross(fwd, t).map((v) => v * side) };
   };
   return {
-    name: side > 0 ? 'armL' : 'armR', path, length: A + handL, endCap: 0.014 * S,
+    name: side > 0 ? 'armL' : 'armR', path, straight, length: A + handL, endCap: 0.014 * S,
     section(s) {
       const [w, h] = armHandProfile(s);
       const uHand = s > A ? Math.min(1, (s - A) / handL) : 0;

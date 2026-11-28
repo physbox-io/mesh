@@ -2,6 +2,7 @@
 // Putting a scene an agent built into the store, and waiting for it to settle
 // ---------------------------------------------------------------------------
 
+import { clothNamesIn, clothWarningsFor } from '../../store/clothStatus';
 import { useStore } from '../../store/useStore';
 import { clearBreakage } from '../../store/breakage';
 import { compileSCAD } from '../../utils/openscad';
@@ -119,7 +120,7 @@ export const settleScene = async (
     /** Per-call declarative ops map so failed or concurrent calls never leak or collide. */
     opsMap?: Map<string, PendingDeclarativeOps>;
   } = {},
-): Promise<{ ok: boolean; error?: string; nodeCount: number; topLevelCount: number; collisionPending?: string[]; note?: string; referenceWarnings?: string[]; couplingWarnings?: string[]; scadErrors?: ScadFailure[] }> => {
+): Promise<{ ok: boolean; error?: string; nodeCount: number; topLevelCount: number; collisionPending?: string[]; note?: string; referenceWarnings?: string[]; couplingWarnings?: string[]; clothWarnings?: string[]; scadErrors?: ScadFailure[] }> => {
   const store = useStore.getState();
   // Read before the store drops them: a typo in a target id did nothing, ok:true.
   const referenceWarnings = unresolvedReferenceWarnings(unresolvedReferences(nodes));
@@ -178,11 +179,14 @@ export const settleScene = async (
   // A coupling the compiler had to leave out, said by name: it used to go
   // quietly, and the run reported every constraint held.
   const coupling = couplingWarnings(finalNodes);
+  // A cloth that names a line it does not have, or could not be built, said here and not only in physics_get_state.
+  const cloth = clothWarningsFor(clothNamesIn(nodes));
   return {
     ok: !error, ...(error ? { error } : {}), nodeCount: countBodies(finalNodes), topLevelCount: finalNodes.length,
     ...(scadErrors.length ? { scadErrors } : {}),
     ...(referenceWarnings.length ? { referenceWarnings } : {}),
     ...(coupling.length ? { couplingWarnings: coupling } : {}),
+    ...(cloth.length ? { clothWarnings: cloth } : {}),
     ...(pending.length ? {
       collisionPending: pending,
       note: `Convex pieces for ${pending.join(', ')} are still being worked out, one body at a time — a few seconds each, up to ~20 s for a long coiled part. They collide as their convex hull until then. The scene is built: do not build it again. physics_run_headless waits for them; physics_get_scene_summary shows collisionPending until they land.`,

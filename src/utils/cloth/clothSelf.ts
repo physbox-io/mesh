@@ -28,8 +28,11 @@
  * Triangles go into a spatial hash rebuilt every few substeps with boxes grown
  * by how far cloth moves meanwhile, as the layer contacts do (clothLayers);
  * at each rebuild every point lists the triangles near it that are not its
- * neighbours, and between rebuilds only those are tested. Most of a garment
- * lists none.
+ * neighbours, with how far each is, and between rebuilds only those are
+ * tested, and of those only the ones it and they cannot have closed to within
+ * reach since. Most of a garment lists none. Once the scene runs, a rebuild
+ * waits until some point has strayed half the margin from the cloth's mean
+ * motion: cloth at rest, or carried together, keeps its lists.
  */
 
 import type { ClothModel } from './clothModel';
@@ -42,8 +45,9 @@ const nextPow2 = (v: number) => {
   while (p < v) p <<= 1;
   return p;
 };
+/** Substeps between remeasures of each point's gap (its sagitta). */
 const REBUILD = 4;
-/** How far cloth may move between rebuilds: 4 substeps at 1 m/s relative is under 7 mm. */
+/** How far cloth may move relative to itself between hash rebuilds: a rebuild comes once any point has strayed half this from the cloth's mean motion. */
 const MOVE_MARGIN = 0.007;
 /** Least separation between two sheets' middles, metres: thinner fabrics still keep this much. */
 const MIN_SEP = 0.001;
@@ -99,6 +103,13 @@ interface Group {
   activeCount: number;
   candStart: Int32Array;
   cand: Int32Array;
+  /** Each candidate's distance from its particle at the rebuild. */
+  candD: Float64Array;
+  /** Where every particle of the group (`all`) was at the last hash rebuild; `built` once there has been one. */
+  xb: Float64Array;
+  built: boolean;
+  /** Substeps since the last hash rebuild. */
+  sinceHash: number;
 }
 
 export interface SelfPiece { model: ClothModel; base: number }
@@ -118,11 +129,14 @@ export class SelfContacts {
    */
   readonly extra: Float64Array;
   private normal: Float64Array;
+  /** Per global particle: how far it has moved since its group's last rebuild. */
+  private moved: Float64Array;
 
   constructor(pieces: SelfPiece[], w: Float64Array, links: ArrayLike<number> = [], x?: Float64Array) {
     this.w = w;
     this.extra = new Float64Array(w.length);
     this.normal = new Float64Array(3 * w.length);
+    this.moved = new Float64Array(w.length);
     const mine = pieces.filter((p) => p.model.selfCollide !== false);
     const g = buildGroup(mine, w, links);
     if (g) this.groups.push(g);
@@ -173,22 +187,35 @@ export class SelfContacts {
    * Keeps each particle clear of the non-neighbouring triangles of its layer,
    * both ways; `prev` is where everything was at the start of the substep.
    */
-  collide(x: Float64Array, prev: Float64Array, step = true) {
-    const rebuild = step && ++this.sinceBuild >= REBUILD;
-    if (rebuild) this.sinceBuild = 0;
+  collide(x: Float64Array, prev: Float64Array, step = true, live = false) {
+    const remeasure = step && ++this.sinceBuild >= REBUILD;
+    if (remeasure) this.sinceBuild = 0;
     const w = this.w;
     for (const g of this.groups) {
-      const reach = g.reach + MAX_DEPTH;
-      if (rebuild) { this.sagitta(g, x); build(g, x, reach + MOVE_MARGIN); candidates(g, x); }
-      const X = this.extra;
+      const reach = acceptReach(g);
+      if (remeasure) this.sagitta(g, x);
+      // Every REBUILD substeps; once it runs (live), only if the cloth has
+      // strayed since (at rest it keeps its lists, which then hold every
+      // triangle that can come near: no point has moved the margin).
+      if (step && (!g.built || (++g.sinceHash >= REBUILD && (!live || strayed(g, x))))) { build(g, x, g.reach + MAX_DEPTH + MOVE_MARGIN); candidates(g, x); g.sinceHash = 0; }
+      movedSince(g, x, this.moved);
+      const X = this.extra, CD = g.candD, mv = this.moved;
       const T = g.tris, C = g.cand, CS = g.candStart;
-      const reach2 = reach * reach;
+      // Nothing further than this can be put back (see acceptReach), so
+      // nothing further can be the triangle that decides; a hair over it,
+      // for the rounding of the distance against the bound.
+      const reach2 = reach * reach * (1 + 1e-9), reachHair = reach * (1 + 1e-9) + 1e-12;
       for (let ai = 0; ai < g.activeCount; ai++) {
         const pi = g.active[ai], i = g.particles[pi], k = 3 * i;
         const px = x[k], py = x[k + 1], pz = x[k + 2];
         let best2 = reach2, bt = -1, bq0 = 0, bq1 = 0, bq2 = 0, bb1 = 0, bb2 = 0;
+        const mp = mv[i];
         for (let e = CS[ai]; e < CS[ai + 1]; e++) {
           const t = C[e];
+          // Its distance at the rebuild, less how far it and its corners have
+          // moved since, is the least it can be now: past the reach, skip it.
+          const t3 = 3 * t, ma = mv[T[t3]], mb = mv[T[t3 + 1]], mc = mv[T[t3 + 2]];
+          if (CD[e] - mp - (ma > mb ? (ma > mc ? ma : mc) : (mb > mc ? mb : mc)) > reachHair) continue;
           closest(px, py, pz, x, 3 * T[3 * t], 3 * T[3 * t + 1], 3 * T[3 * t + 2], out);
           const dx = px - out[0], dy = py - out[1], dz = pz - out[2], d2 = dx * dx + dy * dy + dz * dz;
           if (d2 >= best2) continue;
@@ -234,17 +261,59 @@ export class SelfContacts {
         x[a] -= sa * fx; x[a + 1] -= sa * fy; x[a + 2] -= sa * fz;
         x[bq] -= sb * fx; x[bq + 1] -= sb * fy; x[bq + 2] -= sb * fz;
         x[c] -= sc * fx; x[c + 1] -= sc * fy; x[c + 2] -= sc * fz;
+        // Moved by this push as well, for the bound the later points read.
+        const fl = Math.sqrt(fx * fx + fy * fy + fz * fz);
+        mv[i] += wp * fl; mv[ia] += sa * fl; mv[ib] += sb * fl; mv[ic] += sc * fl;
       }
     }
   }
 }
 
 /**
+ * Furthest a point can be from the triangle it is put back from: through it
+ * by up to MAX_DEPTH (or short of it by the separation), and over it to
+ * within the separation, which is at most the group's reach.
+ */
+const acceptReach = (g: Group) => Math.sqrt(Math.max(MAX_DEPTH, g.reach) ** 2 + g.reach * g.reach);
+
+/** How far each point of the group has moved since the last rebuild, into `out` (by global particle). */
+function movedSince(g: Group, x: Float64Array, out: Float64Array) {
+  const all = g.all, xb = g.xb;
+  for (let q = 0; q < all.length; q++) {
+    const k = 3 * all[q], o = 3 * q, dx = x[k] - xb[o], dy = x[k + 1] - xb[o + 1], dz = x[k + 2] - xb[o + 2];
+    out[all[q]] = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  }
+}
+
+/** Whether any point has strayed half the margin from the group's mean motion since the last hash rebuild. */
+function strayed(g: Group, x: Float64Array): boolean {
+  const all = g.all, xb = g.xb, n = all.length;
+  let mx = 0, my = 0, mz = 0;
+  for (let q = 0; q < n; q++) {
+    const k = 3 * all[q], o = 3 * q;
+    mx += x[k] - xb[o]; my += x[k + 1] - xb[o + 1]; mz += x[k + 2] - xb[o + 2];
+  }
+  const inv = 1 / Math.max(1, n);
+  mx *= inv; my *= inv; mz *= inv;
+  const lim2 = (0.5 * MOVE_MARGIN) ** 2;
+  for (let q = 0; q < n; q++) {
+    const k = 3 * all[q], o = 3 * q;
+    const dx = x[k] - xb[o] - mx, dy = x[k + 1] - xb[o + 1] - my, dz = x[k + 2] - xb[o + 2] - mz;
+    if (dx * dx + dy * dy + dz * dz > lim2) return true;
+  }
+  return false;
+}
+
+/**
  * Each particle's candidates from the hash just built: the triangles whose box
  * (grown by the reach and the margin) holds it, but for its own and its
- * neighbours' on the cloth.
+ * neighbours' on the cloth, with how far each is from it now (candD); and
+ * where every point is now (xb), and that none has moved since.
  */
 function candidates(g: Group, x: Float64Array) {
+  const all = g.all, xb = g.xb;
+  for (let q = 0; q < all.length; q++) { const k = 3 * all[q], o = 3 * q; xb[o] = x[k]; xb[o + 1] = x[k + 1]; xb[o + 2] = x[k + 2]; }
+  g.built = true;
   const T = g.tris, B = g.box, NS = g.nearStart, NR = g.near, mask = g.mask;
   const PP = g.pPiece, TP = g.tPiece, LP = g.layered, np = g.nPieces;
   const triStamp = g.triStamp;
@@ -268,7 +337,13 @@ function candidates(g: Group, x: Float64Array) {
       if (px < B[o] || py < B[o + 1] || pz < B[o + 2] || px > B[o + 3] || py > B[o + 4] || pz > B[o + 5]) continue;
       const ia = T[3 * t], ib = T[3 * t + 1], ic = T[3 * t + 2];
       if (has(NR, n0, n1, ia) || has(NR, n0, n1, ib) || has(NR, n0, n1, ic)) continue;
-      if (total >= g.cand.length) { const grown = new Int32Array(Math.max(1024, g.cand.length * 2)); grown.set(g.cand); g.cand = grown; }
+      closest(px, py, pz, x, 3 * ia, 3 * ib, 3 * ic, out);
+      const dx = px - out[0], dy = py - out[1], dz = pz - out[2];
+      if (total >= g.cand.length) {
+        const grown = new Int32Array(Math.max(1024, g.cand.length * 2)); grown.set(g.cand); g.cand = grown;
+        const grownD = new Float64Array(grown.length); grownD.set(g.candD); g.candD = grownD;
+      }
+      g.candD[total] = Math.sqrt(dx * dx + dy * dy + dz * dz);
       g.cand[total++] = t;
     }
     if (total > from) { g.active[count++] = pi; g.candStart[count] = total; }
@@ -395,7 +470,8 @@ function buildGroup(pieces: SelfPiece[], w: Float64Array, links: ArrayLike<numbe
     start: new Int32Array(buckets + 1), fill: new Int32Array(buckets), range: new Int32Array(nt * 6), entries: new Int32Array(0), box: new Float64Array(nt * 6),
     reach: 2 * maxHalf,
     sagittaEdges: Int32Array.from(sagEdges), triStamp: new Int32Array(nt), stampGen: 0,
-    active: new Int32Array(particles.length), activeCount: 0, candStart: new Int32Array(particles.length + 1), cand: new Int32Array(1024),
+    active: new Int32Array(particles.length), activeCount: 0, candStart: new Int32Array(particles.length + 1), cand: new Int32Array(1024), candD: new Float64Array(1024),
+    xb: new Float64Array(3 * glob.length), built: false, sinceHash: 0,
   };
 }
 

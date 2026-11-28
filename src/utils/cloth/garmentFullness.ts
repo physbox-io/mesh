@@ -14,6 +14,7 @@
 
 import type { ClothMaterialName, GarmentFullness } from '../../types/cloth';
 import { CLOTH_MATERIALS } from './clothMesh';
+import { linePicks } from './clothNames';
 import type { GarmentShell } from './garmentShell';
 
 /** A seam side that carries fullness: the panel, the seam's edges along it (shell points), and what it carries. */
@@ -40,8 +41,13 @@ export interface FullSide {
 export const CAP_NEED = 0.06;
 export const capEase = (material: ClothMaterialName) => (CLOTH_MATERIALS[material].give >= CAP_NEED ? 0 : Math.min(CAP_NEED, CLOTH_MATERIALS[material].easeIn));
 
-/** A line's name matches (`armhole` takes armholeL and armholeR). */
-export const lineMatches = (name: string, along: string) => name === along || (name.length === along.length + 1 && name.startsWith(along) && /[LR]$/.test(name));
+/**
+ * A line's name matches: by the same rule as every other `along` (trims,
+ * rods, the name warnings): `armhole` takes armholeL and armholeR, `gore`
+ * gore1 to gore9. Its own narrower rule (L or R only) let `gore` pass the
+ * warning and gather nothing.
+ */
+export const lineMatches = linePicks;
 /** Panels a name picks: itself, or with an L or R after it. */
 const panelMatches = (name: string, want: string) => name === want || (name.length === want.length + 1 && name.startsWith(want) && /[LR]$/.test(name));
 

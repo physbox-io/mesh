@@ -41,6 +41,9 @@ import { RopeCard } from './RopeCard';
 import { ScadEditorCard } from './ScadEditorCard';
 import { ScriptEditorCard } from './ScriptEditorCard';
 import { TextureTabIntro } from './TextureTabIntro';
+import { GarmentShapeCard } from './garment/GarmentShapeCard';
+import { GarmentPiecesCard } from './garment/GarmentPiecesCard';
+import { ClothPhysicsCard } from './garment/ClothPhysicsCard';
 
 const TABS: { id: InspectorTab; label: string }[] = [
   { id: 'main', label: 'Main' },
@@ -49,6 +52,7 @@ const TABS: { id: InspectorTab; label: string }[] = [
   { id: 'physics', label: 'Physics' },
   { id: 'script', label: 'Script' },
 ];
+const CLOTH_TABS = TABS.filter((t) => t.id !== 'script');
 
 /**
  * Every inspector card for the selected body, sorted into tabs: Main for what
@@ -62,18 +66,29 @@ export function InspectorCards({ node, threeSceneRef }: { node: SceneNode; three
   const patterning = useStore((s) => s.facePatternTarget?.nodeId === node.id);
 
   // Cloth bodies are simulated by the XPBD solver rather than MuJoCo rigid
-  // bodies, so rigid-body Shape/Texture/Physics/Script tabs do not apply;
-  // fitted garments also follow their form's pose rather than `node.pos`.
+  // bodies, so the rigid-body cards do not apply; fitted garments also follow
+  // their form's pose rather than `node.pos`. Their own cards on the same tabs: what it is on Main, how it is shaped on
+  // Shape, each piece's fabric and colour on Texture, how it is arranged and
+  // fastened on Physics. No Script tab.
   if (node.cloth) {
+    const clothTab = tab === 'script' ? 'main' : tab;
     return (
       <>
         <CombineCard node={node} />
-        <BodyBasicsCard node={node} />
-        <PartActions node={node} threeSceneRef={threeSceneRef} />
-        <GarmentDraftCard node={node} />
-        <ClothCard node={node} />
-        <GarmentCard node={node} />
-        {!node.cloth.garment?.fitTo && <PositionCard node={node} />}
+        <TabBar tabs={CLOTH_TABS} tab={clothTab} setTab={setTab} />
+        {clothTab === 'main' && (
+          <>
+            <BodyBasicsCard node={node} />
+            <PartActions node={node} threeSceneRef={threeSceneRef} />
+            <GarmentDraftCard node={node} />
+            <ClothCard node={node} />
+            <GarmentCard node={node} />
+            {!node.cloth.garment?.fitTo && <PositionCard node={node} />}
+          </>
+        )}
+        {clothTab === 'shape' && <GarmentShapeCard node={node} />}
+        {clothTab === 'texture' && <GarmentPiecesCard node={node} />}
+        {clothTab === 'physics' && <ClothPhysicsCard node={node} />}
       </>
     );
   }
@@ -83,28 +98,7 @@ export function InspectorCards({ node, threeSceneRef }: { node: SceneNode; three
       {/* Above the tabs: it acts on the whole selection, not this body. */}
       <CombineCard node={node} />
 
-      <div role="tablist" className="flex gap-0.5 p-0.5 bg-slate-100 dark:bg-slate-800 rounded-lg">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            role="tab"
-            aria-selected={tab === t.id}
-            onClick={() => {
-              // Leaving Texture puts the pattern editor away. What was applied
-              // stays on the part; a change not yet applied goes with it.
-              if (t.id !== 'texture') useStore.getState().closeFacePattern();
-              setTab(t.id);
-            }}
-            className={`flex-1 px-1 py-1 rounded-md text-[11px] font-semibold transition-colors cursor-pointer ${
-              tab === t.id
-                ? 'bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 shadow-sm'
-                : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+      <TabBar tabs={TABS} tab={tab} setTab={setTab} />
 
       {tab === 'main' && (
         <>
@@ -168,5 +162,33 @@ export function InspectorCards({ node, threeSceneRef }: { node: SceneNode; three
 
       {tab === 'script' && <ScriptEditorCard node={node} />}
     </>
+  );
+}
+
+/** The inspector's tabs; leaving Texture puts the pattern editor away. */
+function TabBar({ tabs, tab, setTab }: { tabs: { id: InspectorTab; label: string }[]; tab: InspectorTab; setTab: (t: InspectorTab) => void }) {
+  return (
+    <div role="tablist" className="flex gap-0.5 p-0.5 bg-slate-100 dark:bg-slate-800 rounded-lg">
+      {tabs.map((t) => (
+        <button
+          key={t.id}
+          role="tab"
+          aria-selected={tab === t.id}
+          onClick={() => {
+            // Leaving Texture puts the pattern editor away. What was applied
+            // stays on the part; a change not yet applied goes with it.
+            if (t.id !== 'texture') useStore.getState().closeFacePattern();
+            setTab(t.id);
+          }}
+          className={`flex-1 px-1 py-1 rounded-md text-[11px] font-semibold transition-colors cursor-pointer ${
+            tab === t.id
+              ? 'bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 shadow-sm'
+              : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'
+          }`}
+        >
+          {t.label}
+        </button>
+      ))}
+    </div>
   );
 }

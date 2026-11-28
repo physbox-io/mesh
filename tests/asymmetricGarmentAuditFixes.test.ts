@@ -14,6 +14,7 @@ import {
 } from '../src/utils/cloth/clothSummary';
 import { objectReply } from '../src/utils/objectReply';
 import { cutCommands } from '../src/hooks/mcp/cutCommands';
+import { bodyFormNode } from '../src/utils/cloth/clothNodes';
 import { useStore } from '../src/store/useStore';
 
 const form = clampBodyForm({ figure: 'female' });
@@ -225,7 +226,9 @@ describe('Asymmetric Garment Audit Fixes', () => {
 
   describe('4. physics_export_cut(kind="unfold", sheet_mode="soft_goods") on cloth garments', () => {
     it('exports 2D garment pattern pieces as SVG with seam allowance', async () => {
-      const formNode = makeFormNode();
+      // A built form (its meshes made), as a scene holds one: an unbuilt form
+      // hid that the export unfolded the mannequin rather than the dress.
+      const formNode = bodyFormNode('form', 'form', { figure: 'female' });
       const draft: GarmentDraft = {
         garment: 'dress',
         fitTo: 'form',
@@ -267,8 +270,10 @@ describe('Asymmetric Garment Audit Fixes', () => {
         expect(summary.pieces).toBeGreaterThanOrEqual(3);
         expect(summary.seamAllowanceMm).toBe(10);
         const files = reply.files as Array<{ name: string; bytes: number; contentBase64?: string }>;
-        expect(files).toHaveLength(1);
-        expect(files[0].name).toMatch(/\.svg$/);
+        // The cut layout (what Etch is handed), then the pattern.
+        expect(files).toHaveLength(2);
+        expect(files[0].name).toMatch(/_cut_layout\.svg$/);
+        expect(files[1].name).toMatch(/\.svg$/);
         expect(files[0].bytes).toBeGreaterThan(200);
       } finally {
         useStore.setState({ sceneGraph: prevGraph });

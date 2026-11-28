@@ -56,6 +56,10 @@ export interface SpreadPanel {
   seamRow: [number, number][];
   /** Its cloth over the seam's length. */
   ratio: number;
+  /** Double-ended darts left open in it, as FlatPiece.darts (its own local points). */
+  darts?: number[][];
+  /** Its ease, as FlatPiece.edgeEase, on its own triangles. */
+  edgeEase?: number[];
   /** Its points along the seam: on the seam where they are sewn (the shell's frame), and how far out from it they start. */
   seamLayers: { at: number[]; y: number }[];
   /** Pressed pleats: a point held to its own triangle under it (local points). */
@@ -423,10 +427,16 @@ export function spreadPanel(shell: GarmentShell, k: number, piece: FlatPiece, si
   edges.push({ id: 'seam', pts: seamPts });
   keptAt.push(runOutline[0]);
   counts.seam = Math.max(2, Math.round(Sp / spacing));
-  const mesh = meshOutline(edges, spacing, counts);
+  // Double-ended darts inside it stay open holes, their points the piece's own
+  // (sewn shut as the shell's points they are): meshed over, the cloth the dart
+  // takes out was put back, and the dart's points, by index, fell elsewhere.
+  const dartLoops = piece.darts ?? [];
+  const mesh = meshOutline(edges, spacing, counts, dartLoops.map((loop) => loop.map(spread)));
   const N = mesh.uv.length;
   const points = new Array(N).fill(-1);
   edges.forEach((e, i) => { points[mesh.edgeVerts[e.id][0]] = piece.points[keptAt[i]]; });
+  dartLoops.forEach((loop, i) => loop.forEach((l, j) => { points[mesh.holeVerts[i][j]] = piece.points[l]; }));
+  const darts = mesh.holeVerts.map((h) => h.slice());
   const seamVerts = mesh.edgeVerts.seam;
 
   // ---- Folded to start.
@@ -530,6 +540,7 @@ export function spreadPanel(shell: GarmentShell, k: number, piece: FlatPiece, si
   // lies across triangles stretched over it). Projecting it back onto the
   // spread seam instead put points far down a flared side on the wrong slash.
   const fromSpread = locator(fwd.map((f) => f.at), tris);
+  const edgeEase = piece.edgeEase ? carryEase(piece, fwd.map((f) => f.at), fromSpread, mesh.uv, mesh.tris) : undefined;
   for (let i = 0; i < N; i++) {
     const { t: ft, w: fw } = fromSpread(mesh.uv[i]), fl = [tris[3 * ft], tris[3 * ft + 1], tris[3 * ft + 2]];
     const mix = (key: 'sigma' | 's' | 'k') => fw[0] * fwd[fl[0]][key] + fw[1] * fwd[fl[1]][key] + fw[2] * fwd[fl[2]][key];
@@ -655,7 +666,67 @@ export function spreadPanel(shell: GarmentShell, k: number, piece: FlatPiece, si
   });
   const outlineOut = edges.flatMap((e) => mesh.edgeVerts[e.id].slice(0, -1));
   const seamLayers = seamVerts.map((i) => ({ at: [0, 1, 2].map((c) => start[i][c] - normal[i][c] * foldAt[i].y), y: foldAt[i].y }));
-  return { points, uv: mesh.uv.map(([u, v]) => [u, v] as V2), tris: mesh.tris, outline: outlineOut, start, normal, own, seamTacks, seamRow, ratio, seamLayers, pressTacks, crushed, seamStitches, set };
+  return { points, uv: mesh.uv.map(([u, v]) => [u, v] as V2), tris: mesh.tris, outline: outlineOut, ...(darts.length ? { darts } : {}), ...(edgeEase ? { edgeEase } : {}), start, normal, own, seamTacks, seamRow, ratio, seamLayers, pressTacks, crushed, seamStitches, set };
+}
+
+/**
+ * A flat piece's ease (FlatPiece.edgeEase, per triangle corner) carried onto
+ * the piece as spread and meshed afresh. Each flat triangle's ease is a
+ * direction it may lie longer in (along its eased seam), which its three
+ * edges' allowances fix: e(d) = d.M.d for unit d, M symmetric. Each new edge
+ * takes M of the flat triangle under its triangle, read along the edge's
+ * direction back on the flat piece.
+ */
+function carryEase(piece: FlatPiece, at: V2[], locate: ReturnType<typeof locator>, uv: V2[], tris: number[]): number[] | undefined {
+  const ease = piece.edgeEase!, ft = piece.tris, fu = piece.uv;
+  const out = new Array(tris.length).fill(0);
+  let any = false;
+  for (let t = 0; t < tris.length; t += 3) {
+    const c3 = [tris[t], tris[t + 1], tris[t + 2]];
+    const { t: f } = locate([(uv[c3[0]][0] + uv[c3[1]][0] + uv[c3[2]][0]) / 3, (uv[c3[0]][1] + uv[c3[1]][1] + uv[c3[2]][1]) / 3]);
+    const e = [ease[3 * f], ease[3 * f + 1], ease[3 * f + 2]];
+    if (!(e[0] > 0 || e[1] > 0 || e[2] > 0)) continue;
+    const ids = [ft[3 * f], ft[3 * f + 1], ft[3 * f + 2]];
+    // M from the flat triangle's edges (corner j to j+1) and their allowances.
+    const rows: number[][] = [];
+    for (let j = 0; j < 3; j++) {
+      const a = fu[ids[j]], b = fu[ids[(j + 1) % 3]], dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy || 1e-18;
+      rows.push([(dx * dx) / l2, (2 * dx * dy) / l2, (dy * dy) / l2, e[j]]);
+    }
+    const M = solve3(rows);
+    if (!M) continue;
+    // The flat triangle as spread, and the map back from spread directions to flat ones: F . S^-1.
+    const f1 = sub(fu[ids[1]], fu[ids[0]]), f2 = sub(fu[ids[2]], fu[ids[0]]), s1 = sub(at[ids[1]], at[ids[0]]), s2 = sub(at[ids[2]], at[ids[0]]);
+    const sd = s1[0] * s2[1] - s2[0] * s1[1];
+    if (Math.abs(sd) < 1e-18) continue;
+    const si = [[s2[1] / sd, -s2[0] / sd], [-s1[1] / sd, s1[0] / sd]];
+    const back = [[f1[0] * si[0][0] + f2[0] * si[1][0], f1[0] * si[0][1] + f2[0] * si[1][1]], [f1[1] * si[0][0] + f2[1] * si[1][0], f1[1] * si[0][1] + f2[1] * si[1][1]]];
+    for (let j = 0; j < 3; j++) {
+      const a = uv[c3[j]], b = uv[c3[(j + 1) % 3]], dx = b[0] - a[0], dy = b[1] - a[1];
+      const bx = back[0][0] * dx + back[0][1] * dy, by = back[1][0] * dx + back[1][1] * dy, l2 = bx * bx + by * by;
+      if (l2 < 1e-24) continue;
+      const v = Math.min(Math.max(e[0], e[1], e[2]), Math.max(0, (M[0] * bx * bx + 2 * M[1] * bx * by + M[2] * by * by) / l2));
+      if (v > 0) { out[t + j] = v; any = true; }
+    }
+  }
+  return any ? out : undefined;
+}
+
+/** Solves three rows [a, b, c | r] for x with a*x0 + b*x1 + c*x2 = r; null if singular. */
+function solve3(rows: number[][]): number[] | null {
+  const m = rows.map((r) => r.slice());
+  for (let c = 0; c < 3; c++) {
+    let piv = c;
+    for (let r = c + 1; r < 3; r++) if (Math.abs(m[r][c]) > Math.abs(m[piv][c])) piv = r;
+    if (Math.abs(m[piv][c]) < 1e-12) return null;
+    [m[c], m[piv]] = [m[piv], m[c]];
+    for (let r = 0; r < 3; r++) {
+      if (r === c) continue;
+      const f = m[r][c] / m[c][c];
+      for (let k = c; k < 4; k++) m[r][k] -= f * m[c][k];
+    }
+  }
+  return [m[0][3] / m[0][0], m[1][3] / m[1][1], m[2][3] / m[2][2]];
 }
 
 /** The point of triangle abc nearest p, and its barycentric weights. */

@@ -3,6 +3,7 @@
 // constraints, cuts, rounded edges, hardware, patterns, the knife
 // ---------------------------------------------------------------------------
 
+import { clothNamesIn, clothWarningsFor } from '../../store/clothStatus';
 import { scriptSyntaxError, scriptWarnings } from '../../utils/scriptCheck';
 import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
 import { framingPatch } from '../../store/sceneFraming';
@@ -174,6 +175,7 @@ export const objectCommands: McpCommands = {
     // Applied either way; a script that does not compile is said so here.
     const added = scriptWarnings(landed ? [landed] : [node]);
     const axes = jointAxisWarnings(landed ? [landed] : [node]);
+    const cloth = clothWarningsFor(clothNamesIn([landed ?? node]));
     return {
       ok: !addError && !!landed,
       ...(addError ? { error: addError } : {}),
@@ -181,6 +183,7 @@ export const objectCommands: McpCommands = {
       ...(added.length ? { scriptWarnings: added } : {}),
       ...(referenceWarnings.length ? { referenceWarnings } : {}),
       ...(axes.length ? { warnings: axes } : {}),
+      ...(cloth.length ? { clothWarnings: cloth } : {}),
       id: node.id,
       name: landed?.name ?? node.name,
       ...(parent ? { parent: parent.id } : {}),
@@ -542,11 +545,15 @@ export const objectCommands: McpCommands = {
     // Only when the joints were sent: a body already warned about is not warned again on every edit.
     const updated = Array.isArray(rawUpdates.joints) ? findNodeInScene(useStore.getState().sceneGraph.nodes, targetId) : null;
     const axes = updated ? jointAxisWarnings([{ ...updated, children: [] }]) : [];
+    // What the cloth now names that it does not have, said to the command that wrote it.
+    const landedNode = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+    const cloth = landedNode?.cloth ? clothWarningsFor([landedNode.name || landedNode.id]) : [];
     // Says what was taken, so a caller can see its whole update landed.
     return {
       ok: !error, applied: Object.keys(rawUpdates), ...(error ? { error } : {}),
       ...(referenceWarnings.length ? { referenceWarnings } : {}),
       ...(axes.length ? { warnings: axes } : {}),
+      ...(cloth.length ? { clothWarnings: cloth } : {}),
       ...(scriptError ? { scriptWarnings: [`Script on '${target.name || targetId}' does not compile: ${scriptError}. It was saved as written and will do nothing until fixed.`] } : {}),
     };
   },

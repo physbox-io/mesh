@@ -14,6 +14,7 @@ import {
 } from '../utils/hydrostatics';
 import type {
   BuiltResult,
+  ClothStateSnapshot,
   ClothZipState,
   ConstraintBrokenEvent,
   FrameSnapshot,
@@ -31,6 +32,7 @@ import { noteScriptStatus } from './scriptStatus';
 import { noteClothWarnings } from './clothStatus';
 import { noteWorkerFrame } from './modelProvenance';
 import { fabricBuildEnded, fabricBuildStarted, sceneHasCloth } from './fabricBuildStore';
+import { clothModelsToSend } from '../utils/cloth/clothModelClient';
 import type { CoSimChannel } from '../utils/coSimLink';
 import { noteWorkerStopped } from '../utils/staleBuild';
 import { wipedInitialVelocityNote } from '../utils/mujocoAutoReset';
@@ -291,6 +293,10 @@ export const WORKER_SILENCE_MS = 120_000;
 
 export class PhysicsWorkerClient {
   private worker: Worker;
+  /** Which cloth models (by clothInputs' `exact` key) this worker has been given, oldest first. */
+  private clothModelsSent = new Set<string>();
+  /** The cloth layout this worker last sent (BuiltResult.clothLayoutId), to be given back when a build leaves it out as unchanged. */
+  private clothLayout: { id: number; flexes: NonNullable<BuiltResult['flexes']> } | null = null;
   /** When the worker last said anything, or was handed work while idle. */
   private lastHeardAt = Date.now();
   private watchdog: ReturnType<typeof setInterval>;
@@ -299,6 +305,7 @@ export class PhysicsWorkerClient {
   private headlessJudges = new Map<string, HeadlessImpactJudge>();
   private pendingHistory = new Map<string, Pending<HistoryResult>>();
   private pendingTelemetry = new Map<string, Pending<TelemetryReply | null>>();
+  private pendingClothState = new Map<string, Pending<ClothStateSnapshot | undefined>>();
   private pendingSteps = new Map<string, Pending<StepForResult>>();
   private pendingChannels = new Map<string, Pending<{ channels: CoSimChannel[]; timestepMs: number }>>();
   private soundEnabled = false;
@@ -342,6 +349,11 @@ export class PhysicsWorkerClient {
           // sim time is the new model's, not the last frame of the old one.
           if (msg.ok && typeof msg.time === 'number') noteWorkerFrame(msg.time);
           const pending = this.pendingBuilds.get(msg.id);
+          // The same cloth layout as the last: the same objects again, so nothing drawn from them is rebuilt.
+          if (msg.ok && msg.clothLayoutId !== undefined) {
+            if (msg.flexes) this.clothLayout = { id: msg.clothLayoutId, flexes: msg.flexes };
+            else if (this.clothLayout?.id === msg.clothLayoutId) msg.flexes = this.clothLayout.flexes;
+          }
           if (pending) {
             this.pendingBuilds.delete(msg.id);
             pending.resolve(msg);
@@ -436,6 +448,14 @@ export class PhysicsWorkerClient {
           }
           break;
         }
+        case 'CLOTH_STATE': {
+          const pending = this.pendingClothState.get(msg.id);
+          if (pending) {
+            this.pendingClothState.delete(msg.id);
+            pending.resolve(msg.clothState);
+          }
+          break;
+        }
         case 'TELEMETRY_RESULT': {
           const pending = this.pendingTelemetry.get(msg.id);
           if (pending) {
@@ -502,6 +522,9 @@ export class PhysicsWorkerClient {
     // file. An XML compiled without the ledger names no files, and `take` then
     // hands back nothing to send.
     const { add, drop } = this.meshFiles.take();
+    // Cloth modelled on the main thread's pool (clothModelClient), each sent once to this worker.
+    const stripped = withoutMeshData(sceneGraph);
+    const clothModels = clothModelsToSend(stripped, this.clothModelsSent);
     // Cloth is modelled and settled in the build: the viewport says so meanwhile.
     const fabric = sceneHasCloth(sceneGraph);
     if (fabric) fabricBuildStarted();
@@ -509,7 +532,7 @@ export class PhysicsWorkerClient {
       this.noteRequest();
       this.pendingBuilds.set(id, { resolve, reject });
       this.worker.postMessage(
-        { type: 'BUILD', id, xml, sceneGraph: withoutMeshData(sceneGraph), preserveState, seedState, brokenConstraints, meshFiles: add, dropMeshes: drop, holdForInstall },
+        { type: 'BUILD', id, xml, sceneGraph: stripped, preserveState, seedState, brokenConstraints, meshFiles: add, dropMeshes: drop, holdForInstall, ...(clothModels.length ? { clothModels } : {}), ...(this.clothLayout ? { haveClothLayout: this.clothLayout.id } : {}) },
         add.map((f) => f.bytes.buffer as ArrayBuffer),
       );
       if (this.soundEnabled) {
@@ -651,6 +674,23 @@ export class PhysicsWorkerClient {
     });
   }
 
+  /**
+   * The cloth's state now (undefined without cloth, or if the worker has not
+   * answered within `timeoutMs`): to seed a worker about to replace this one.
+   */
+  getClothState(timeoutMs = 2000): Promise<ClothStateSnapshot | undefined> {
+    const id = Math.random().toString(36).slice(2);
+    return new Promise((resolve, reject) => {
+      this.noteRequest();
+      const timer = setTimeout(() => { if (this.pendingClothState.delete(id)) resolve(undefined); }, timeoutMs);
+      this.pendingClothState.set(id, {
+        resolve: (s) => { clearTimeout(timer); resolve(s); },
+        reject: (e) => { clearTimeout(timer); reject(e); },
+      });
+      this.worker.postMessage({ type: 'GET_CLOTH_STATE', id });
+    });
+  }
+
   /** A linked Volt's slice: hold `inputs` for `dtMs`, then read `outputs`. */
   stepFor(dtMs: number, inputs: Record<string, number>, outputs: string[]): Promise<StepForResult> {
     const id = Math.random().toString(36).slice(2);
@@ -676,7 +716,7 @@ export class PhysicsWorkerClient {
   // terminate a worker mid-build and turn a legitimate request into a failure.
   hasPendingWork(): boolean {
     return this.pendingBuilds.size > 0 || this.pendingHeadless.size > 0
-        || this.pendingHistory.size > 0 || this.pendingTelemetry.size > 0
+        || this.pendingHistory.size > 0 || this.pendingTelemetry.size > 0 || this.pendingClothState.size > 0
         || this.pendingSteps.size > 0 || this.pendingChannels.size > 0;
   }
 
@@ -707,6 +747,7 @@ export class PhysicsWorkerClient {
     settle(this.pendingHeadless);
     settle(this.pendingHistory);
     settle(this.pendingTelemetry);
+    settle(this.pendingClothState);
     settle(this.pendingSteps);
     settle(this.pendingChannels);
   }

@@ -13,7 +13,7 @@ import type { ClothSpec } from '../../types/cloth';
 import { walkBodiesWorld } from '../bodyWorld';
 import { clothModel, type ClothModel } from './clothModel';
 import { garmentSettings } from './garments';
-import { clothFrame } from './clothFrame';
+import { clothInputs } from './clothInputs';
 import { doneUp } from './fastening';
 import { meshShape, sceneColliders, sceneMeshGeoms, type Collider } from './clothColliders';
 import { ClothSim, type ClothEnv } from './xpbd';
@@ -23,7 +23,35 @@ type Mj = any;
 type Model = any;
 type Data = any;
 
+/**
+ * Each cloth's model by everything it depends on (clothInputs' `exact`),
+ * least recently used first: kept for as many cloths as a few edits of a
+ * large scene make (cleared wholesale past 8, a Reset after two edits of
+ * a seven-garment scene modelled all seven again).
+ */
 const modelCache = new Map<string, ClothModel>();
+const MODEL_CACHE_SIZE = 24;
+const cacheModel = (exact: string, m: ClothModel) => {
+  modelCache.delete(exact);
+  modelCache.set(exact, m);
+  while (modelCache.size > MODEL_CACHE_SIZE) modelCache.delete(modelCache.keys().next().value!);
+};
+const cachedModel = (exact: string) => {
+  const m = modelCache.get(exact);
+  if (m) cacheModel(exact, m);
+  return m;
+};
+
+/** Models made elsewhere (the main thread's modelling pool, clothModelClient), by `exact` key, for the next build to use. */
+export function seedClothModels(models: [string, ClothModel][] | undefined): void {
+  for (const [exact, m] of models ?? []) cacheModel(exact, m);
+}
+
+const tinted = (c: number[], k: number) => [c[0] * k, c[1] * k, c[2] * k, c[3] ?? 1];
+
+/** The cloths the last build left out, and why: reported even when none was built. */
+let lastFailures: string[] = [];
+export const clothBuildFailures = (): string[] => lastFailures;
 
 export interface ClothWorld {
   sim: ClothSim;
@@ -39,7 +67,13 @@ export interface ClothWorld {
   warnings: string[];
   /** Pose the colliders from where MuJoCo has every body now. */
   pose: () => void;
-  advance: (dt: number, env: ClothEnv) => void;
+  /**
+   * The cloth on by `dt`, posed first if a substep is due. With a deadline
+   * (performance.now() ms) it may stop between substeps and return false;
+   * `finish` then runs the rest, exactly as it would have run.
+   */
+  advance: (dt: number, env: ClothEnv, deadline?: number) => boolean;
+  finish: (deadline?: number) => boolean;
 }
 
 /** Write row-major 3x3 and a position into `out` without allocating. */
@@ -121,12 +155,9 @@ export function buildClothWorld(
   seedClothState?: Parameters<ClothSim['restore']>[0],
 ): ClothWorld | null {
   const graphWorlds = new Map<string, THREE.Matrix4>();
-  const cloths: { node: SceneNode; world: THREE.Matrix4 }[] = [];
-  walkBodiesWorld(scene.nodes, (n, world) => {
-    graphWorlds.set(n.name || n.id, world);
-    if (n.cloth) cloths.push({ node: n, world });
-  });
-  for (const c of cloths) c.world = clothFrame(scene.nodes, c.node, c.world);
+  walkBodiesWorld(scene.nodes, (n, world) => { graphWorlds.set(n.name || n.id, world); });
+  const cloths = clothInputs(scene.nodes);
+  lastFailures = [];
   if (!cloths.length) return null;
   // What each cloth is built from (its spec, where it stands, and the
   // measurements it is cut to), and the build of its form's geoms. A garment
@@ -138,76 +169,95 @@ export function buildClothWorld(
   // Its own geoms only: the convex pieces it is broken into for contact come
   // a moment after it loads, and counted, every garment on it was modelled and
   // settled over again, a minute before the scene would run.
-  const formNode = (n: SceneNode) => {
-    const fit = n.cloth?.garment?.fitTo;
-    let found: SceneNode | undefined;
-    if (fit) walkBodiesWorld(scene.nodes, (m) => { if ((m.name || m.id) === fit && m.bodyForm) found = m; });
-    return found;
-  };
   const keys: string[] = [], formBuilds: (string | null)[] = [];
   // How far each zip is done up, as the graph asks: done to the cloth as it
   // runs (its slider moved), not built into it.
   const zipsAsked = new Map<string, number>();
-  const models = cloths.map(({ node, world }, i) => {
-    const draft = node.cloth?.garment, form = formNode(node);
-    const cut = draft ? (form?.bodyForm ?? draft.form ?? null) : null;
+  // The same cloth in the last build, by name: one added or deleted before it moves the rest along.
+  const prevIndex = new Map((previous?.models ?? []).map((m, j) => [m.name, j]));
+  const prevOf: (number | undefined)[] = [];
+  const failed: string[] = [];
+  const built = cloths.map(({ node, world, form, cut, exact }): ClothModel | null => {
+    const draft = node.cloth?.garment;
     const trims = draft ? garmentSettings(draft).trims : undefined;
     trims?.forEach((t, k) => { if (t.kind === 'zipper') zipsAsked.set(`${node.name || node.id}#${k}`, doneUp(t)); });
     const stripped = stripVisualClothSpec(node.cloth);
     const spec = draft && stripped?.garment ? { ...stripped, garment: { ...stripped.garment, fitTo: undefined, form: undefined } } : stripped;
     const cleanTrims = trims?.map(({ rgba: _tr, ...trRest }) => { void _tr; return trRest; });
     const loose = draft && spec?.garment ? { ...spec, garment: { ...spec.garment, trims: cleanTrims?.map((t) => (t.kind === 'zipper' ? { ...t, fastened: undefined } : t)) } } : spec;
-    const exact = JSON.stringify([node.name || node.id, node.cloth, Array.from(world.elements), cut]);
     const key = JSON.stringify([node.name || node.id, loose, Array.from(world.elements), cut]);
     keys.push(key);
     formBuilds.push(form ? JSON.stringify([form.bodyFormBuilt ?? null, form.geoms?.filter((g) => g.csgDerived !== 'collider' && !g.colliderOf).length ?? 0]) : null);
+    const j = prevIndex.get(node.name || node.id);
+    prevOf.push(j !== undefined && previous?.keys[j] === key ? j : undefined);
+    const pj = j ?? -1;
     // Exact cache includes visual colours/prints so group FlexInfo stays accurate;
     // `key` strips visual fields and zipper state so carrying across a rebuild preserves ClothSim state!
-    let m = modelCache.get(exact);
-    if (!m && carry && previous?.keys[i] === key && previous.models?.[i]) {
-      const prevExact = JSON.stringify([node.name || node.id, previous.models[i].groups.map((g) => [g.rgba, g.pattern, g.trims?.map((t) => t.rgba)])]);
+    let m = cachedModel(exact);
+    if (!m && carry && pj >= 0 && previous?.keys[pj] === key && previous.models?.[pj]) {
+      const prevExact = JSON.stringify([node.name || node.id, previous.models[pj].groups.map((g) => [g.rgba, g.pattern, g.trims?.map((t) => t.rgba)])]);
       const wantVisualChanged = !node.cloth?.garment && !node.cloth?.pieces
         ? false
         : prevExact !== JSON.stringify([
           node.name || node.id,
-          previous.models[i].groups.map((g) => {
+          previous.models[pj].groups.map((g) => {
             const pName = g.name.slice((node.name || node.id).length + 2);
             const pc = node.cloth?.pieces?.find((q) => q.name === pName);
-            const rgba = pc ? (pc.rgba ?? [0.25, 0.5, 0.85, 1]) : (node.cloth?.garment?.rgba ?? g.rgba);
+            const rgba = pc ? (pc.rgba ?? [0.25, 0.5, 0.85, 1]) : (node.cloth?.garment && g.tint !== undefined ? tinted(garmentSettings(node.cloth.garment).rgba, g.tint) : g.rgba);
             const pat = pc ? pc.pattern : g.pattern;
             return [rgba, pat, g.trims?.map((t) => t.rgba)];
           }),
         ]);
       if (!wantVisualChanged && !node.cloth?.garment?.trims?.some((t) => t.rgba) && !node.cloth?.garment?.pockets?.some((p) => p.rgba) && !(typeof node.cloth?.garment?.belt === 'object' && node.cloth.garment.belt?.rgba) && !node.cloth?.garment?.collar?.rgba && !node.cloth?.garment?.attached?.some((a) => a.rgba || a.pattern) && !node.cloth?.pieces?.some((p) => p.trims?.some((t) => t.rgba)) && !node.cloth?.fasten?.some((f) => f.trim?.rgba)) {
-        m = previous.models[i];
+        m = previous.models[pj];
       } else if (!node.cloth?.garment && node.cloth?.pieces) {
         // Fast clone of plain-piece groups with updated piece rgba/pattern when no trim colours changed:
         const hasTrimRgba = node.cloth.pieces.some((p) => p.trims?.some((t) => t.rgba)) || node.cloth.fasten?.some((f) => f.trim?.rgba);
         if (!hasTrimRgba) {
           const prefix = `${node.name || node.id}__`;
           m = {
-            ...previous.models[i],
-            groups: previous.models[i].groups.map((g) => {
+            ...previous.models[pj],
+            groups: previous.models[pj].groups.map((g) => {
               const pc = node.cloth!.pieces!.find((q) => `${prefix}${q.name}` === g.name);
               return pc ? { ...g, rgba: pc.rgba ?? [0.25, 0.5, 0.85, 1], pattern: pc.pattern } : g;
             }),
           };
         }
       } else if (node.cloth?.garment && !node.cloth.garment.trims?.some((t) => t.rgba) && !node.cloth.garment.pockets?.some((p) => p.rgba) && !(typeof node.cloth.garment.belt === 'object' && node.cloth.garment.belt?.rgba) && !node.cloth.garment.collar?.rgba && !node.cloth.garment.attached?.some((a) => a.rgba || a.pattern)) {
+        // Each piece its own shade of the new colour (backs darker); one with a colour of its own keeps it.
         const gRgba = garmentSettings(node.cloth.garment).rgba ?? [0.28, 0.36, 0.52, 1];
         m = {
-          ...previous.models[i],
-          groups: previous.models[i].groups.map((g) => ({ ...g, rgba: gRgba })),
+          ...previous.models[pj],
+          // The pieces that take the garment's colour take the new one, shaded as they were; the rest keep their own.
+          groups: previous.models[pj].groups.map((g) => (g.tint !== undefined ? { ...g, rgba: tinted(gRgba, g.tint) } : g)),
         };
       }
     }
     if (!m) {
-      m = clothModel(node, world, scene.nodes);
-      if (modelCache.size > 8) modelCache.clear();
-      modelCache.set(exact, m);
+      // A cloth that cannot be built (a kind or fabric that is not one, a form
+      // that is gone) is left out with a warning, and the rest of the scene's
+      // cloth still runs: thrown from here, it took the whole load down.
+      try {
+        m = clothModel(node, world, scene.nodes);
+      } catch (err) {
+        failed.push(`${node.name || node.id}: not built: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
+      cacheModel(exact, m);
     }
     return m;
   });
+  const kept = built.map((m, i) => (m ? i : -1)).filter((i) => i >= 0);
+  if (kept.length < built.length) {
+    const k = kept.map((i) => keys[i]), f = kept.map((i) => formBuilds[i]);
+    keys.length = 0; keys.push(...k);
+    formBuilds.length = 0; formBuilds.push(...f);
+    const po = kept.map((i) => prevOf[i]);
+    prevOf.length = 0; prevOf.push(...po);
+  }
+  const models = kept.map((i) => built[i]!);
+  lastFailures = failed;
+  if (!models.length) return null;
   const bodyIdMap = new Map<string, number>();
   const lookupBodyId = (name: string): number => {
     let id = bodyIdMap.get(name);
@@ -228,26 +278,40 @@ export function buildClothWorld(
     id >= 0 && id < model.ngeom ? writeFromMujoco(geomScratch, data.geom_xmat, 9 * id, data.geom_xpos, id) : null;
   const sim = new ClothSim(models, [...sceneColliders(scene.nodes, true, true), ...mujocoMeshColliders(mujoco, model, scene.nodes)]);
   sim.setPoses(bodyPose, geomPose);
-  const sameForm = (i: number) => formBuilds[i] === null || previous!.formBuilds?.[i] === formBuilds[i];
-  const carried = seedClothState
-    ? sim.restore(seedClothState)
-    : (carry && previous && previous.keys.length === keys.length && previous.keys.every((k, i) => k === keys[i] && sameForm(i)) && sim.restore(previous.sim.state()));
+  // Each cloth carried over as it was if it is the same cloth on the same
+  // build of its form; if every one is, the whole state is, else those that
+  // are, and only the rest are sewn and settled (one garment's edit re-sewed
+  // a scene of seven from their modelled starts).
+  const same = keys.map((_, i) => {
+    const j = prevOf[i];
+    return j !== undefined && (formBuilds[i] === null || previous!.formBuilds?.[j] === formBuilds[i]) ? j : undefined;
+  });
+  let carriedEach: boolean[];
+  if (seedClothState) { const ok = sim.restore(seedClothState); carriedEach = keys.map(() => ok); }
+  else if (!carry || !previous) carriedEach = keys.map(() => false);
+  else if (previous.keys.length === keys.length && same.every((j, i) => j === i) && sim.restore(previous.sim.state())) carriedEach = keys.map(() => true);
+  else carriedEach = sim.carryCloths(previous.sim, same.flatMap((j, i) => (j === undefined ? [] : [[i, j] as [number, number]])));
+  const clothIndex = new Map(models.map((m, i) => [m.name, i]));
   // A zip the graph now asks to be done up further or less, done so as it
   // runs; otherwise each as it was carried (moved by its slider since).
   for (const [k, f] of zipsAsked) {
-    const cut = k.lastIndexOf('#');
-    if (!carried || (!seedClothState && previous && previous.zipsAsked?.get(k) !== f)) sim.setZip(k.slice(0, cut), Number(k.slice(cut + 1)), f);
+    const cut = k.lastIndexOf('#'), name = k.slice(0, cut);
+    const carried = carriedEach[clothIndex.get(name) ?? -1] ?? false;
+    if (!carried || (!seedClothState && previous && previous.zipsAsked?.get(k) !== f)) sim.setZip(name, Number(k.slice(cut + 1)), f);
   }
   // Settled before it is first drawn: a paused scene shows the cloth at rest, not as modelled.
   sim.settleNow();
   const pose = () => sim.setPoses(bodyPose, geomPose);
-  const warnings = models.flatMap((m) => (m.warnings ?? []).map((w) => `${m.name}: ${w}`));
+  const warnings = [...failed, ...models.flatMap((m) => (m.warnings ?? []).map((w) => `${m.name}: ${w}`))];
   if (sim.settleCut) warnings.push(sim.settleCut);
   return {
     sim, keys, models, zipsAsked, formBuilds, warnings, pose,
-    advance: (dt, env) => {
+    advance: (dt, env, deadline) => {
+      // One owed still runs on its own poses, before these are taken.
+      if (sim.busy) sim.finish();
       if (sim.willSubstep(dt)) pose();
-      sim.advance(dt, env);
+      return sim.advance(dt, env, deadline);
     },
+    finish: (deadline) => sim.finish(deadline),
   };
 }

@@ -92,7 +92,7 @@ describe('starts where it hangs', () => {
 describe('trims', () => {
   it('a jacket carries its zipper and studs on named edges, and on the pattern', () => {
     const form = bodyFormNode('form', 'form', { figure: 'male' });
-    const g = garmentNode('g', 'garment', { garment: 'jacket' }, form);
+    const g = garmentNode('g', 'garment', { garment: 'jacket', trims: [{ kind: 'zipper', along: 'opening', fastened: false }, { kind: 'stud', along: 'neckline', spacing: 0.022 }, { kind: 'stud', along: 'cuff', spacing: 0.018 }] }, form);
     const shell = garmentShell(g.cloth!.garment!, form.bodyForm!);
     const names = new Set([...shell.edges.map((e) => e.name), ...shell.seams.filter((sm) => sm.open).map((sm) => sm.name)]);
     for (const n of ['opening', 'neckline', 'hem', 'cuffL', 'cuffR']) expect([...names], n).toContain(n);
@@ -102,7 +102,7 @@ describe('trims', () => {
     expect(zipper.length).toBeGreaterThan(20);
     expect(new Set(zipper)).toEqual(new Set(['frontL', 'frontR']));
     expect(studs.length).toBeGreaterThan(12);
-    expect(new Set(studs)).toEqual(new Set(['frontL', 'frontR', 'back', 'sleeveLLower', 'sleeveRLower']));
+    expect(new Set(studs)).toEqual(new Set(['frontL', 'frontR', 'back', 'sleeveL', 'sleeveR']));
     const svg = patternSvg(m.groups.map((gr) => ({ name: gr.name, ...gr.flat! })));
     expect((svg.match(/<circle/g) ?? []).length).toBe(zipper.length + studs.length);
   });
