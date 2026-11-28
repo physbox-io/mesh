@@ -71,6 +71,9 @@ describe('printing a sewing pattern at home', () => {
     const r = await exportCut({ kind: 'unfold', onePartPerSheet: true }, [form, tee]);
     expect(r.ok).toBe(true);
     const names = (r.summary as Record<string, unknown>).pieceNames as string[];
-    expect((r.files as unknown[]).length).toBe(names.length);
+    // The cut layout, then a file per piece.
+    const files = r.files as { name: string }[];
+    expect(files[0].name).toMatch(/_cut_layout\.svg$/);
+    expect(files.length).toBe(names.length + 1);
   }, 120_000);
 });

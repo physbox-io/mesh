@@ -33,6 +33,8 @@ export interface PatternPiece {
   garment?: string;
   /** Its fabric (a ClothMaterialName). */
   fabric?: string;
+  /** Its colour, #rrggbb. */
+  colour?: string;
 }
 
 export interface PatternLayoutOptions {
@@ -48,6 +50,8 @@ export interface PatternLayoutOptions {
   fold?: boolean;
   /** Lines for a title block (garment, size, fabric, allowances), drawn with a 50 mm test square. */
   titleBlock?: string[];
+  /** Clear border round the sheet, mm (default 20). */
+  marginMm?: number;
 }
 
 export interface PatternLayout {
@@ -429,14 +433,15 @@ export function layoutPattern(pieces: PatternPiece[], options?: PatternLayoutOpt
     title.push(line);
   }
   if (title) rects.push({ w: TITLE_W, h: titleHeight(title) });
+  const M = Math.max(0, options?.marginMm ?? MARGIN);
   const area = rects.reduce((acc, r) => acc + (r.w + GAP) * (r.h + GAP), 0);
   const widest = Math.max(0, ...rects.map((r) => r.w));
-  const inner = Math.max(widest, options?.widthMm ? options.widthMm - 2 * MARGIN : Math.sqrt(area));
+  const inner = Math.max(widest, options?.widthMm ? options.widthMm - 2 * M : Math.sqrt(area));
   const { at, length } = packRects(rects, inner, GAP);
-  const out = drawn.map((d, i) => place(d, MARGIN + at[i].x, MARGIN + at[i].y));
-  const titleAt = title ? { x: MARGIN + at[drawn.length].x, y: MARGIN + at[drawn.length].y, w: TITLE_W, h: titleHeight(title), lines: title } : undefined;
-  const used = Math.max(0, ...out.map((p) => p.x + p.w), titleAt ? titleAt.x + titleAt.w : 0) + MARGIN;
-  return { pieces: out, ...(titleAt ? { title: titleAt } : {}), width: Math.max(100, options?.widthMm ?? 0, used), height: length + 2 * MARGIN };
+  const out = drawn.map((d, i) => place(d, M + at[i].x, M + at[i].y));
+  const titleAt = title ? { x: M + at[drawn.length].x, y: M + at[drawn.length].y, w: TITLE_W, h: titleHeight(title), lines: title } : undefined;
+  const used = Math.max(0, ...out.map((p) => p.x + p.w), titleAt ? titleAt.x + titleAt.w : 0) + M;
+  return { pieces: out, ...(titleAt ? { title: titleAt } : {}), width: Math.max(100, options?.widthMm ?? 0, used), height: length + 2 * M };
 }
 
 /** What of a layout is drawn on: the pages worth printing. */

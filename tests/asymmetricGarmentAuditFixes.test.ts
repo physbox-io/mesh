@@ -270,8 +270,10 @@ describe('Asymmetric Garment Audit Fixes', () => {
         expect(summary.pieces).toBeGreaterThanOrEqual(3);
         expect(summary.seamAllowanceMm).toBe(10);
         const files = reply.files as Array<{ name: string; bytes: number; contentBase64?: string }>;
-        expect(files).toHaveLength(1);
-        expect(files[0].name).toMatch(/\.svg$/);
+        // The cut layout (what Etch is handed), then the pattern.
+        expect(files).toHaveLength(2);
+        expect(files[0].name).toMatch(/_cut_layout\.svg$/);
+        expect(files[1].name).toMatch(/\.svg$/);
         expect(files[0].bytes).toBeGreaterThan(200);
       } finally {
         useStore.setState({ sceneGraph: prevGraph });
