@@ -31,6 +31,7 @@ import { noteScriptStatus } from './scriptStatus';
 import { noteClothWarnings } from './clothStatus';
 import { noteWorkerFrame } from './modelProvenance';
 import { fabricBuildEnded, fabricBuildStarted, sceneHasCloth } from './fabricBuildStore';
+import { clothModelsToSend } from '../utils/cloth/clothModelClient';
 import type { CoSimChannel } from '../utils/coSimLink';
 import { noteWorkerStopped } from '../utils/staleBuild';
 import { wipedInitialVelocityNote } from '../utils/mujocoAutoReset';
@@ -291,6 +292,8 @@ export const WORKER_SILENCE_MS = 120_000;
 
 export class PhysicsWorkerClient {
   private worker: Worker;
+  /** Which cloth models (by clothInputs' `exact` key) this worker has been given, oldest first. */
+  private clothModelsSent = new Set<string>();
   /** When the worker last said anything, or was handed work while idle. */
   private lastHeardAt = Date.now();
   private watchdog: ReturnType<typeof setInterval>;
@@ -502,6 +505,9 @@ export class PhysicsWorkerClient {
     // file. An XML compiled without the ledger names no files, and `take` then
     // hands back nothing to send.
     const { add, drop } = this.meshFiles.take();
+    // Cloth modelled on the main thread's pool (clothModelClient), each sent once to this worker.
+    const stripped = withoutMeshData(sceneGraph);
+    const clothModels = clothModelsToSend(stripped, this.clothModelsSent);
     // Cloth is modelled and settled in the build: the viewport says so meanwhile.
     const fabric = sceneHasCloth(sceneGraph);
     if (fabric) fabricBuildStarted();
@@ -509,7 +515,7 @@ export class PhysicsWorkerClient {
       this.noteRequest();
       this.pendingBuilds.set(id, { resolve, reject });
       this.worker.postMessage(
-        { type: 'BUILD', id, xml, sceneGraph: withoutMeshData(sceneGraph), preserveState, seedState, brokenConstraints, meshFiles: add, dropMeshes: drop, holdForInstall },
+        { type: 'BUILD', id, xml, sceneGraph: stripped, preserveState, seedState, brokenConstraints, meshFiles: add, dropMeshes: drop, holdForInstall, ...(clothModels.length ? { clothModels } : {}) },
         add.map((f) => f.bytes.buffer as ArrayBuffer),
       );
       if (this.soundEnabled) {

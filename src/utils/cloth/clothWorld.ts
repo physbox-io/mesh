@@ -13,7 +13,7 @@ import type { ClothSpec } from '../../types/cloth';
 import { walkBodiesWorld } from '../bodyWorld';
 import { clothModel, type ClothModel } from './clothModel';
 import { garmentSettings } from './garments';
-import { clothFrame } from './clothFrame';
+import { clothInputs } from './clothInputs';
 import { doneUp } from './fastening';
 import { meshShape, sceneColliders, sceneMeshGeoms, type Collider } from './clothColliders';
 import { ClothSim, type ClothEnv } from './xpbd';
@@ -24,7 +24,7 @@ type Model = any;
 type Data = any;
 
 /**
- * Each cloth's model by everything it depends on (its `exact` key),
+ * Each cloth's model by everything it depends on (clothInputs' `exact`),
  * least recently used first: kept for as many cloths as a few edits of a
  * large scene make (cleared wholesale past 8, a Reset after two edits of
  * a seven-garment scene modelled all seven again).
@@ -41,6 +41,11 @@ const cachedModel = (exact: string) => {
   if (m) cacheModel(exact, m);
   return m;
 };
+
+/** Models made elsewhere (the main thread's modelling pool, clothModelClient), by `exact` key, for the next build to use. */
+export function seedClothModels(models: [string, ClothModel][] | undefined): void {
+  for (const [exact, m] of models ?? []) cacheModel(exact, m);
+}
 
 export interface ClothWorld {
   sim: ClothSim;
@@ -138,12 +143,8 @@ export function buildClothWorld(
   seedClothState?: Parameters<ClothSim['restore']>[0],
 ): ClothWorld | null {
   const graphWorlds = new Map<string, THREE.Matrix4>();
-  const cloths: { node: SceneNode; world: THREE.Matrix4 }[] = [];
-  walkBodiesWorld(scene.nodes, (n, world) => {
-    graphWorlds.set(n.name || n.id, world);
-    if (n.cloth) cloths.push({ node: n, world });
-  });
-  for (const c of cloths) c.world = clothFrame(scene.nodes, c.node, c.world);
+  walkBodiesWorld(scene.nodes, (n, world) => { graphWorlds.set(n.name || n.id, world); });
+  const cloths = clothInputs(scene.nodes);
   if (!cloths.length) return null;
   // What each cloth is built from (its spec, where it stands, and the
   // measurements it is cut to), and the build of its form's geoms. A garment
@@ -155,12 +156,6 @@ export function buildClothWorld(
   // Its own geoms only: the convex pieces it is broken into for contact come
   // a moment after it loads, and counted, every garment on it was modelled and
   // settled over again, a minute before the scene would run.
-  const formNode = (n: SceneNode) => {
-    const fit = n.cloth?.garment?.fitTo;
-    let found: SceneNode | undefined;
-    if (fit) walkBodiesWorld(scene.nodes, (m) => { if ((m.name || m.id) === fit && m.bodyForm) found = m; });
-    return found;
-  };
   const keys: string[] = [], formBuilds: (string | null)[] = [];
   // How far each zip is done up, as the graph asks: done to the cloth as it
   // runs (its slider moved), not built into it.
@@ -168,16 +163,14 @@ export function buildClothWorld(
   // The same cloth in the last build, by name: one added or deleted before it moves the rest along.
   const prevIndex = new Map((previous?.models ?? []).map((m, j) => [m.name, j]));
   const prevOf: (number | undefined)[] = [];
-  const models = cloths.map(({ node, world }) => {
-    const draft = node.cloth?.garment, form = formNode(node);
-    const cut = draft ? (form?.bodyForm ?? draft.form ?? null) : null;
+  const models = cloths.map(({ node, world, form, cut, exact }) => {
+    const draft = node.cloth?.garment;
     const trims = draft ? garmentSettings(draft).trims : undefined;
     trims?.forEach((t, k) => { if (t.kind === 'zipper') zipsAsked.set(`${node.name || node.id}#${k}`, doneUp(t)); });
     const stripped = stripVisualClothSpec(node.cloth);
     const spec = draft && stripped?.garment ? { ...stripped, garment: { ...stripped.garment, fitTo: undefined, form: undefined } } : stripped;
     const cleanTrims = trims?.map(({ rgba: _tr, ...trRest }) => { void _tr; return trRest; });
     const loose = draft && spec?.garment ? { ...spec, garment: { ...spec.garment, trims: cleanTrims?.map((t) => (t.kind === 'zipper' ? { ...t, fastened: undefined } : t)) } } : spec;
-    const exact = JSON.stringify([node.name || node.id, node.cloth, Array.from(world.elements), cut]);
     const key = JSON.stringify([node.name || node.id, loose, Array.from(world.elements), cut]);
     keys.push(key);
     formBuilds.push(form ? JSON.stringify([form.bodyFormBuilt ?? null, form.geoms?.filter((g) => g.csgDerived !== 'collider' && !g.colliderOf).length ?? 0]) : null);

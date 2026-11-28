@@ -9,7 +9,8 @@ import type { SceneGraph } from '../types/scene';
 import type { DataMirror, ModelMirror } from '../types/sceneLayer';
 import { compileToMJCF } from '../utils/mjcf';
 import { explainCompileError } from '../utils/compileErrorContext';
-import { PhysicsWorkerClient, type BuiltResult } from './physicsWorkerClient';
+import { PhysicsWorkerClient, withoutMeshData, type BuiltResult } from './physicsWorkerClient';
+import { fabricBuildEnded, fabricBuildStarted, sceneHasCloth } from './fabricBuildStore';
 import { canShatter } from '../utils/breakThresholds';
 import { prewarmFractureWorker } from '../utils/fractureWorkerClient';
 import { useDialogs } from './dialogStore';
@@ -266,6 +267,21 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
       if (anyNode(sceneGraph.nodes, needsBodyFormBuild)) {
         const { resolveBodyFormsForBuild } = await import('../hooks/useCsgCompile');
         sceneGraph = await resolveBodyFormsForBuild(sceneGraph);
+        if (token !== recompileToken) {
+          if (forceReset) pendingForceReset = true;
+          done();
+          await whenBuildsLand();
+          return;
+        }
+      }
+      // The cloth's models, side by side on the modelling pool
+      // (clothModelClient), handed to the worker with the build: modelled
+      // there, one garment after another, a preset's load held the worker for
+      // up to 40 s. What fails here the worker models itself.
+      if (sceneHasCloth(sceneGraph)) {
+        const { modelClothsForBuild } = await import('../utils/cloth/clothModelClient');
+        fabricBuildStarted();
+        try { await modelClothsForBuild(withoutMeshData(sceneGraph)); } finally { fabricBuildEnded(); }
         if (token !== recompileToken) {
           if (forceReset) pendingForceReset = true;
           done();

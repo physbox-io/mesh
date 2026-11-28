@@ -95,7 +95,7 @@ import { jointTypes } from '../utils/headlessReport';
 import { ScriptLogRing, ScriptProblemLog, ScriptTiming, headlessCostWarning } from './scriptDiagnostics';
 import { bodyAngularVelocity, bodyPointVelocity, syncKinematics, worldToBodyFrame, type VelocityViews } from './bodyKinematics';
 import { actuatorsByJoint, clutchDrive, contactsOfBody, jointViews, raycast, readJoint, type JointInfo, type SensorNames } from './scriptSensors';
-import { buildClothWorld, type ClothWorld } from '../utils/cloth/clothWorld';
+import { buildClothWorld, seedClothModels, type ClothWorld } from '../utils/cloth/clothWorld';
 import { contactBody } from '../utils/contactBodies';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
@@ -5142,6 +5142,7 @@ const handleMessage = async (evt: MessageEvent) => {
             }
           }
           applyMeshFiles(msg.meshFiles, msg.dropMeshes);
+          seedClothModels(msg.clothModels);
           if (msg.hydroModels) {
             cachedHydroByNodeId = new Map(msg.hydroModels.map((h: HydroBodyModel) => [h.nodeId, h]));
           }

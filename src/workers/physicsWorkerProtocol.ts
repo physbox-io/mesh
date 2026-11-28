@@ -7,6 +7,7 @@ import type { OverloadCause } from '../utils/breakThresholds';
 import type { SceneGraph } from '../types/scene';
 import type { HydroBodyModel, WaterBasinWorld } from '../utils/hydrostatics';
 import type { ClothMaterialName, ClothPatternPrint } from '../types/cloth';
+import type { ClothModel } from '../utils/cloth/clothModel';
 import type { CoSimChannel } from '../utils/coSimLink';
 import type { ScriptStateMap } from '../utils/scriptState';
 import type { ConstraintReport } from '../utils/constraintResiduals';
@@ -298,6 +299,8 @@ export type MainToWorkerMessage =
        */
       meshFiles?: { name: string; bytes: Uint8Array }[];
       dropMeshes?: string[];
+      /** Cloth models made on the main thread's pool (clothModelClient), by clothInputs' `exact` key: each sent once per worker. */
+      clothModels?: [string, ClothModel][];
       /**
        * Do not step the new model until RESUME: the main thread is still
        * drawing the old one, and anything simulated before it swaps is
