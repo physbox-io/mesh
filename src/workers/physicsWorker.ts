@@ -64,6 +64,7 @@ import type {
   ConstraintBrokenEvent,
   ContactHistory,
   ContinuousContactEvent,
+  FrameSnapshot,
   AudioImpactEvent,
   HeadlessRebuild,
   HistoryEntry,
@@ -73,6 +74,7 @@ import type {
   WorkerToMainMessage,
 } from './physicsWorkerProtocol';
 import { evaluateGustWind } from '../utils/aeroAcoustics';
+import { clothStateThrottle, clothStateTransfer } from './clothStatePost';
 import {
   computeContactDampingRate,
   computeImpactSolSoftScale,
@@ -4257,13 +4259,24 @@ const postScriptStatus = (force = false) => {
   });
 };
 
-/** The loads on the cloth's ties, zip states, and state snapshot for worker recycles. */
-const clothFrame = () => {
-  const ties = cloth?.sim?.tieLoads(), zips = cloth?.sim?.zipState(), clothState = cloth?.sim?.state();
+const clothStateDue = clothStateThrottle();
+
+/**
+ * The loads on the cloth's ties and zip states, every frame; its whole state
+ * (for seeding a worker that replaces this one if it dies) only about once a
+ * second, and only once it has moved: it is up to 735 KB, and a planned
+ * recycle asks for the current one instead (GET_CLOTH_STATE).
+ */
+const clothFrame = (): { msg: Partial<FrameSnapshot>; transfer: Transferable[] } => {
+  const ties = cloth?.sim?.tieLoads(), zips = cloth?.sim?.zipState();
+  const clothState = cloth && clothStateDue(performance.now(), cloth.sim.time) ? cloth.sim.state() : undefined;
   return {
-    ...(ties?.length ? { clothTies: ties } : {}),
-    ...(zips?.length ? { clothZips: zips } : {}),
-    ...(clothState ? { clothState } : {}),
+    msg: {
+      ...(ties?.length ? { clothTies: ties } : {}),
+      ...(zips?.length ? { clothZips: zips } : {}),
+      ...(clothState ? { clothState } : {}),
+    },
+    transfer: clothState ? clothStateTransfer(clothState) : [],
   };
 };
 
@@ -4275,10 +4288,12 @@ const postFrame = () => {
   flushAudioImpacts();
   flushBowedStrings();
   const snap = snapshot();
+  const cf = clothFrame();
   if (isSharedSupported) {
-    post({ type: 'FRAME', time: snap.time, heapBytes: snap.heapBytes, isShared: true, scriptState: scriptState.snapshot(), ...clothFrame() });
+    post({ type: 'FRAME', time: snap.time, heapBytes: snap.heapBytes, isShared: true, scriptState: scriptState.snapshot(), ...cf.msg }, cf.transfer);
   } else {
-    post({ type: 'FRAME', ...snap, isShared: false, scriptState: scriptState.snapshot(), ...clothFrame() }, [
+    post({ type: 'FRAME', ...snap, isShared: false, scriptState: scriptState.snapshot(), ...cf.msg }, [
+      ...cf.transfer,
       snap.qpos.buffer, snap.qvel.buffer, snap.ctrl.buffer,
       snap.xfrc_applied.buffer, snap.qfrc_applied.buffer,
       snap.xpos.buffer, snap.xmat.buffer, snap.cvel.buffer,
@@ -5355,6 +5370,11 @@ const handleMessage = async (evt: MessageEvent) => {
             ...(scriptLogs.total > lines.length ? { scriptLogsDropped: scriptLogs.total - lines.length } : {}),
           } : null,
         });
+        break;
+      }
+      case 'GET_CLOTH_STATE': {
+        const clothState = cloth?.sim.state();
+        post({ type: 'CLOTH_STATE', id: msg.id, ...(clothState ? { clothState } : {}) }, clothState ? clothStateTransfer(clothState) : []);
         break;
       }
       case 'CLEAR_HISTORY': {

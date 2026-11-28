@@ -14,6 +14,7 @@ import {
 } from '../utils/hydrostatics';
 import type {
   BuiltResult,
+  ClothStateSnapshot,
   ClothZipState,
   ConstraintBrokenEvent,
   FrameSnapshot,
@@ -299,6 +300,7 @@ export class PhysicsWorkerClient {
   private headlessJudges = new Map<string, HeadlessImpactJudge>();
   private pendingHistory = new Map<string, Pending<HistoryResult>>();
   private pendingTelemetry = new Map<string, Pending<TelemetryReply | null>>();
+  private pendingClothState = new Map<string, Pending<ClothStateSnapshot | undefined>>();
   private pendingSteps = new Map<string, Pending<StepForResult>>();
   private pendingChannels = new Map<string, Pending<{ channels: CoSimChannel[]; timestepMs: number }>>();
   private soundEnabled = false;
@@ -433,6 +435,14 @@ export class PhysicsWorkerClient {
           if (pending) {
             this.pendingChannels.delete(msg.id);
             pending.resolve({ channels: msg.channels, timestepMs: msg.timestepMs });
+          }
+          break;
+        }
+        case 'CLOTH_STATE': {
+          const pending = this.pendingClothState.get(msg.id);
+          if (pending) {
+            this.pendingClothState.delete(msg.id);
+            pending.resolve(msg.clothState);
           }
           break;
         }
@@ -651,6 +661,23 @@ export class PhysicsWorkerClient {
     });
   }
 
+  /**
+   * The cloth's state now (undefined without cloth, or if the worker has not
+   * answered within `timeoutMs`): to seed a worker about to replace this one.
+   */
+  getClothState(timeoutMs = 2000): Promise<ClothStateSnapshot | undefined> {
+    const id = Math.random().toString(36).slice(2);
+    return new Promise((resolve, reject) => {
+      this.noteRequest();
+      const timer = setTimeout(() => { if (this.pendingClothState.delete(id)) resolve(undefined); }, timeoutMs);
+      this.pendingClothState.set(id, {
+        resolve: (s) => { clearTimeout(timer); resolve(s); },
+        reject: (e) => { clearTimeout(timer); reject(e); },
+      });
+      this.worker.postMessage({ type: 'GET_CLOTH_STATE', id });
+    });
+  }
+
   /** A linked Volt's slice: hold `inputs` for `dtMs`, then read `outputs`. */
   stepFor(dtMs: number, inputs: Record<string, number>, outputs: string[]): Promise<StepForResult> {
     const id = Math.random().toString(36).slice(2);
@@ -676,7 +703,7 @@ export class PhysicsWorkerClient {
   // terminate a worker mid-build and turn a legitimate request into a failure.
   hasPendingWork(): boolean {
     return this.pendingBuilds.size > 0 || this.pendingHeadless.size > 0
-        || this.pendingHistory.size > 0 || this.pendingTelemetry.size > 0
+        || this.pendingHistory.size > 0 || this.pendingTelemetry.size > 0 || this.pendingClothState.size > 0
         || this.pendingSteps.size > 0 || this.pendingChannels.size > 0;
   }
 
@@ -707,6 +734,7 @@ export class PhysicsWorkerClient {
     settle(this.pendingHeadless);
     settle(this.pendingHistory);
     settle(this.pendingTelemetry);
+    settle(this.pendingClothState);
     settle(this.pendingSteps);
     settle(this.pendingChannels);
   }

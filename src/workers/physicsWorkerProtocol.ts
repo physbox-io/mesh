@@ -145,7 +145,11 @@ export interface FrameSnapshot extends Partial<SimBuffers> {
   clothTies?: { name: string; newtons: number }[];
   /** How far each zip is done up this frame, 0-1 from the bottom: its cloth (body name), its index in the garment's trims (absent without any). */
   clothZips?: ClothZipState[];
-  /** Latest XPBD cloth state snapshot so the main thread can seed proactive worker recycles. */
+  /**
+   * A recent XPBD cloth state, so the main thread can seed a worker that
+   * replaces one that died. Sent about once a second, not every frame (up to
+   * 735 KB a frame); a planned recycle asks for the current one (GET_CLOTH_STATE).
+   */
   clothState?: ClothStateSnapshot;
 }
 
@@ -349,6 +353,8 @@ export type MainToWorkerMessage =
   | { type: 'HEADLESS_IMPACT_REPLY'; id: string; rebuild?: HeadlessRebuild }
   | { type: 'GET_HISTORY'; id: string; query?: HistoryQuery }
   | { type: 'GET_TELEMETRY'; id: string }
+  /** The cloth's state now, to seed a worker about to replace this one. */
+  | { type: 'GET_CLOTH_STATE'; id: string }
   | { type: 'CLEAR_HISTORY' }
   /** A linked Volt's slice; see utils/coSimLink.ts. */
   | { type: 'STEP_FOR'; id: string; dtMs: number; inputs: Record<string, number>; outputs: string[] }
@@ -563,6 +569,7 @@ export type WorkerToMainMessage =
   | { type: 'HEADLESS_IMPACT'; id: string; event: ImpactEvent }
   | { type: 'HISTORY_RESULT'; id: string; history: HistoryFrame[]; total: number; stride: number }
   | { type: 'TELEMETRY_RESULT'; id: string; telemetry: TelemetryReply | null }
+  | { type: 'CLOTH_STATE'; id: string; clothState?: ClothStateSnapshot }
   | ({ type: 'SCRIPT_STATUS' } & ScriptStatus)
   /** After each build: what the cloth's specs name that is not in them (ClothWorld.warnings). */
   | { type: 'CLOTH_STATUS'; warnings: string[] }
