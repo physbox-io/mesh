@@ -1,8 +1,11 @@
 /**
- * Delaunay triangulation of 2D points, Bowyer-Watson. Plain and quadratic at
- * worst, which is plenty for a cloth piece's few thousand points (and the
- * result is cached by the caller). Returns a flat list of point indices, three
- * per triangle, wound counter-clockwise.
+ * Delaunay triangulation of 2D points, Bowyer-Watson: each point found in the
+ * triangle that holds it by walking there from the last one made, its cavity
+ * (the triangles whose circumcircles hold it) grown across neighbours, and
+ * refilled as a fan to it. About n log n for points inserted in order along
+ * a piece (its outline, then its lattice row by row); scanning every
+ * triangle for each point, 23.6k points took 29 s. Returns a flat list of
+ * point indices, three per triangle, wound counter-clockwise.
  */
 export function delaunay(pts: [number, number][]): number[] {
   const n = pts.length;
@@ -34,43 +37,100 @@ export function delaunay(pts: [number, number][]): number[] {
   // A super-triangle well clear of every point; its corners are n, n+1, n+2.
   P.push([-20, -1], [0, 20], [20, -1]);
 
-  type Tri = { a: number; b: number; c: number; cx: number; cy: number; r2: number };
-  const make = (a: number, b: number, c: number): Tri | null => {
-    const [ax, ay] = P[a], [bx, by] = P[b], [cx, cy] = P[c];
-    let D = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
-    if (Math.abs(D) < 1e-15) return null;
-    // Orient counter-clockwise.
-    if (D < 0) { [b, c] = [c, b]; D = -D; }
-    const dx1 = P[b][0] - ax, dy1 = P[b][1] - ay, dx2 = P[c][0] - ax, dy2 = P[c][1] - ay;
-    const l1 = dx1 * dx1 + dy1 * dy1, l2 = dx2 * dx2 + dy2 * dy2;
-    const ux = ax + (l1 * dy2 - l2 * dy1) / D;
-    const uy = ay + (dx1 * l2 - dx2 * l1) / D;
-    const r2 = (ax - ux) ** 2 + (ay - uy) ** 2;
-    return Number.isFinite(r2) ? { a, b, c, cx: ux, cy: uy, r2 } : null;
+  // Triangles: corners (counter-clockwise), the neighbour across each edge
+  // (edge k runs from corner k to corner k + 1; -1 is none), circumcircle.
+  let cap = 2 * unique.length + 16;
+  let V = new Int32Array(3 * cap), N = new Int32Array(3 * cap), C = new Float64Array(3 * cap), alive = new Uint8Array(cap);
+  let count = 0;
+  const free: number[] = [];
+  const grow = () => {
+    cap *= 2;
+    const V2 = new Int32Array(3 * cap), N2 = new Int32Array(3 * cap), C2 = new Float64Array(3 * cap), A2 = new Uint8Array(cap);
+    V2.set(V); N2.set(N); C2.set(C); A2.set(alive);
+    V = V2; N = N2; C = C2; alive = A2;
   };
-  const root = make(n, n + 1, n + 2);
-  if (!root) return [];
-  let tris: Tri[] = [root];
+  const make = (a: number, b: number, c: number): number => {
+    const t = free.length ? free.pop()! : (count === cap ? (grow(), count++) : count++);
+    const [ax, ay] = P[a], [bx, by] = P[b], [cx, cy] = P[c];
+    const D = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+    V[3 * t] = a; V[3 * t + 1] = b; V[3 * t + 2] = c;
+    N[3 * t] = N[3 * t + 1] = N[3 * t + 2] = -1;
+    alive[t] = 1;
+    const dx1 = bx - ax, dy1 = by - ay, dx2 = cx - ax, dy2 = cy - ay;
+    const l1 = dx1 * dx1 + dy1 * dy1, l2 = dx2 * dx2 + dy2 * dy2;
+    const ux = ax + (l1 * dy2 - l2 * dy1) / D, uy = ay + (dx1 * l2 - dx2 * l1) / D;
+    const r2 = (ax - ux) ** 2 + (ay - uy) ** 2;
+    // Degenerate (its corners in a line): it holds everything, so the next point near it takes it out.
+    if (Math.abs(D) < 1e-15 || !Number.isFinite(r2)) { C[3 * t] = 0; C[3 * t + 1] = 0; C[3 * t + 2] = Infinity; } else { C[3 * t] = ux; C[3 * t + 1] = uy; C[3 * t + 2] = r2; }
+    return t;
+  };
+  const holds = (t: number, x: number, y: number) => (x - C[3 * t]) ** 2 + (y - C[3 * t + 1]) ** 2 < C[3 * t + 2] * (1 + 1e-12);
+  const orient = (a: number, b: number, x: number, y: number) => (P[b][0] - P[a][0]) * (y - P[a][1]) - (P[b][1] - P[a][1]) * (x - P[a][0]);
+  let last = make(n, n + 2, n + 1); // counter-clockwise
+  const bad: number[] = [], stack: number[] = [], mark = new Int32Array(cap).fill(-1);
+  let marks = mark;
+  const boundary: number[] = []; // per cavity edge: from, to, the neighbour outside
+  const fanFrom = new Map<number, number>(), fanTo = new Map<number, number>();
   for (const i of unique) {
     const [x, y] = P[i];
-    const keep: Tri[] = [];
-    const edges = new Map<string, [number, number]>();
-    for (const t of tris) {
-      if ((x - t.cx) ** 2 + (y - t.cy) ** 2 < t.r2 * (1 + 1e-12)) {
-        for (const [p, q] of [[t.a, t.b], [t.b, t.c], [t.c, t.a]]) {
-          // An edge shared by two removed triangles is interior to the cavity.
-          const k = p < q ? `${p},${q}` : `${q},${p}`;
-          if (edges.has(k)) edges.delete(k); else edges.set(k, [p, q]);
-        }
-      } else keep.push(t);
+    // Walk to the triangle that holds it (or one whose circumcircle does).
+    let t = last, steps = 0;
+    for (;;) {
+      if (holds(t, x, y)) break;
+      let next = -1;
+      for (let k = 0; k < 3; k++) if (orient(V[3 * t + k], V[3 * t + ((k + 1) % 3)], x, y) < 0 && N[3 * t + k] >= 0) { next = N[3 * t + k]; break; }
+      if (next < 0 || ++steps > count + 8) {
+        // Lost (only where a degenerate triangle cut the walk short): any triangle that holds it.
+        t = -1;
+        for (let q = 0; q < count; q++) if (alive[q] && holds(q, x, y)) { t = q; break; }
+        break;
+      }
+      t = next;
     }
-    for (const [p, q] of edges.values()) {
-      const t = make(p, q, i);
-      if (t) keep.push(t);
+    if (t < 0) continue;
+    // The cavity: every triangle joined to that one whose circumcircle holds the point.
+    if (marks.length < cap) { const m2 = new Int32Array(cap).fill(-1); m2.set(marks); marks = m2; }
+    bad.length = 0; boundary.length = 0; stack.length = 0;
+    stack.push(t); marks[t] = i;
+    while (stack.length) {
+      const q = stack.pop()!;
+      bad.push(q);
+      for (let k = 0; k < 3; k++) {
+        const o = N[3 * q + k];
+        if (o >= 0 && marks[o] !== i && holds(o, x, y)) { marks[o] = i; stack.push(o); }
+      }
     }
-    tris = keep;
+    for (const q of bad) for (let k = 0; k < 3; k++) {
+      const o = N[3 * q + k];
+      if (o >= 0 && marks[o] === i) continue;
+      boundary.push(V[3 * q + k], V[3 * q + ((k + 1) % 3)], o);
+    }
+    for (const q of bad) { alive[q] = 0; free.push(q); }
+    // Refilled as a fan to the point, each new triangle joined to what was outside and to its fan neighbours.
+    fanFrom.clear(); fanTo.clear();
+    for (let e = 0; e < boundary.length; e += 3) {
+      const a = boundary[e], b = boundary[e + 1], o = boundary[e + 2];
+      const nt = make(a, b, i);
+      if (marks.length < cap) { const m2 = new Int32Array(cap).fill(-1); m2.set(marks); marks = m2; }
+      N[3 * nt] = o;
+      if (o >= 0) for (let k = 0; k < 3; k++) if (V[3 * o + k] === b && V[3 * o + ((k + 1) % 3)] === a) N[3 * o + k] = nt;
+      fanFrom.set(a, nt); fanTo.set(b, nt);
+      last = nt;
+    }
+    for (let e = 0; e < boundary.length; e += 3) {
+      const a = boundary[e], b = boundary[e + 1], nt = fanFrom.get(a)!;
+      // Edge 1 (b to the point) meets the triangle that starts at b; edge 2 (the point to a) the one that ends at a.
+      N[3 * nt + 1] = fanFrom.get(b) ?? -1;
+      N[3 * nt + 2] = fanTo.get(a) ?? -1;
+    }
   }
+  void mark;
   const out: number[] = [];
-  for (const t of tris) if (t.a < n && t.b < n && t.c < n) out.push(t.a, t.b, t.c);
+  for (let t = 0; t < count; t++) {
+    if (!alive[t]) continue;
+    const a = V[3 * t], b = V[3 * t + 1], c = V[3 * t + 2];
+    // Corners in a line make no triangle (as a degenerate one never was).
+    if (a < n && b < n && c < n && C[3 * t + 2] !== Infinity) out.push(a, b, c);
+  }
   return out;
 }
