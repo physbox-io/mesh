@@ -65,8 +65,86 @@ function pointBack(tip: { x: number; y: number }, toward: { x: number; y: number
   return { x: tip.x + (toward.x - tip.x) * back, y: tip.y + (toward.y - tip.y) * back };
 }
 
-const ptsToPath = (pts: { x: number; y: number }[]) =>
-  pts.map((p, k) => `${k ? 'L' : 'M'}${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ') + ' Z';
+
+type Pt = { x: number; y: number };
+
+/** A piece drawn in its own frame, mm, y down: everything about it but where it goes. */
+interface Drawn {
+  name: string;
+  strain95: number;
+  cut: Pt[][];
+  sew?: Pt[];
+  marks: { kind: string; x: number; y: number; r: number }[];
+  channels: Pt[][];
+  darts: { stitch?: Pt[]; points: Pt[] }[];
+  /** What it covers, cutting line and all. */
+  x0: number; y0: number; x1: number; y1: number;
+}
+
+/** One piece in its own frame. */
+function drawPiece(p: PatternPiece, sa: number): Drawn | null {
+  if (p.outline.length < 3) return null;
+  const at = (i: number): Pt => ({ x: p.uv[i][0] * MM, y: -p.uv[i][1] * MM });
+  // A dart is folded and stitched, never cut: a wedge slit in from the edge
+  // is bridged across its mouth on the cutting line (its legs stay on the
+  // stitching line), and a double-ended dart is only drawn and marked. Cut
+  // out, either left a hole with nothing to sew it by.
+  const wedges = p.ids ? outlineDarts(p.ids, p.outline, p.edges) : [];
+  const m = p.outline.length, inWedge = new Set<number>();
+  for (const w of wedges) for (let q = -w.legs + 1; q <= w.legs - 1; q++) inWedge.add((((w.apex + q) % m) + m) % m);
+  const cutIdx = p.outline.filter((_, k) => !inWedge.has(k));
+  const darts: Drawn['darts'] = [];
+  for (const w of wedges) {
+    const apex = at(p.outline[w.apex]);
+    const ma = at(p.outline[(((w.apex - w.legs) % m) + m) % m]), mb = at(p.outline[(w.apex + w.legs) % m]);
+    darts.push({ points: [pointBack(apex, { x: (ma.x + mb.x) / 2, y: (ma.y + mb.y) / 2 })] });
+  }
+  for (const d of p.darts ?? []) {
+    if (d.length < 3) continue;
+    const pts = d.map(at);
+    let ia = 0, ib = 1, far = -1;
+    for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) {
+      const dd = Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y);
+      if (dd > far) { far = dd; ia = i; ib = j; }
+    }
+    const mid = { x: (pts[ia].x + pts[ib].x) / 2, y: (pts[ia].y + pts[ib].y) / 2 };
+    darts.push({ stitch: pts, points: [pointBack(pts[ia], mid), pointBack(pts[ib], mid)] });
+  }
+  const net = p.outline.map(at);
+  let cut: Pt[][] = [cutIdx.map(at)];
+  let sew: Pt[] | undefined = wedges.length ? net : undefined;
+  if (sa > 0) {
+    const grown = offsetLoop(cut[0], sa, { joinStyle: 'miter', miterLimit: 2.4 });
+    if (grown.length > 0) { cut = grown; sew = net; }
+  }
+  // Placement marks for what is sewn on at a point; topstitching is sewn after, not marked.
+  const marks = (p.marks ?? []).filter((mk) => mk.kind !== 'stitch').map((mk) => ({ kind: mk.kind, ...at(mk.particle), r: (mk.size * MM) / 2 }));
+  const channels = (p.lines ?? []).map((run) => run.map(at));
+  // Its extent from what is drawn, the cutting line's corners included: a
+  // box padded by the allowance alone let mitred corners reach into the next piece.
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const q of [...cut.flat(), ...net]) { x0 = Math.min(x0, q.x); y0 = Math.min(y0, q.y); x1 = Math.max(x1, q.x); y1 = Math.max(y1, q.y); }
+  return { name: p.name, strain95: p.strain95, cut, sew, marks, channels, darts, x0, y0, x1, y1 };
+}
+
+const pathOf = (pts: Pt[], dx: number, dy: number, close = true) =>
+  pts.map((q, k) => `${k ? 'L' : 'M'}${(q.x + dx).toFixed(1)} ${(q.y + dy).toFixed(1)}`).join(' ') + (close ? ' Z' : '');
+
+/** A drawn piece put at (x, y), its box's top left corner. */
+function place(d: Drawn, x: number, y: number): PatternLayout['pieces'][number] {
+  const dx = x - d.x0, dy = y - d.y0;
+  return {
+    name: d.name, strain95: d.strain95, x, y, w: d.x1 - d.x0, h: d.y1 - d.y0,
+    path: d.cut.map((l) => pathOf(l, dx, dy)).join(' '),
+    sewPath: d.sew ? pathOf(d.sew, dx, dy) : undefined,
+    marks: d.marks.map((mk) => ({ ...mk, x: mk.x + dx, y: mk.y + dy })),
+    channels: d.channels.map((c) => pathOf(c, dx, dy, false)),
+    darts: d.darts.map((dt) => ({ ...(dt.stitch ? { stitch: pathOf(dt.stitch, dx, dy) } : {}), points: dt.points.map((q) => ({ x: q.x + dx, y: q.y + dy })) })),
+  };
+}
+
+/** Room under each piece for its label. */
+const LABEL = 18;
 
 /** The pieces in a row, each in its own box; everything in mm, y down the page. */
 export function layoutPattern(pieces: PatternPiece[], options?: PatternLayoutOptions): PatternLayout {
@@ -74,58 +152,14 @@ export function layoutPattern(pieces: PatternPiece[], options?: PatternLayoutOpt
   let x = MARGIN, height = 0;
   const out: PatternLayout['pieces'] = [];
   for (const p of [...pieces].sort((a, b) => a.name.localeCompare(b.name))) {
-    if (p.outline.length < 3) continue;
-    const pts = p.outline.map((i) => p.uv[i]);
-    const u0 = Math.min(...pts.map((q) => q[0])), u1 = Math.max(...pts.map((q) => q[0]));
-    const v0 = Math.min(...pts.map((q) => q[1])), v1 = Math.max(...pts.map((q) => q[1]));
-    const pad = sa;
-    const w = (u1 - u0) * MM + 2 * pad, h = (v1 - v0) * MM + 2 * pad;
-    const X = (u: number) => x + pad + (u - u0) * MM, Y = (v: number) => MARGIN + pad + (v1 - v) * MM;
-    const loop = (ids: number[]) => ids.map((i, k) => `${k ? 'L' : 'M'}${X(p.uv[i][0]).toFixed(1)} ${Y(p.uv[i][1]).toFixed(1)}`).join(' ') + ' Z';
-    const at = (i: number) => ({ x: X(p.uv[i][0]), y: Y(p.uv[i][1]) });
-    // A dart is folded and stitched, never cut: a wedge slit in from the edge
-    // is bridged across its mouth on the cutting line (its legs stay on the
-    // stitching line), and a double-ended dart is only drawn and marked. Cut
-    // out, either left a hole with nothing to sew it by.
-    const wedges = p.ids ? outlineDarts(p.ids, p.outline, p.edges) : [];
-    const m = p.outline.length, inWedge = new Set<number>();
-    for (const w of wedges) for (let q = -w.legs + 1; q <= w.legs - 1; q++) inWedge.add((((w.apex + q) % m) + m) % m);
-    const cutIdx = p.outline.filter((_, k) => !inWedge.has(k));
-    const darts: PatternLayout['pieces'][number]['darts'] = [];
-    for (const w of wedges) {
-      const apex = at(p.outline[w.apex]);
-      const ma = at(p.outline[(((w.apex - w.legs) % m) + m) % m]), mb = at(p.outline[(w.apex + w.legs) % m]);
-      darts.push({ points: [pointBack(apex, { x: (ma.x + mb.x) / 2, y: (ma.y + mb.y) / 2 })] });
-    }
-    for (const d of p.darts ?? []) {
-      if (d.length < 3) continue;
-      const pts = d.map(at);
-      let ia = 0, ib = 1, far = -1;
-      for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) {
-        const dd = Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y);
-        if (dd > far) { far = dd; ia = i; ib = j; }
-      }
-      const mid = { x: (pts[ia].x + pts[ib].x) / 2, y: (pts[ia].y + pts[ib].y) / 2 };
-      darts.push({ stitch: loop(d), points: [pointBack(pts[ia], mid), pointBack(pts[ib], mid)] });
-    }
-    let cutPath = loop(cutIdx);
-    let sewPath: string | undefined = wedges.length ? loop(p.outline) : undefined;
-    if (sa > 0) {
-      const baseLoop = cutIdx.map(at);
-      const grown = offsetLoop(baseLoop, sa, { joinStyle: 'miter', miterLimit: 2.4 });
-      if (grown.length > 0) {
-        cutPath = grown.map(ptsToPath).join(' ');
-        sewPath = loop(p.outline);
-      }
-    }
-    // Placement marks for what is sewn on at a point; topstitching is sewn after, not marked.
-    const marks = (p.marks ?? []).filter((m) => m.kind !== 'stitch').map((m) => ({ kind: m.kind, x: X(p.uv[m.particle][0]), y: Y(p.uv[m.particle][1]), r: (m.size * MM) / 2 }));
-    const channels = (p.lines ?? []).map((run) => run.map((i, k) => `${k ? 'L' : 'M'}${X(p.uv[i][0]).toFixed(1)} ${Y(p.uv[i][1]).toFixed(1)}`).join(' '));
-    out.push({ name: p.name, strain95: p.strain95, x, y: MARGIN, w, h, path: cutPath, sewPath, marks, channels, darts });
-    x += w + GAP;
-    height = Math.max(height, h);
+    const d = drawPiece(p, sa);
+    if (!d) continue;
+    const placed = place(d, x, MARGIN);
+    out.push(placed);
+    x += placed.w + GAP;
+    height = Math.max(height, placed.h + LABEL);
   }
-  return { pieces: out, width: Math.max(100, x - GAP + MARGIN), height: height + 2 * MARGIN + 24 };
+  return { pieces: out, width: Math.max(100, x - GAP + MARGIN), height: height + 2 * MARGIN };
 }
 
 const escXml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
