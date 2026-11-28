@@ -9,6 +9,7 @@ import { GarmentDetails } from './GarmentDetails';
 import { GarmentSculptPanel } from './GarmentSculptPanel';
 import { GarmentCurvesPanel } from './GarmentCurvesPanel';
 import { ClothArrangePanel } from './ClothArrangePanel';
+import { ClothWarnings } from './ClothWarnings';
 import { DRAFT_SLIDERS, DRAFT_SWITCHES, FABRICS, GARMENT_KINDS, LIMBS, type DraftUnit } from './garmentFields';
 
 const SCALE: Record<DraftUnit, number> = { mm: 1000, '%': 100, '×': 1, '': 1 };
@@ -36,6 +37,7 @@ export function GarmentDraftCard({ node }: { node: SceneNode }) {
   return (
     <div className="flex flex-col gap-2.5 p-3 bg-slate-50 dark:bg-slate-900/40 border border-slate-200/60 dark:border-slate-800 rounded-lg">
       <label className="text-[10px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wider">Garment</label>
+      <ClothWarnings name={node.name || node.id} />
       <div className="grid grid-cols-2 gap-2">
         <label className="flex flex-col gap-1" title="What it is: a new draft of that kind, with its usual settings">
           <span className={label}>Kind</span>
