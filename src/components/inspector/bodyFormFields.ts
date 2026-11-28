@@ -2,12 +2,10 @@
 // which field each slider sets, its label and what a tape measures there.
 // Ranges are BODY_FORM_LIMITS (utils/cloth/bodyForm.ts), shared with MCP.
 
-import type { BodyFormMeasurements } from '../../types/cloth';
-import type { BODY_FORM_LIMITS } from '../../utils/cloth/bodyForm';
-import { formHeightMeasurements, proportions } from '../../utils/cloth/formProportions';
-import { defaultLimbGirths } from '../../utils/cloth/formLimbs';
+import type { FormField } from '../../utils/cloth/formMeasurements';
 
-export type FormField = keyof typeof BODY_FORM_LIMITS;
+export type { FormField };
+export { formMeasurementsShown } from '../../utils/cloth/formMeasurements';
 
 export interface FormFieldSpec {
   field: FormField;
@@ -60,20 +58,3 @@ export const FORM_SECTIONS: { title: string; unit: 'mm' | '°'; fields: FormFiel
     ],
   },
 ];
-
-/**
- * Every measurement as the form has it: those set, and those left to the
- * usual proportions worked out from the rest. Plus the outseam, which is the
- * inseam and the rise and not a measurement of its own.
- */
-export function formMeasurementsShown(m: BodyFormMeasurements): Record<FormField, number> & { outseam: number } {
-  const heights = formHeightMeasurements(m), girths = defaultLimbGirths(m);
-  return {
-    ...girths,
-    bustSpan: proportions(m).bustSpan,
-    // Those set, as set.
-    ...m,
-    // Heights as placed, set or not: a set one is kept in order with the rest.
-    ...heights,
-  } as Record<FormField, number> & { outseam: number };
-}
