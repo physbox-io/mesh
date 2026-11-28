@@ -206,8 +206,22 @@ export function syncClothSlabGeometry(
   }
   if (!moved) return false;
   pos.needsUpdate = true;
-  g.computeVertexNormals();
-  g.computeBoundingSphere();
+  // The faces' normals are the middle surface's, already in hand: the top
+  // face n, the bottom -n (its walls are a thickness tall, too thin to turn
+  // them). Three's computeVertexNormals over the whole slab redid that work,
+  // the largest share of a cloth frame on the main thread.
+  let normal = prevNormal;
+  if (!normal || normal.count !== 2 * N) {
+    normal = new THREE.BufferAttribute(new Float32Array(6 * N), 3);
+    g.setAttribute('normal', normal);
+  }
+  const na = normal.array as Float32Array;
+  for (let i = 0; i < N3; i++) { na[i] = n[i]; na[i + N3] = -n[i]; }
+  normal.needsUpdate = true;
+  // Its bounds only when asked (a raycast computes a missing sphere); the
+  // mesh is not frustum culled, so drawing never needs them.
+  g.boundingSphere = null;
+  g.boundingBox = null;
   return true;
 }
 
