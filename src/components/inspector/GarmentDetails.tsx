@@ -4,6 +4,7 @@ import { edgeOf } from '../../utils/cloth/edgeProfile';
 import { RangeInput } from '../RangeInput';
 import { SliderValue } from '../SliderValue';
 import { hasSleeves } from './garmentFields';
+import { GarmentCollarFields } from './garment/GarmentCollarFields';
 import { COLLARS, FASTENINGS, HEMS, LIMB_ENDS, NECKLINES, edgeStyle, withEdge, type ChoiceStyle, type EdgeStyle } from './garmentStyles';
 
 const label = 'text-xs text-slate-500 dark:text-slate-400 font-medium';
@@ -34,6 +35,7 @@ export function GarmentDetails({ draft, s, setDraft }: { draft: GarmentDraft; s:
       {fromNeck && hasSleeves(s) && <EdgePicker title="Sleeve ends" along="cuff" styles={LIMB_ENDS} draft={draft} setDraft={setDraft} max={0.6} />}
       {s.over && !s.cap && <EdgePicker title="End" along="end" styles={LIMB_ENDS} draft={draft} setDraft={setDraft} max={0.4} />}
       {fromNeck && <ChoicePicker title="Collar" styles={COLLARS} draft={merged} setDraft={setDraft} />}
+      {fromNeck && <GarmentCollarFields draft={draft} setDraft={setDraft} />}
       {fromNeck && s.opening && <ChoicePicker title="Fastening" styles={FASTENINGS} draft={merged} setDraft={setDraft} />}
       {!s.over && (
         <div className="flex flex-col gap-1">
