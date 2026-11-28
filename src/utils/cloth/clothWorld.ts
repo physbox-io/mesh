@@ -25,6 +25,10 @@ type Data = any;
 
 const modelCache = new Map<string, ClothModel>();
 
+/** The cloths the last build left out, and why: reported even when none was built. */
+let lastFailures: string[] = [];
+export const clothBuildFailures = (): string[] => lastFailures;
+
 export interface ClothWorld {
   sim: ClothSim;
   /** What each cloth was built from, to tell whether a rebuild is the same cloth (how far its zips are done up aside: that is done to it as it runs). */
@@ -127,6 +131,7 @@ export function buildClothWorld(
     if (n.cloth) cloths.push({ node: n, world });
   });
   for (const c of cloths) c.world = clothFrame(scene.nodes, c.node, c.world);
+  lastFailures = [];
   if (!cloths.length) return null;
   // What each cloth is built from (its spec, where it stands, and the
   // measurements it is cut to), and the build of its form's geoms. A garment
@@ -148,7 +153,8 @@ export function buildClothWorld(
   // How far each zip is done up, as the graph asks: done to the cloth as it
   // runs (its slider moved), not built into it.
   const zipsAsked = new Map<string, number>();
-  const models = cloths.map(({ node, world }, i) => {
+  const failed: string[] = [];
+  const built = cloths.map(({ node, world }, i): ClothModel | null => {
     const draft = node.cloth?.garment, form = formNode(node);
     const cut = draft ? (form?.bodyForm ?? draft.form ?? null) : null;
     const trims = draft ? garmentSettings(draft).trims : undefined;
@@ -202,12 +208,29 @@ export function buildClothWorld(
       }
     }
     if (!m) {
-      m = clothModel(node, world, scene.nodes);
+      // A cloth that cannot be built (a kind or fabric that is not one, a form
+      // that is gone) is left out with a warning, and the rest of the scene's
+      // cloth still runs: thrown from here, it took the whole load down.
+      try {
+        m = clothModel(node, world, scene.nodes);
+      } catch (err) {
+        failed.push(`${node.name || node.id}: not built: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
       if (modelCache.size > 8) modelCache.clear();
       modelCache.set(exact, m);
     }
     return m;
   });
+  const kept = built.map((m, i) => (m ? i : -1)).filter((i) => i >= 0);
+  if (kept.length < built.length) {
+    const k = kept.map((i) => keys[i]), f = kept.map((i) => formBuilds[i]);
+    keys.length = 0; keys.push(...k);
+    formBuilds.length = 0; formBuilds.push(...f);
+  }
+  const models = kept.map((i) => built[i]!);
+  lastFailures = failed;
+  if (!models.length) return null;
   const bodyIdMap = new Map<string, number>();
   const lookupBodyId = (name: string): number => {
     let id = bodyIdMap.get(name);
@@ -241,7 +264,7 @@ export function buildClothWorld(
   // Settled before it is first drawn: a paused scene shows the cloth at rest, not as modelled.
   sim.settleNow();
   const pose = () => sim.setPoses(bodyPose, geomPose);
-  const warnings = models.flatMap((m) => (m.warnings ?? []).map((w) => `${m.name}: ${w}`));
+  const warnings = [...failed, ...models.flatMap((m) => (m.warnings ?? []).map((w) => `${m.name}: ${w}`))];
   if (sim.settleCut) warnings.push(sim.settleCut);
   return {
     sim, keys, models, zipsAsked, formBuilds, warnings, pose,

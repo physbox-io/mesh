@@ -15,6 +15,7 @@ import { geomBounds } from './csg';
 import { DEFORM_MATERIALS } from './deformMaterials';
 import { STRING_MATERIALS } from './stringAcoustics';
 import { MEMBRANE_MATERIALS } from './membraneAcoustics';
+import { assertClothSpec } from './cloth/clothValidate';
 
 /** The geom types MuJoCo compiles. */
 export const GEOM_TYPES = ['box', 'sphere', 'capsule', 'cylinder', 'ellipsoid', 'plane', 'mesh'] as const;
@@ -99,6 +100,7 @@ export function checkIncomingBody(node: SceneNode, moves: boolean): void {
   }
   const geoms = node.geoms || [];
   for (const g of geoms) checkGeom(body, g);
+  if (node.cloth != null) assertClothSpec(node.cloth, body);
 
   // Too small to weigh. Only a body with a joint of its own, whose solid geoms
   // can all be measured (a SCAD body's mesh is not built yet), and not a

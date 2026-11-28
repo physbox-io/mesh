@@ -37,7 +37,8 @@ export const GARMENT_DEFAULTS: Record<GarmentKind, GarmentSettings> = {
 
 /** A draft with its kind's defaults under it: every setting the builder reads, whatever the draft left out. */
 export function garmentSettings(draft: GarmentDraft): GarmentSettings & GarmentDraft {
-  const given = Object.fromEntries(Object.entries(draft).filter(([, v]) => v !== undefined));
+  // A null is an unset field (utils/withoutNulls), and leaves the kind's default.
+  const given = Object.fromEntries(Object.entries(draft).filter(([, v]) => v != null));
   return { ...GARMENT_DEFAULTS[draft.garment], ...given } as GarmentSettings & GarmentDraft;
 }
 

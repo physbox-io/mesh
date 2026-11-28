@@ -14,6 +14,7 @@
  * Positions in the world frame (the node's transform applied), Z-up, metres.
  */
 
+import { assertClothSpec } from './clothValidate';
 import { garmentNameWarnings, linePicks } from './clothNames';
 import * as THREE from 'three';
 import type { ClothMaterial, ClothMaterialName, ClothPatternPrint, GarmentBelt, GarmentTrim } from '../../types/cloth';
@@ -576,6 +577,8 @@ function joinGroup(group: ClothRenderGroup, piece: AddOnPiece, particleOf: (loca
 
 export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNode[]): ClothModel {
   const spec = node.cloth!;
+  // A kind or fabric that is not one stops here in words: read off undefined, it hung the worker.
+  assertClothSpec(spec, node.name || node.id);
   const material = clothMaterial(spec), materialName: ClothMaterialName = spec.material ?? 'jersey';
   const sewTime = spec.sewTime ?? DEFAULT_SEW_TIME;
   const name = node.name || node.id;
