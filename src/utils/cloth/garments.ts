@@ -9,7 +9,7 @@ import type { BodyFormMeasurements, GarmentDraft, GarmentKind } from '../../type
 import type { SceneNode } from '../../types/scene';
 import { pieceNamePicks } from './clothNames';
 
-type OptionalGarmentFields = 'collar' | 'lapels' | 'top' | 'legs' | 'over' | 'from' | 'to' | 'cap' | 'gores' | 'opening' | 'trims' | 'waistEase' | 'elastics' | 'pockets' | 'beltLoops' | 'belt' | 'pattern' | 'cuts' | 'seams' | 'rods' | 'darts' | 'fullness' | 'edges' | 'sculpt' | 'curves' | 'attached' | 'pressed' | 'sleeveL' | 'sleeveR';
+type OptionalGarmentFields = 'collar' | 'lapels' | 'top' | 'legs' | 'over' | 'from' | 'to' | 'cap' | 'gores' | 'opening' | 'trims' | 'waistEase' | 'elastics' | 'pockets' | 'beltLoops' | 'belt' | 'pattern' | 'cuts' | 'seams' | 'rods' | 'darts' | 'fullness' | 'edges' | 'sculpt' | 'curves' | 'attached' | 'pressed' | 'sleeveL' | 'sleeveR' | 'pieceFabrics';
 
 /** Settings every garment has; what it covers (`top`, `legs`, or a tube's `over`, `from`, `to`, `cap`) says which kind it is. */
 export type GarmentSettings = Required<Omit<GarmentDraft, 'garment' | 'fitTo' | 'form' | OptionalGarmentFields>> & Pick<GarmentDraft, OptionalGarmentFields>;

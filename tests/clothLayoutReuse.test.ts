@@ -6,11 +6,11 @@ import { describe, it, expect, vi } from 'vitest';
 
 class FakeWorker {
   static last: FakeWorker;
-  posted: any[] = [];
+  posted: Array<Record<string, unknown> & { type?: string }> = [];
   onmessage: ((e: { data: unknown }) => void) | null = null;
   onerror: unknown = null; onmessageerror: unknown = null;
   constructor() { FakeWorker.last = this; }
-  postMessage(m: unknown) { this.posted.push(m); }
+  postMessage(m: Record<string, unknown> & { type?: string }) { this.posted.push(m); }
   terminate() {}
 }
 vi.stubGlobal('Worker', FakeWorker);
