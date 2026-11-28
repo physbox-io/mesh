@@ -3588,7 +3588,7 @@ const releaseClothZip = () => {
   if (z) post({ type: 'CLOTH_ZIP', ...z });
 };
 
-/** Moves the cloth on by a step, after MuJoCo's: it reads where every body has just got to. */
+/** Moves the cloth on by a step, after MuJoCo's and its kinematics: it reads where every body has just got to. */
 const stepCloth = (dt: number) => {
   if (!cloth || !model) return;
   const g = modelOpt(model).gravity;
@@ -4114,9 +4114,11 @@ const stepOnce = (stepSize: number): boolean => {
       }
     }
 
-    stepCloth(stepSize);
-    // Bodies to the instant the joints are at, for everything read from here on.
+    // Bodies to the instant the joints are at, for everything read from here
+    // on - the cloth first: mj_step leaves xpos/xmat at the step's start, and
+    // cloth posed from them met every moving body one step behind.
     syncKinematics(mujoco, model, data);
+    stepCloth(stepSize);
     checkConstraintBreaks();
     checkImpacts(stepSize);
     sampleAudioImpacts(stepSize);
@@ -4947,8 +4949,8 @@ const runHeadless = async (
         wakeBodies();
         solverWork.before(data!);
         mujoco!.mj_step(model!, data!);
-        stepCloth(timestep);
         syncKinematics(mujoco!, model!, data!);
+        stepCloth(timestep);
         solverWork.after(data!, timestep);
         checkConstraintBreaks();
         checkImpacts(timestep);
