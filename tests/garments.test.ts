@@ -92,7 +92,7 @@ describe('starts where it hangs', () => {
 describe('trims', () => {
   it('a jacket carries its zipper and studs on named edges, and on the pattern', () => {
     const form = bodyFormNode('form', 'form', { figure: 'male' });
-    const g = garmentNode('g', 'garment', { garment: 'jacket' }, form);
+    const g = garmentNode('g', 'garment', { garment: 'jacket', trims: [{ kind: 'zipper', along: 'opening', fastened: false }, { kind: 'stud', along: 'neckline', spacing: 0.022 }, { kind: 'stud', along: 'cuff', spacing: 0.018 }] }, form);
     const shell = garmentShell(g.cloth!.garment!, form.bodyForm!);
     const names = new Set([...shell.edges.map((e) => e.name), ...shell.seams.filter((sm) => sm.open).map((sm) => sm.name)]);
     for (const n of ['opening', 'neckline', 'hem', 'cuffL', 'cuffR']) expect([...names], n).toContain(n);

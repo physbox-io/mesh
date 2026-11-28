@@ -6,7 +6,7 @@
  */
 
 import type { SceneGraph, SceneNode } from '../types/scene';
-import type { ClothEdge, ClothPiece, ClothSeam, ClothTie, UV } from '../types/cloth';
+import type { ClothEdge, ClothPiece, ClothSeam, ClothTie, GarmentTrim, UV } from '../types/cloth';
 import { garmentNode, lazyBodyFormNode as bodyFormNode } from '../utils/cloth/clothNodes';
 import { bodyFormSection, bodyLandmarks } from '../utils/cloth/bodyForm';
 import { GARMENT_DEFAULTS } from '../utils/cloth/garments';
@@ -45,6 +45,9 @@ function wearing(id: string, draft: Parameters<typeof garmentNode>[2], form: Sce
   return node;
 }
 
+/** A biker's leather jacket: its zip open, studded round the neck and the cuffs. */
+const BIKER_TRIMS: GarmentTrim[] = [{ kind: 'zipper', along: 'opening', fastened: false }, { kind: 'stud', along: 'neckline', spacing: 0.022 }, { kind: 'stud', along: 'cuff', spacing: 0.018 }];
+
 /** A man in jeans, a t-shirt over them and a leather jacket over that: three layers. */
 function menswear(): SceneGraph {
   const form = bodyFormNode('form', 'form', { figure: 'male' });
@@ -53,7 +56,7 @@ function menswear(): SceneGraph {
       form,
       wearing('jeans', { garment: 'trousers' }, form, 0),
       wearing('tshirt', { garment: 'tshirt', rgba: [0.92, 0.92, 0.9, 1] }, form, 1),
-      wearing('jacket', { garment: 'jacket' }, form, 2),
+      wearing('jacket', { garment: 'jacket', material: 'leather', rgba: [0.12, 0.1, 0.09, 1], trims: BIKER_TRIMS }, form, 2),
     ],
   } as SceneGraph;
 }

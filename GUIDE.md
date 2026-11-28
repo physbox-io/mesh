@@ -1001,6 +1001,55 @@ as the matching export.
 
 ---
 
+### Cloth and garments
+
+A cloth body is a node with a `cloth` field and `geoms: []`. It is not a MuJoCo body:
+the physics worker simulates it with its own XPBD solver (`utils/cloth/xpbd.ts`) beside
+MuJoCo, reading where the bodies are each step (`clothWorld.ts`), and the viewport draws
+it from its particles (`components/scene/ClothLayer.tsx`). Everything is metres, Z up.
+
+Two ways to make one:
+
+- **Flat pieces** (`cloth.pieces`, `seams`, `ties`): outlines placed in 3D and sewn, a flag or a shade sail.
+- **A garment** (`cloth.garment`, a `GarmentDraft`) fitted to a dress form (a body with `bodyForm`)
+  by `fitTo`. The draft is modelled as a shell round the form (`garmentPlan.ts` says what it covers,
+  cuts and seams; `garmentShell.ts` builds it), cut at its seams into panels, flattened into pattern
+  pieces (`garmentFlatten.ts`), and sewn back (`clothModel.ts`). Points on a garment are in the form's
+  frame: +x the wearer's left, -y the front.
+
+A kind (`tshirt`, `dress`, `jacket`, ...) is only a preset of the draft: `GARMENT_DEFAULTS` in
+`garments.ts`, read through `garmentSettings`. Builders read data, never the kind. Changing the kind in
+the editor keeps everything that still applies (`garmentKindChange.ts`).
+
+What to know before changing it:
+
+- **Closed lists are checked at the door.** `clothValidate.ts` refuses an unknown kind, fabric, trim,
+  rod, fullness, edge or curve kind with the valid values, in `incomingBodyCheck` (every MCP body) and
+  again in the builder. An unknown kind once froze the tab. A new enumerated field goes in there too.
+- **Names that match nothing are warned, not refused.** Line, panel and piece names depend on the
+  garment as modelled, so `clothNames.ts` warns after the build. The worker posts them
+  (`CLOTH_STATUS`) to `store/clothStatus.ts`; the MCP reply of the command that wrote the cloth carries
+  `clothWarnings`, and the Garment card shows them. A cloth that cannot be built is left out with a
+  warning, the rest still run.
+- **Layers.** Each garment on a form needs its own `layer`, outermost highest; cloth of one layer keeps
+  off itself.
+- **Colour.** A piece whose colour follows the garment's carries a `tint` (a back 0.85, a pocket 0.86);
+  `pieceFabrics` gives any piece (a panel or a piece sewn on) its own fabric and colour. A colour-only
+  edit does not rebuild the cloth.
+- **Reading it back.** `physics_get_object` gives `clothSummary.draftResolved` (every setting the kind
+  fills in) and `pieceDetails` (each piece's fabric, colour, flat size and `strain95`); a form gives
+  `bodyFormAsBuilt`.
+- **Editor.** A cloth body uses the inspector's tabs: Main (kind, fabric, lengths, sleeves, pattern
+  export), Shape (edges, collar and lapels, darts, gathers and pleats, sculpt, drawn lines), Texture
+  (each piece's fabric and colour), Physics (arrange, fastenings). The cards live in
+  `components/inspector/garment/`; every control writes the field MCP writes, with the same default.
+- **Sewing pattern.** The Pattern card on Main, or `physics_export_cut` with `sheet_mode: 'soft_goods'`,
+  lays the flat pieces out as an SVG in mm (`patternSvg.ts`).
+- **It is slow.** A cloth scene runs well below real time; give it 2 to 3 simulated seconds to settle
+  before judging the drape.
+
+---
+
 ### Adding a new preset
 
 Two places to update:

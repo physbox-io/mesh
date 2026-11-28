@@ -29,7 +29,8 @@ export const cases: [string, GarmentKind, Partial<BodyFormMeasurements>, Partial
   // The same machinery for everything else: trousers, a jacket, a gown with
   // a train and batwing sleeves, and tubes round any span of a limb.
   ['jeans on a male form', 'trousers', {}],
-  ['leather jacket on a male form', 'jacket', {}],
+  ['leather jacket on a male form', 'jacket', {}, { material: 'leather' }],
+  ['plain jacket on a male form', 'jacket', {}],
   ['ballgown with a train and batwing sleeves', 'gown', FEMALE],
   ['sock', 'sock', {}],
   ['knit hat', 'hat', FEMALE],
