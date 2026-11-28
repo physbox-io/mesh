@@ -10,7 +10,9 @@ import type { SceneNode } from '../../types/scene';
 import type { ModelMirror } from '../../types/sceneLayer';
 import { bodyLandmarks } from './bodyForm';
 import { legPose, proportions } from './formProportions';
-import { clothModel } from './clothModel';
+import { clothModel, type ClothModel } from './clothModel';
+import { clothInputs } from './clothInputs';
+import { cachedClothModel } from './clothModelClient';
 import { layoutPattern, patternSvg, type PatternLayout, type PatternPiece } from './patternSvg';
 
 const r1 = (v: number) => +v.toFixed(1);
@@ -132,6 +134,21 @@ function nodeWorldMatrix(node: SceneNode): THREE.Matrix4 {
   return new THREE.Matrix4().compose(pos, new THREE.Quaternion(x, y, z, w), new THREE.Vector3(1, 1, 1));
 }
 
+/**
+ * A cloth's model for a read-back the live model cannot answer (the physics
+ * worker has not published it yet: a preset loading, a rebuild, one just
+ * added). In the app, the modelling pool's (clothModelClient) if it has made
+ * it, else null: never modelled on the main thread, where it froze the tab
+ * for seconds. Headless (no Worker), modelled here, as the worker would.
+ */
+function modelForReadBack(node: SceneNode, scene: SceneNode[]): ClothModel | null {
+  const input = clothInputs(scene).find((c) => c.node === node || (c.node.name || c.node.id) === (node.name || node.id));
+  const made = input && cachedClothModel(input.exact);
+  if (made) return made;
+  if (typeof Worker !== 'undefined') return null;
+  return clothModel(node, input?.world ?? nodeWorldMatrix(node), scene);
+}
+
 /** Computes a concise cloth/garment summary for `physics_get_object`. */
 export function clothNodeSummary(
   node: SceneNode,
@@ -176,7 +193,8 @@ export function clothNodeSummary(
   // Fallback when physics model flexes aren't populated yet (e.g. headless/unit calls):
   // build the cloth model directly from the scene graph.
   try {
-    const built = clothModel(node, nodeWorldMatrix(node), opts?.scene ?? [node]);
+    const built = modelForReadBack(node, opts?.scene ?? [node]);
+    if (!built) throw new Error('not modelled yet');
     const pieces = built.groups.map((g) => {
       const sep = g.name.lastIndexOf('__');
       return sep > 0 ? g.name.slice(sep + 2) : g.name;
@@ -268,7 +286,8 @@ export function exportClothPatternUnfold(
     }
 
     try {
-      const built = clothModel(node, nodeWorldMatrix(node), allSceneNodes);
+      const built = modelForReadBack(node, allSceneNodes);
+      if (!built) { warnings.push(`${bodyName}: still being modelled; export again once its build is done`); continue; }
       if (built.warnings?.length) {
         warnings.push(...built.warnings.map((w) => `${bodyName}: ${w}`));
       }

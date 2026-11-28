@@ -17,7 +17,9 @@ const CONTACT_TIMEOUT_MS = 8000;
 export async function initialContacts(
   store: Pick<PhysicsState, 'sceneGraph' | 'gravityZ' | 'floorFriction' | 'windX' | 'windY' | 'density' | 'floorBounce'>,
 ): Promise<ContactHistory[] | null> {
-  const { sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce } = store;
+  const { gravityZ, floorFriction, windX, windY, density, floorBounce } = store;
+  // A dress form not built yet is built on its worker, not by the compiler on this thread.
+  const sceneGraph = await (await import('./useCsgCompile')).resolveBodyFormsForBuild(store.sceneGraph);
   const client = getPhysicsWorkerClient();
   const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce, {
     meshFiles: client.meshFiles,

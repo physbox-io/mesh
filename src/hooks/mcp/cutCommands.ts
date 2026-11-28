@@ -33,6 +33,8 @@ import { isPourTooling, withoutTooling } from '../../utils/pourTooling';
 import { isNodeRotationBaked } from '../../utils/sceneTree';
 import { findNodeInScene, describeFiles } from './bridgeUtils';
 import { collectClothNodes, exportClothPatternUnfold } from '../../utils/cloth/clothSummary';
+import { modelClothsForBuild } from '../../utils/cloth/clothModelClient';
+import { withoutMeshData } from '../../store/physicsWorkerClient';
 import type { McpCommands } from './types';
 
 const KINDS = ['panels', 'contour', 'unfold'] as const;
@@ -266,7 +268,10 @@ export const cutCommands: McpCommands = {
       };
       const clothNodes = collectClothNodes(subject.scene.nodes);
       const hasRigidGeoms = subject.scene.nodes.some((n) => !n.cloth && hasOwnPositiveGeoms(n));
-      const exportClothPattern = () => {
+      const exportClothPattern = async () => {
+        // A garment the worker has not published yet is modelled on the pool, not here (clothSummary.modelForReadBack).
+        const flexNames = new Set((state.model?.flexes ?? []).map((f) => f.name.slice(0, f.name.lastIndexOf('__'))));
+        if (clothNodes.some((n) => !flexNames.has(n.name || n.id))) await modelClothsForBuild(withoutMeshData(store.sceneGraph));
         const clothSeamMm = seam.value ?? (rawMode === 'soft_goods' ? 10 : 0);
         const clothRes = exportClothPatternUnfold(clothNodes, store.sceneGraph.nodes, state.model?.flexes, {
           seamAllowanceMm: clothSeamMm,
@@ -296,12 +301,12 @@ export const cutCommands: McpCommands = {
         );
       };
       if (clothNodes.length > 0 && (rawMode === 'soft_goods' || !hasRigidGeoms)) {
-        return exportClothPattern();
+        return await exportClothPattern();
       }
       try {
         const res = exportSheetUnfold(subject.scene, options);
         if (!res.success || !res.svg) {
-          if (clothNodes.length > 0) return exportClothPattern();
+          if (clothNodes.length > 0) return await exportClothPattern();
           return { ok: false, error: res.error || 'Nothing here unfolds.', warnings: res.warnings };
         }
         const sheets: EtchSheetSpec[] = res.sheets.map((s) => ({ widthMm: s.widthMm, heightMm: s.heightMm, thicknessMm: thick }));

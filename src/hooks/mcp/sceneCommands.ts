@@ -13,7 +13,7 @@ import { clearBreakage } from '../../store/breakage';
 import { compileToMJCF } from '../../utils/mjcf';
 import { compileSCAD } from '../../utils/openscad';
 import { makePresetNoteCard, updateOrCreateNotecard, type NoteCard } from '../../utils/noteCards';
-import { compileCsgNodes, pendingColliderBodies } from '../useCsgCompile';
+import { compileCsgNodes, pendingColliderBodies, resolveBodyFormsForBuild } from '../useCsgCompile';
 import { headlessImpactWarning } from '../../utils/headlessLimits';
 import { headlessImpacts } from './headlessImpacts';
 import { PRESETS } from '../../presets/presetScenes';
@@ -130,7 +130,9 @@ export const sceneCommands: McpCommands = {
     // Nothing to run: an empty scene used to come back ok and settled.
     const empty = emptySceneRefusal(useStore.getState().sceneGraph);
     if (empty) return empty;
-    const { sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce, waterLevel } = useStore.getState();
+    const { gravityZ, floorFriction, windX, windY, density, floorBounce, waterLevel } = useStore.getState();
+    // A dress form not built yet is built on its worker, not by the compiler on this thread (mjcfPrepare's fallback).
+    const sceneGraph = await resolveBodyFormsForBuild(useStore.getState().sceneGraph);
     // Runs inside the same physics worker that owns the live simulation
     // (see src/workers/physicsWorker.ts's runHeadless) — its own isolated
     // model/data built from the one already-loaded mujoco module, so a
