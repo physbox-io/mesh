@@ -13,7 +13,7 @@ import { setSettleBudgetMs, setUntangleBudgetMs, type ClothEnv, type ClothSim } 
 // leaves crossings a faster machine would have sewn out.
 setSettleBudgetMs(Infinity);
 setUntangleBudgetMs(Infinity);
-import { buildClothWorld } from '../src/utils/cloth/clothWorld';
+import { buildClothWorld, type ClothWorld } from '../src/utils/cloth/clothWorld';
 import { syncKinematics } from '../src/workers/bodyKinematics';
 import { clothCrossings, type Crossing } from './clothIntersections';
 import { compileToMJCF } from '../src/utils/mjcf';
@@ -58,9 +58,10 @@ export interface ClothRun {
   speedOver: (dt: number, env?: Partial<ClothEnv>) => number;
   /** Cloth edges crossing cloth triangles they are not joined to: cloth through cloth (tests/clothIntersections). */
   crossings: () => Crossing[];
-  /** The MuJoCo model and data it steps beside. */
+  /** The MuJoCo model and data it steps beside, and the cloth world (what the worker steps). */
   mjModel: any;
   mjData: any;
+  world: ClothWorld;
 }
 
 export async function clothRun(scene: SceneNode[]): Promise<ClothRun> {
@@ -158,7 +159,7 @@ export async function clothRun(scene: SceneNode[]): Promise<ClothRun> {
   }
   const internals = sim as unknown as { tris: Int32Array; stitches: Int32Array };
   const crossings = () => clothCrossings(sim.x, internals.tris, internals.stitches, (i) => pieceAt[i]);
-  return { sim, models, colliders, worlds, run, clearance, strains, speedOver, crossings, mjModel: model, mjData: data };
+  return { sim, models, colliders, worlds, run, clearance, strains, speedOver, crossings, mjModel: model, mjData: data, world };
 }
 
 export const percentile = (sorted: number[], f: number) => sorted[Math.min(sorted.length - 1, Math.floor(f * (sorted.length - 1)))];

@@ -616,25 +616,60 @@ export class ClothSim {
     }
   }
 
-  /** Moves the cloth on by `dt`, in whole substeps (the remainder carries over). */
-  advance(dt: number, env: ClothEnv) {
+  /** The env of an advance not yet finished (`finish`), and whether its continuous collision is due before its next substep. */
+  private owedEnv: ClothEnv | null = null;
+  private ccdOwed = false;
+
+  /** Whether an advance stopped at its deadline with work left (`finish` runs it). */
+  get busy() { return this.owedEnv !== null; }
+
+  /**
+   * Moves the cloth on by `dt`, in whole substeps (the remainder carries
+   * over). Past `deadline` (performance.now() ms) it stops between two pieces
+   * of work (a substep, a continuous-collision pass) and returns false, for
+   * `finish` to run the rest exactly as it would have: same poses, same env,
+   * same order. One piece always runs.
+   */
+  advance(dt: number, env: ClothEnv, deadline = Infinity): boolean {
+    // One owed still: done first, so nothing runs out of order.
+    if (this.owedEnv) this.finish();
     this.accumulator += dt;
-    if (this.accumulator < CLOTH_SUBSTEP) return;
+    if (this.accumulator < CLOTH_SUBSTEP) return true;
     const h = CLOTH_SUBSTEP;
     let steps = 0;
     let total = this.accumulator;
     while (total >= h) { steps++; total -= h; }
     this.substepMoveScale = 1 / steps;
-    while (this.accumulator >= h) {
+    this.owedEnv = env;
+    return this.finish(deadline);
+  }
+
+  /** Runs what an advance stopped at its deadline left; true once it is all done. */
+  finish(deadline = Infinity): boolean {
+    const env = this.owedEnv;
+    if (!env) return true;
+    const h = CLOTH_SUBSTEP, timed = deadline !== Infinity;
+    let worked = false;
+    for (;;) {
+      if (this.ccdOwed) {
+        if (worked && timed && performance.now() > deadline) return false;
+        this.collideAlong(this.ccdSince * h);
+        worked = true;
+      }
+      if (this.accumulator < h) break;
+      if (worked && timed && performance.now() > deadline) return false;
       this.externalForces(env);
       this.substep(h, env);
       this.accumulator -= h;
-      if (++this.ccdSince >= CCD_EVERY) this.collideAlong(this.ccdSince * h);
+      worked = true;
+      if (++this.ccdSince >= CCD_EVERY) this.ccdOwed = true;
     }
+    this.owedEnv = null;
     this.substepMoveScale = 1;
     for (let ci = 0; ci < this.colliders.length; ci++) {
       if (this.worldInit[ci]) this.prevWorld[ci].copy(this.world[ci]);
     }
+    return true;
   }
 
   /** The continuous collision, built once: every cloth triangle, sewn points joined. */
@@ -655,6 +690,7 @@ export class ClothSim {
   private collideAlong(span: number) {
     const x = this.x, from = this.ccdFrom;
     this.ccdSince = 0;
+    this.ccdOwed = false;
     if (!from) { this.ccdFrom = Float64Array.from(x); return; }
     const before = this.ccdBefore;
     before.set(x);
@@ -2403,6 +2439,8 @@ export class ClothSim {
     const m = (this.tangleMesh ??= untangleMesh(this.n, this.tris, this.stitches)), crossings = findCrossings(this.x, m);
     this.ccdOf().setTangled(crossings);
     this.ccdFrom = Float64Array.from(this.x); this.ccdSince = 0;
+    // An advance left owed belonged to the state just replaced.
+    this.owedEnv = null; this.ccdOwed = false; this.substepMoveScale = 1;
     this.syncAeroBaselines();
     return true;
   }

@@ -3590,17 +3590,21 @@ const releaseClothZip = () => {
   if (z) post({ type: 'CLOTH_ZIP', ...z });
 };
 
-/** Moves the cloth on by a step, after MuJoCo's and its kinematics: it reads where every body has just got to. */
-const stepCloth = (dt: number) => {
-  if (!cloth || !model) return;
+/**
+ * Moves the cloth on by a step, after MuJoCo's and its kinematics: it reads
+ * where every body has just got to. False if it stopped at `deadline` with
+ * substeps left (cloth.finish runs them).
+ */
+const stepCloth = (dt: number, deadline = Infinity): boolean => {
+  if (!cloth || !model) return true;
   const g = modelOpt(model).gravity;
   const wx = envWindX || 0, wy = envWindY || 0;
-  cloth.advance(dt, {
+  return cloth.advance(dt, {
     gravity: [g[0], g[1], g[2]],
     wind: [wx, wy, 0],
     airDensity: envDensity < 0 ? 0 : envDensity > 0 ? envDensity : 1.225,
     gustAt: envWindGusting && (wx !== 0 || wy !== 0) ? evaluateGustWind : undefined,
-  });
+  }, deadline);
 };
 
 // Snapshot everything the main thread needs to render + mirror `model`/`data`.
@@ -4057,8 +4061,57 @@ const resetAudioWatchState = () => {
   }
 };
 
-const stepOnce = (stepSize: number): boolean => {
+/**
+ * A step whose cloth stopped at the frame's deadline: what the step does
+ * after its cloth, run once the cloth has finished (the next tick, before any
+ * further step). Tied to the cloth and model it was made for.
+ */
+let stepTail: { cloth: ClothWorld; model: unknown; run: () => void } | null = null;
+
+const stepFailed = (e: unknown): false => {
+  const msg = String((e as Error)?.message || e);
+  const fatal = /Aborted|enlarge memory|abort|bad_alloc/i.test(msg);
+  resetAudioWatchState();
+  post({
+    type: 'ERROR',
+    message: msg,
+    fatal,
+    lastState: fatal && data
+      ? { qpos: Array.from(data.qpos), qvel: Array.from(data.qvel), ctrl: Array.from(data.ctrl), time: data.time, scriptState: scriptState.snapshot() }
+      : undefined,
+  });
+  isPlaying = false;
+  return false;
+};
+
+/**
+ * Finishes a step the last tick left owed: its cloth, up to `deadline`, then
+ * the rest of the step. True once there is none owed; false if the cloth is
+ * still at it, or the step failed (isPlaying is then off).
+ */
+const finishOwedStep = (deadline: number): boolean => {
+  const tail = stepTail;
+  if (!tail) return true;
+  // Rebuilt or reset since: that step belonged to a scene that is gone.
+  if (tail.cloth !== cloth || tail.model !== model) { stepTail = null; return true; }
+  try {
+    if (!tail.cloth.finish(deadline)) return false;
+    stepTail = null;
+    tail.run();
+    return true;
+  } catch (e) {
+    stepTail = null;
+    return stepFailed(e);
+  }
+};
+
+/**
+ * One MuJoCo step and the cloth with it. With a deadline the cloth may stop
+ * part way ('owed'): the rest of the step then waits in stepTail.
+ */
+const stepOnce = (stepSize: number, deadline = Infinity): boolean | 'owed' => {
   if (!model || !data || !mujoco) return false;
+  if (stepTail && !finishOwedStep(Infinity)) return false;
   try {
     data.xfrc_applied.fill(0);
     data.qfrc_applied.fill(0);
@@ -4120,32 +4173,27 @@ const stepOnce = (stepSize: number): boolean => {
     // on - the cloth first: mj_step leaves xpos/xmat at the step's start, and
     // cloth posed from them met every moving body one step behind.
     syncKinematics(mujoco, model, data);
-    stepCloth(stepSize);
-    checkConstraintBreaks();
-    checkImpacts(stepSize);
-    sampleAudioImpacts(stepSize);
-    sampleAeroSnaps(stepSize);
-    stepCount++;
+    const clothDone = stepCloth(stepSize, deadline);
+    const rest = () => {
+      checkConstraintBreaks();
+      checkImpacts(stepSize);
+      sampleAudioImpacts(stepSize);
+      sampleAeroSnaps(stepSize);
+      stepCount++;
 
-    if (stepCount % 10 === 0) {
-      const entry = buildHistoryEntry(aeroDiagnostics);
-      history.push(entry);
+      if (stepCount % 10 === 0) {
+        const entry = buildHistoryEntry(aeroDiagnostics);
+        history.push(entry);
+      }
+    };
+    if (!clothDone && cloth) {
+      stepTail = { cloth, model, run: rest };
+      return 'owed';
     }
+    rest();
     return true;
   } catch (e) {
-    const msg = String((e as Error)?.message || e);
-    const fatal = /Aborted|enlarge memory|abort|bad_alloc/i.test(msg);
-    resetAudioWatchState();
-    post({
-      type: 'ERROR',
-      message: msg,
-      fatal,
-      lastState: fatal
-        ? { qpos: Array.from(data.qpos), qvel: Array.from(data.qvel), ctrl: Array.from(data.ctrl), time: data.time, scriptState: scriptState.snapshot() }
-        : undefined,
-    });
-    isPlaying = false;
-    return false;
+    return stepFailed(e);
   }
 };
 
@@ -4202,11 +4250,24 @@ const stepTick = (delta: number) => {
   // Cloth can cost more per step than a step is long. Rather than run every
   // step owed and post a frame a few times a second, stop at a frame's worth
   // of work and let the rest go: the cloth plays in slow motion, smoothly.
+  // The budget holds inside the cloth's substeps too: a step whose cloth
+  // runs past it stops between two substeps, and the rest of it runs first
+  // next tick, so a tick is about a substep long, not a step's worth of them
+  // and a continuous-collision pass (the worker answered drags and the main
+  // thread at 10-20 Hz on a few garments).
   const budgetEnd = cloth ? performance.now() + CLOTH_FRAME_BUDGET_MS : Infinity;
-  for (let i = 0; i < stepsNeeded; i++) {
-    if (!stepOnce(stepSize)) return;
-    if (performance.now() > budgetEnd) { accumulator = 0; break; }
+  let owed = false;
+  if (stepTail) {
+    if (!finishOwedStep(budgetEnd)) { if (!isPlaying) return; owed = true; }
+    else framePending = true;
   }
+  for (let i = 0; i < stepsNeeded && !owed; i++) {
+    const r = stepOnce(stepSize, budgetEnd);
+    if (!r) return;
+    if (r === 'owed') owed = true;
+    if (owed || performance.now() > budgetEnd) { accumulator = 0; break; }
+  }
+  if (owed) { accumulator = 0; framePending = true; }
   // How fast the sim is keeping up, and what the scripts cost: see ScriptTiming.
   if (scriptTiming.tick(performance.now(), data.time)) scriptStatusDue = true;
 

@@ -39,7 +39,13 @@ export interface ClothWorld {
   warnings: string[];
   /** Pose the colliders from where MuJoCo has every body now. */
   pose: () => void;
-  advance: (dt: number, env: ClothEnv) => void;
+  /**
+   * The cloth on by `dt`, posed first if a substep is due. With a deadline
+   * (performance.now() ms) it may stop between substeps and return false;
+   * `finish` then runs the rest, exactly as it would have run.
+   */
+  advance: (dt: number, env: ClothEnv, deadline?: number) => boolean;
+  finish: (deadline?: number) => boolean;
 }
 
 /** Write row-major 3x3 and a position into `out` without allocating. */
@@ -245,9 +251,12 @@ export function buildClothWorld(
   if (sim.settleCut) warnings.push(sim.settleCut);
   return {
     sim, keys, models, zipsAsked, formBuilds, warnings, pose,
-    advance: (dt, env) => {
+    advance: (dt, env, deadline) => {
+      // One owed still runs on its own poses, before these are taken.
+      if (sim.busy) sim.finish();
       if (sim.willSubstep(dt)) pose();
-      sim.advance(dt, env);
+      return sim.advance(dt, env, deadline);
     },
+    finish: (deadline) => sim.finish(deadline),
   };
 }
