@@ -19,6 +19,10 @@ export interface PatternPiece {
   lines?: number[][];
   /** Double-ended darts inside the outline, as loops of point indices: drawn as part of its outline. */
   darts?: number[][];
+  /** The garment it is cut for. */
+  garment?: string;
+  /** Its fabric (a ClothMaterialName). */
+  fabric?: string;
 }
 
 export interface PatternLayoutOptions {

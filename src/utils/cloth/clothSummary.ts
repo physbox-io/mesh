@@ -11,7 +11,6 @@ import type { ModelMirror } from '../../types/sceneLayer';
 import { bodyLandmarks } from './bodyForm';
 import { legPose, proportions } from './formProportions';
 import { clothModel } from './clothModel';
-import { layoutPattern, patternSvg, type PatternLayout, type PatternPiece } from './patternSvg';
 
 const r1 = (v: number) => +v.toFixed(1);
 const r4 = (v: number) => +v.toFixed(4);
@@ -206,110 +205,5 @@ export function clothNodeSummary(
   }
 }
 
-export interface ClothPatternUnfoldResult {
-  ok: true;
-  svg: string;
-  layout: PatternLayout;
-  seamAllowanceMm: number;
-  pieceNames: string[];
-  warnings: string[];
-}
-
-export interface ClothPatternUnfoldError {
-  ok: false;
-  error: string;
-  warnings: string[];
-}
-
-/** Collects every `cloth` node in a scene subtree. */
-export function collectClothNodes(nodes: SceneNode[]): SceneNode[] {
-  const out: SceneNode[] = [];
-  const walk = (list: SceneNode[]) => {
-    for (const n of list) {
-      if (n.cloth) out.push(n);
-      if (n.children?.length) walk(n.children);
-    }
-  };
-  walk(nodes);
-  return out;
-}
-
-/**
- * Exports 2D sewing pattern pieces for one or more `cloth` bodies as an SVG
- * document, reusing live `model.flexes` flat patterns when available and
- * falling back to `buildClothModel()` otherwise.
- */
-export function exportClothPatternUnfold(
-  clothNodes: SceneNode[],
-  allSceneNodes: SceneNode[],
-  modelFlexes: ModelMirror['flexes'] | undefined,
-  options?: { seamAllowanceMm?: number; title?: string },
-): ClothPatternUnfoldResult | ClothPatternUnfoldError {
-  const seamAllowanceMm = Math.max(0, options?.seamAllowanceMm ?? 10);
-  const pieces: PatternPiece[] = [];
-  const warnings: string[] = [];
-  const multi = clothNodes.length > 1;
-
-  for (const node of clothNodes) {
-    const bodyName = node.name || node.id;
-    const fromFlexes: PatternPiece[] = (modelFlexes ?? [])
-      .filter((f) => f.flat && f.name.lastIndexOf('__') > 0 && f.name.slice(0, f.name.lastIndexOf('__')) === bodyName)
-      .map((f) => {
-        const pieceName = f.name.slice(f.name.lastIndexOf('__') + 2);
-        return {
-          name: multi ? `${bodyName}_${pieceName}` : pieceName,
-          ...f.flat!,
-        };
-      });
-
-    if (fromFlexes.length > 0) {
-      pieces.push(...fromFlexes);
-      continue;
-    }
-
-    try {
-      const built = clothModel(node, nodeWorldMatrix(node), allSceneNodes);
-      if (built.warnings?.length) {
-        warnings.push(...built.warnings.map((w) => `${bodyName}: ${w}`));
-      }
-      for (const g of built.groups) {
-        if (!g.flat) continue;
-        const sep = g.name.lastIndexOf('__');
-        const pieceName = sep > 0 ? g.name.slice(sep + 2) : g.name;
-        pieces.push({
-          name: multi ? `${bodyName}_${pieceName}` : pieceName,
-          ...g.flat,
-        });
-      }
-    } catch (err) {
-      warnings.push(`${bodyName}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
-  if (pieces.length === 0) {
-    return {
-      ok: false,
-      error: 'No flat 2D garment pattern pieces could be extracted from the selected cloth bodies.',
-      warnings,
-    };
-  }
-
-  const title = options?.title ?? (clothNodes.length === 1 ? `${clothNodes[0].name || clothNodes[0].id} pattern` : 'garment pattern');
-  const layout = layoutPattern(pieces, { seamAllowanceMm });
-  if (layout.pieces.length === 0) {
-    return {
-      ok: false,
-      error: 'Cloth pattern pieces had degenerate outlines (fewer than 3 points).',
-      warnings,
-    };
-  }
-  const svg = patternSvg(pieces, title, { seamAllowanceMm });
-  return {
-    ok: true,
-    svg,
-    layout,
-    seamAllowanceMm,
-    pieceNames: layout.pieces.map((p) => p.name),
-    warnings,
-  };
-}
+// The sewing-pattern export lives in patternExport; re-exported for older callers.
+export { collectClothNodes, exportClothPatternUnfold, type ClothPatternUnfoldError, type ClothPatternUnfoldResult } from './patternExport';

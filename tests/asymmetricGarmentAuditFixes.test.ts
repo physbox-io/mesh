@@ -14,6 +14,7 @@ import {
 } from '../src/utils/cloth/clothSummary';
 import { objectReply } from '../src/utils/objectReply';
 import { cutCommands } from '../src/hooks/mcp/cutCommands';
+import { bodyFormNode } from '../src/utils/cloth/clothNodes';
 import { useStore } from '../src/store/useStore';
 
 const form = clampBodyForm({ figure: 'female' });
@@ -225,7 +226,9 @@ describe('Asymmetric Garment Audit Fixes', () => {
 
   describe('4. physics_export_cut(kind="unfold", sheet_mode="soft_goods") on cloth garments', () => {
     it('exports 2D garment pattern pieces as SVG with seam allowance', async () => {
-      const formNode = makeFormNode();
+      // A built form (its meshes made), as a scene holds one: an unbuilt form
+      // hid that the export unfolded the mannequin rather than the dress.
+      const formNode = bodyFormNode('form', 'form', { figure: 'female' });
       const draft: GarmentDraft = {
         garment: 'dress',
         fitTo: 'form',
