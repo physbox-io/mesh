@@ -34,7 +34,7 @@ import type { EdgeProfile } from '../../types/cloth';
 
 /** The most a profile lengthens its edge anywhere (none below 0). */
 const profileMax = (pr?: EdgeProfile) => (pr ? Math.max(0, ...pr.points.map((q) => q[1] ?? 0)) : 0);
-import { garmentPlan, restOff, type GarmentCut, type Part, type PartCover } from './garmentPlan';
+import { garmentPlan, matchesOnMask, restOff, type GarmentCut, type Part, type PartCover } from './garmentPlan';
 
 export { boundaryLoops, splitPanels } from './garmentSurface';
 
@@ -63,29 +63,6 @@ export interface GarmentShell {
   warnings?: string[];
 }
 
-/** Whether a point/triangle on `part` (and `isFront` side, horizontal `x`) matches a plane's `on` scope. */
-function matchesOnMask(on: string | string[] | undefined, part: Part, isFront: boolean, x: number): boolean {
-  if (on === undefined) return true;
-  const list = Array.isArray(on) ? on : [on];
-  if (list.length === 0) return true;
-  const isArm = part === 'armL' || part === 'armR';
-  const isBody = !isArm && part !== 'head';
-  for (const raw of list) {
-    const token = raw.trim();
-    if (token === part) return true;
-    if ((token === 'torso' || token === 'body') && (part === 'skin' || part === 'webL' || part === 'webR')) return true;
-    if (token === 'front' && isBody && isFront) return true;
-    if (token === 'back' && isBody && !isFront) return true;
-    if (token === 'frontL' && isBody && isFront && x >= -1e-4) return true;
-    if (token === 'frontR' && isBody && isFront && x <= 1e-4) return true;
-    if (token === 'backL' && isBody && !isFront && x >= -1e-4) return true;
-    if (token === 'backR' && isBody && !isFront && x <= 1e-4) return true;
-    if (token === 'sleeve' && isArm) return true;
-    if (token === 'sleeveL' && part === 'armL') return true;
-    if (token === 'sleeveR' && part === 'armR') return true;
-  }
-  return false;
-}
 
 /** The grid's spacing at most: about the size of a triangle of a garment round the body. */
 const H_MAX = 0.025;
