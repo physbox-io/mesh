@@ -1157,7 +1157,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, dragBodyNam
       <FeatureEdges geometry={meshBufferGeometry} threshold={EDGE_THRESHOLD_MESH} />
     ) : null;
     const renderedMaterial = (
-      <meshStandardMaterial key={`${alpha < 1 ? 'blend' : 'solid'}:${showPaint}`} {...materialProps} side={THREE.FrontSide} />
+      <meshStandardMaterial key={`${alpha < 1 ? 'blend' : 'solid'}:${vertexColored}`} {...materialProps} side={THREE.FrontSide} />
     );
     // The inside of a sculpt the scissors left open — see SculptSurface, which
     // draws the same thing while the tools are up.

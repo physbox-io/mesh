@@ -260,7 +260,15 @@ async function takeScreenshot(msg: Record<string, unknown>, waitedInQueue = fals
       const statusNow = usePathTraceStatus.getState();
       const alreadyDone = before.render
         && (statusNow.phase === 'done' || (statusNow.phase === 'rendering' && statusNow.samples >= target));
+      let scaledRenderer = false;
       if (!alreadyDone) {
+        // Scale the renderer before tracing when scale < 1 so CPU/software WebGL
+        // (e.g. SwiftShader) traces proportionally fewer pixels instead of full-res.
+        if (scale < 1) {
+          const scaleState = applyRenderScale(gl, win?._physics_composer, scale);
+          restoreScale = scaleState.restore;
+          scaledRenderer = scaleState.scaledRenderer;
+        }
         await new Promise<void>((resolve) => {
           let settled = false;
           const finish = () => {
@@ -279,7 +287,13 @@ async function takeScreenshot(msg: Record<string, unknown>, waitedInQueue = fals
         });
       }
       actualRenderSamples = usePathTraceStatus.getState().samples;
-      if (scale < 1) {
+      if ((actualRenderSamples ?? 0) === 0) {
+        // Path tracer produced 0 samples (e.g. software WebGL shader compile timeout);
+        // draw the raster view instead of returning a blank black canvas.
+        if (clean) restoreOutlines = suppressComposerOutlines(win?._physics_composer);
+        renderViewportNow();
+      }
+      if (scale < 1 && !scaledRenderer) {
         const down = downsampleCanvas(gl.domElement, scale);
         if (down) {
           dataUrl = down.dataUrl;
@@ -339,7 +353,11 @@ async function takeScreenshot(msg: Record<string, unknown>, waitedInQueue = fals
   const ink = (typeof document !== 'undefined' && document.documentElement?.classList?.contains('dark')) ? 'white' : 'black';
   const notes: string[] = [];
   if (wanted.render) {
-    notes.push(`Ray-traced Render mode (${actualRenderSamples ?? 0} samples).`);
+    if ((actualRenderSamples ?? 0) === 0) {
+      notes.push('Ray-traced Render mode produced 0 samples within the timeout; fell back to standard WebGL render.');
+    } else {
+      notes.push(`Ray-traced Render mode (${actualRenderSamples} samples).`);
+    }
   } else if (wanted.edges) {
     notes.push(`Edges view is on: the thin ${ink} lines along corners, and ${ink} specks on fine detail (text, patterns, sculpted creases, small holes), are ink lines drawn on edges sharper than 20-30 degrees, not geometry or defects. Pass show_edges: false for a frame without them.`);
   }

@@ -265,8 +265,9 @@ export function PathTracedView({ background }: { background: string }) {
 
     const report = (phase: PathTracePhase, samples: number) => {
       const rounded = Math.floor(samples);
-      // The count only while rendering, and only every few samples.
-      if (phase === s.phase && (phase !== 'rendering' || rounded - s.reportedSamples < 8)) return;
+      // Report every sample up to 16 so low-sample MCP captures (e.g. render_samples=2..16)
+      // resolve immediately, then throttle UI badge updates to every 8 samples.
+      if (phase === s.phase && (phase !== 'rendering' || (rounded > 16 && rounded - s.reportedSamples < 8) || rounded === s.reportedSamples)) return;
       s.phase = phase;
       s.reportedSamples = rounded;
       usePathTraceStatus.getState().set({ phase, samples: rounded });

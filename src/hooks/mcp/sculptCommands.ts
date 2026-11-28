@@ -8,6 +8,7 @@
 import { useStore } from '../../store/useStore';
 import { SCULPT_BASES, MAX_SCULPT_SIZE, MIN_SCULPT_SIZE, type SculptBaseId } from '../../utils/sculptBases';
 import { toSceneGeom, type BrushType } from '../../utils/sculptMesh';
+import { subdivideMeshForPaint, transferPaintLayer } from '../../utils/vertexPaint';
 import {
   applySculptStroke, probeSurface, sculptSummary, undoSculptStroke, BRUSH_TYPES,
 } from '../../utils/sculptCommands';
@@ -259,6 +260,20 @@ export const sculptCommands: McpCommands = {
     return withSculptBodyLock(targetId, async () => {
       const liveStore = useStore.getState();
       const { node, geomIndex } = sculptTarget(liveStore, targetId);
+      const oldGeom = node.geoms?.[geomIndex];
+      const oldPaint = oldGeom?.paint;
+      const oldZupPositions = oldPaint && oldPaint.idx.length > 0
+        ? (oldGeom?.renderVertices ?? (oldGeom?.vertices ? (() => {
+            const out = new Float32Array(oldGeom.vertices.length);
+            for (let i = 0; i < oldGeom.vertices.length; i += 3) {
+              out[i] = oldGeom.vertices[i];
+              out[i + 1] = -oldGeom.vertices[i + 2];
+              out[i + 2] = oldGeom.vertices[i + 1];
+            }
+            return out;
+          })() : undefined))
+        : undefined;
+      const oldFaces = oldGeom?.faces;
       const mesh = sculptMeshOf(node, geomIndex);
       let lastResult: ReturnType<typeof applySculptStroke> | null = null;
       const perStroke: { brush?: string; applied: number; missed: number; moved: number; maxDisplacement: number; topologyChanged?: boolean }[] = [];
@@ -303,7 +318,22 @@ export const sculptCommands: McpCommands = {
         sculptVersion: (node.sculptVersion ?? 1) + 1,
       }, true);
       const { vertices, renderVertices, faces } = toSceneGeom(mesh);
-      freshStore.updateNodeGeom(targetId, { vertices, renderVertices, faces }, geomIndex);
+      let remappedPaint = oldPaint;
+      if (oldPaint && oldPaint.idx.length > 0 && oldZupPositions && oldFaces && renderVertices) {
+        const paintRes = oldPaint.res;
+        const oldPaintPos = paintRes.length
+          ? subdivideMeshForPaint(oldZupPositions, oldFaces, paintRes).positions
+          : oldZupPositions;
+        const newPaintPos = paintRes.length
+          ? subdivideMeshForPaint(renderVertices, faces, paintRes).positions
+          : renderVertices;
+        remappedPaint = transferPaintLayer(oldPaintPos, oldPaint, newPaintPos, paintRes);
+      }
+      freshStore.updateNodeGeom(
+        targetId,
+        { vertices, renderVertices, faces, ...(remappedPaint !== oldPaint ? { paint: remappedPaint } : {}) },
+        geomIndex,
+      );
 
       if (pendingUndos.length > 0) {
         const stack = sculptHistory.get(targetId) ?? [];

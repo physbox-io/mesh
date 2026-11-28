@@ -281,6 +281,24 @@ export async function runCastPrep(opts: CastPrepOptions): Promise<CastPrepReport
     }
 
     const edges = opts.edges ? { chamferMm: round2(chamfer), filletMm: round2(fillet) } : null;
+    const prepBeforeFinish = store().sceneGraph.castPrep;
+    const skippedIds = new Set((prepBeforeFinish?.skipped ?? []).map((s) => s.nodeId));
+    const skippedAll = draftDeg === 0 && ids.length > 0 && ids.every((id) => skippedIds.has(id));
+    if (skippedAll) {
+      const skippedOut = (prepBeforeFinish?.skipped ?? []).map(({ name, reason }) => ({ name, reason }));
+      store().clearCastPrep();
+      await store().recompile(store().sceneGraph, undefined, false, true);
+      return {
+        ok: true,
+        treated: 0,
+        draftDeg,
+        edges: null,
+        sharpEdges,
+        ...(sharpAtMm.length ? { sharpEdgesAtMm: sharpAtMm } : {}),
+        skipped: skippedOut,
+        warnings: skippedOut.map(({ name, reason }) => `${name} was not prepared: ${reason}`),
+      };
+    }
     store().finishCastPrep({ edges, sharpEdges });
     await store().recompile(store().sceneGraph, undefined, false, true);
 
