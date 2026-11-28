@@ -422,7 +422,7 @@ export function layoutPattern(pieces: PatternPiece[], options?: PatternLayoutOpt
     .filter((d): d is Drawn => !!d);
   const rects = drawn.map((d) => ({ w: d.x1 - d.x0, h: d.y1 - d.y0 }));
   // The title block ends with the cut list, wrapped to its width.
-  let title = options?.titleBlock?.length ? [...options.titleBlock] : undefined;
+  const title = options?.titleBlock?.length ? [...options.titleBlock] : undefined;
   if (title) {
     let line = 'Cut:';
     for (const d of drawn) {
