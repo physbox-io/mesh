@@ -246,6 +246,12 @@ export interface ClothRenderGroup {
   /** `<body>__<piece>`, as the viewport names a cloth piece. */
   name: string;
   rgba: number[];
+  /**
+   * Its colour as a shade of the garment's (rgba is the garment's times
+   * this: a back panel's 0.85); unset where it has a colour of its own. What
+   * a recolour carries the cloth over by.
+   */
+  tint?: number;
   /** The fabric, for how it is drawn. */
   material: ClothMaterialName;
   /** The piece flat, for a garment cut from a modelled shell. */
@@ -373,7 +379,20 @@ function vertexNormals(points: number[][], tris: number[], world: THREE.Matrix4)
   return n.map((q) => { w.set(q[0], q[1], q[2]).applyMatrix3(nm).normalize(); return [w.x, w.y, w.z]; });
 }
 
-const shade = (c: number[], k: number) => [c[0] * k, c[1] * k, c[2] * k, c[3] ?? 1];
+export const shade = (c: number[], k: number) => [c[0] * k, c[1] * k, c[2] * k, c[3] ?? 1];
+/** The shade of `colour` that `rgba` is (a pocket a little darker than its garment), if it is one. */
+function tintOf(rgba: number[], colour: number[]): number | undefined {
+  if ((rgba[3] ?? 1) !== (colour[3] ?? 1)) return undefined;
+  let k: number | undefined;
+  for (let c = 0; c < 3; c++) {
+    if (Math.abs(colour[c]) < 1e-9) { if (Math.abs(rgba[c]) > 1e-9) return undefined; continue; }
+    const r = rgba[c] / colour[c];
+    if (k === undefined) k = r; else if (Math.abs(r - k) > 1e-6) return undefined;
+  }
+  return k ?? 1;
+}
+/** A garment panel's shade of the garment's colour: its backs a little darker, to tell them from its fronts. */
+const panelTint = (name: string) => (name.startsWith('back') ? 0.85 : 1);
 
 /** Pairs of edges into a map keyed by particle pair, averaging lengths seen more than once. */
 class EdgeSet {
@@ -904,7 +923,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
         }
       }
       groups.push({
-        name: `${name}__${panel.name}`, rgba: panel.name.startsWith('back') ? shade(colour, 0.85) : colour, material: materialName,
+        name: `${name}__${panel.name}`, rgba: shade(colour, panelTint(panel.name)), tint: panelTint(panel.name), material: materialName,
         particles: piece.points.map((_, i) => particleOf(i)), tris: piece.tris.slice(),
         flat: { uv: piece.uv.map(([u, v]) => [u, v]), outline: piece.outline.slice(), strain95: piece.strain95, marks: trims, ...(piece.darts ? { darts: piece.darts.map((l) => l.slice()) } : {}) },
         trims,
@@ -1314,6 +1333,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       if (host && joinGroup(host, { ...piece, tris: wound }, particleOf)) continue;
       groups.push({
         name: `${name}__${piece.name}`, rgba: piece.rgba, material: piece.material ?? materialName,
+        ...((() => { const k = tintOf(piece.rgba, colour); return k === undefined ? {} : { tint: k }; })()),
         particles: piece.uv.map((_, i) => particleOf(i)), tris: wound,
         flat: { uv: uv.map(([u, vv]) => [u, vv]), outline: piece.outline.slice(), strain95: piece.strain95 ?? 0, marks: trims },
         ...(trims.length ? { trims } : {}),

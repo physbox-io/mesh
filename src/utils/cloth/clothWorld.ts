@@ -11,7 +11,7 @@ import * as THREE from 'three';
 import type { SceneGraph, SceneNode } from '../../types/scene';
 import type { ClothSpec } from '../../types/cloth';
 import { walkBodiesWorld } from '../bodyWorld';
-import { clothModel, type ClothModel } from './clothModel';
+import { clothModel, shade, type ClothModel } from './clothModel';
 import { garmentSettings } from './garments';
 import { clothFrame } from './clothFrame';
 import { doneUp } from './fastening';
@@ -173,7 +173,8 @@ export function buildClothWorld(
           previous.models[i].groups.map((g) => {
             const pName = g.name.slice((node.name || node.id).length + 2);
             const pc = node.cloth?.pieces?.find((q) => q.name === pName);
-            const rgba = pc ? (pc.rgba ?? [0.25, 0.5, 0.85, 1]) : (node.cloth?.garment?.rgba ?? g.rgba);
+            const garmentRgba = node.cloth?.garment?.rgba;
+            const rgba = pc ? (pc.rgba ?? [0.25, 0.5, 0.85, 1]) : garmentRgba && g.tint !== undefined ? shade(garmentRgba, g.tint) : g.rgba;
             const pat = pc ? pc.pattern : g.pattern;
             return [rgba, pat, g.trims?.map((t) => t.rgba)];
           }),
@@ -194,10 +195,11 @@ export function buildClothWorld(
           };
         }
       } else if (node.cloth?.garment && !node.cloth.garment.trims?.some((t) => t.rgba) && !node.cloth.garment.pockets?.some((p) => p.rgba) && !(typeof node.cloth.garment.belt === 'object' && node.cloth.garment.belt?.rgba) && !node.cloth.garment.collar?.rgba && !node.cloth.garment.attached?.some((a) => a.rgba || a.pattern)) {
+        // Each piece its own shade of the new colour (backs darker); one with a colour of its own keeps it.
         const gRgba = garmentSettings(node.cloth.garment).rgba ?? [0.28, 0.36, 0.52, 1];
         m = {
           ...previous.models[i],
-          groups: previous.models[i].groups.map((g) => ({ ...g, rgba: gRgba })),
+          groups: previous.models[i].groups.map((g) => (g.tint !== undefined ? { ...g, rgba: shade(gRgba, g.tint) } : g)),
         };
       }
     }
