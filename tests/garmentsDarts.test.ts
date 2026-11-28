@@ -74,7 +74,8 @@ describe('darts', () => {
       const p0 = flat(sp, `sleeve${side}`), p1 = flat(sd, `sleeve${side}`);
       console.log(`sleeve${side} strain95 plain ${(p0.strain95 * 100).toFixed(2)}% darted ${(p1.strain95 * 100).toFixed(2)}%`);
       expect(p1.strain95).toBeLessThan(0.05);
-      expect(p1.strain95).toBeLessThan(p0.strain95 - 0.02);
+      // The plain sleeve's woven cap has the plan's own cap dart now (garmentPlan): measured plain 5.9%, darted 4.4%.
+      expect(p1.strain95).toBeLessThan(p0.strain95 - 0.01);
       for (const n of [`elbow${side}`, `cap${side}`]) {
         const d = dartLegs(sd, p1, n);
         // Single-ended: two legs, open at a seam (both ends on the outline: a notch in the pattern), alike so they sew.

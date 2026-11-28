@@ -250,9 +250,13 @@ export function garmentPlan(draft: GarmentDraft, form: BodyFormMeasurements, lay
   // far as the fabric eases (garmentFullness.capEase), a dart down the top of
   // the arm for what it cannot (leather, velvet, a crisp silk; a knit gives).
   // Measured on a leather jacket's upper sleeve: 6.2% to lie flat without,
-  // 3.5% with; a woven dress's short sleeve with one, 2.8%.
+  // 3.5% with; a woven dress's short sleeve with one, 2.8%. A fabric that eases
+  // only as much as a short sleeve's cap needs (a woven, CAP_NEED) gets one too:
+  // a long sleeve's upper cap on a roomy body needs more, and a woven jacket's
+  // and long-sleeved shirt's came out at 6.1-7.4% to lie flat, 4.2-4.5% with it.
+  // A short woven sleeve's drops from 4.8% to 3.0%.
   const mat = CLOTH_MATERIALS[d.material];
-  if (d.darts !== false && sleeved && !batwing && mat.give < CAP_NEED && mat.easeIn < CAP_NEED) {
+  if (d.darts !== false && sleeved && !batwing && mat.give < CAP_NEED && mat.easeIn <= CAP_NEED) {
     const capSpecs = sleevedL && sleevedR
       ? [{ name: 'cap', apex: { limb: 'armL' as const, along: 0.12, face: [0, 0, 1] }, direction: [-1, 0, 1], mirror: true }]
       : sleevedL
