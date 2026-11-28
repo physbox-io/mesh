@@ -352,7 +352,7 @@ export class PhysicsWorkerClient {
           // The same cloth layout as the last: the same objects again, so nothing drawn from them is rebuilt.
           if (msg.ok && msg.clothLayoutId !== undefined) {
             if (msg.flexes) this.clothLayout = { id: msg.clothLayoutId, flexes: msg.flexes };
-            else if (this.clothLayout?.id === msg.clothLayoutId) msg.flexes = this.clothLayout.flexes;
+            else if (this.clothLayout && this.clothLayout.id === msg.clothLayoutId) msg.flexes = this.clothLayout.flexes;
           }
           if (pending) {
             this.pendingBuilds.delete(msg.id);
