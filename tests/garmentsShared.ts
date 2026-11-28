@@ -38,8 +38,8 @@ export const cases: [string, GarmentKind, Partial<BodyFormMeasurements>, Partial
 
 /**
  * The panels each is cut in: bodices front and back, with their set-in
- * sleeves (a batwing's are cut in one with the body; a sleeve past the
- * elbow is cut round there, upper and lower); the rest as named.
+ * sleeves (a batwing's are cut in one with the body; a long sleeve in one
+ * piece, cut on the arm straight); the rest as named.
  */
 export const expectedPanels = (garment: GarmentKind, options: Partial<GarmentDraft>): string[] | null => {
   const d = { ...GARMENT_DEFAULTS[garment], ...options };
@@ -49,5 +49,5 @@ export const expectedPanels = (garment: GarmentKind, options: Partial<GarmentDra
   if (d.over) return null;
   const fronts = d.opening ? ['frontL', 'frontR'] : ['front'];
   if (d.top === 'waist' || d.sleeve <= 0.03 || d.armhole > 0.05) return ['back', ...fronts];
-  return d.sleeve > 0.35 ? ['back', ...fronts, 'sleeveLLower', 'sleeveLUpper', 'sleeveRLower', 'sleeveRUpper'] : ['back', ...fronts, 'sleeveL', 'sleeveR'];
+  return ['back', ...fronts, 'sleeveL', 'sleeveR'];
 };

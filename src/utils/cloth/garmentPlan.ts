@@ -117,8 +117,9 @@ export function garmentPlan(draft: GarmentDraft, form: BodyFormMeasurements, lay
     if (!d.cap) cuts.push({ kind: 'limbEnd', limb: d.over, s: to * limb.length, on: [d.over], profile: edgeOf(draft, 'end')?.profile });
     seams.push({ kind: 'roundLimb', limb: d.over, n: Math.max(2, Math.round(d.gores ?? 2)), at: from * limb.length });
     if (d.opening) seams.push({ kind: 'frontOpening', on: [d.over] });
+    // Cut round at a joint the limb is drafted bent at (an ankle), not one the pose bends.
     const joint = limb.path.jointAt + 0.006 * s;
-    if (limb.path.bend > RING_BEND && from * limb.length < joint && (d.cap || to * limb.length > joint)) seams.push({ kind: 'limbRing', name: 'joint', limb: d.over, s: joint });
+    if ((limb.straight ?? limb.path).bend > RING_BEND && from * limb.length < joint && (d.cap || to * limb.length > joint)) seams.push({ kind: 'limbRing', name: 'joint', limb: d.over, s: joint });
     addDraftPlanes(draft, cuts, seams);
     for (const line of draftDarts(draft, form)) seams.push({ kind: 'dart', ...line });
     addDrawnLines(draft, seams);
@@ -185,7 +186,7 @@ export function garmentPlan(draft: GarmentDraft, form: BodyFormMeasurements, lay
       else {
         armholes.push({ kind: 'partBoundary', name: `armhole${arm.slice(3)}`, a: 'skin', b: arm, within: 0.45 });
         underarms.push({ kind: 'alongLimb', name: `underarm${arm.slice(3)}`, limb: arm, over: false });
-        if (sleeveLen > limb.path.jointAt && limb.path.bend > RING_BEND) underarms.push({ kind: 'limbRing', name: `elbow${arm.slice(3)}`, limb: arm, s: limb.path.jointAt });
+        if (sleeveLen > limb.path.jointAt && (limb.straight ?? limb.path).bend > RING_BEND) underarms.push({ kind: 'limbRing', name: `elbow${arm.slice(3)}`, limb: arm, s: limb.path.jointAt });
       }
     }
   }
