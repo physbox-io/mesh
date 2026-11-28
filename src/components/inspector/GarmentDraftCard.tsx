@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { RangeInput } from '../RangeInput';
 import { SliderValue } from '../SliderValue';
 import { SettledColorInput } from '../SettledInputs';
@@ -5,6 +6,7 @@ import { useStore } from '../../store/useStore';
 import type { SceneNode } from '../../types/scene';
 import type { GarmentDraft, GarmentKind } from '../../types/cloth';
 import { garmentSettings } from '../../utils/cloth/garments';
+import { changeGarmentKind } from '../../utils/cloth/garmentKindChange';
 import { GarmentDetails } from './GarmentDetails';
 import { GarmentSculptPanel } from './GarmentSculptPanel';
 import { GarmentCurvesPanel } from './GarmentCurvesPanel';
@@ -21,16 +23,23 @@ const rgbaOf = (h: string, a: number) => [1, 3, 5].map((i) => parseInt(h.slice(i
  * A garment's draft, the common settings: what it is, its fabric and colour,
  * the layer it is worn as, and the lengths and switches its kind uses. Each
  * control writes the draft field MCP writes; unset fields show the kind's
- * default. Changing the kind starts a new draft of that kind on the same form.
+ * default. Changing the kind keeps everything in the draft that still applies.
  */
 export function GarmentDraftCard({ node }: { node: SceneNode }) {
   const updateNode = useStore((s) => s.updateNode);
+  const [dropped, setDropped] = useState<{ id: string; kind: GarmentKind; list: string[] } | null>(null);
   const cloth = node.cloth, draft = cloth?.garment;
   if (!cloth || !draft) return null;
   const s = garmentSettings(draft);
   const setDraft = (next: GarmentDraft, settle = false) => updateNode(node.id, { cloth: { ...cloth, garment: next } } as Partial<SceneNode>, false, settle);
   const set = <K extends keyof GarmentDraft>(key: K, value: GarmentDraft[K], settle = false) => setDraft({ ...draft, [key]: value }, settle);
-  const setKind = (kind: GarmentKind) => setDraft({ garment: kind, ...(draft.fitTo ? { fitTo: draft.fitTo } : { form: draft.form }), ...(draft.pattern ? { pattern: draft.pattern } : {}) });
+  // One edit, so one undo step; what has nothing to apply to on the new kind is said under the picker.
+  const setKind = (kind: GarmentKind) => {
+    const change = changeGarmentKind(draft, kind);
+    setDropped({ id: node.id, kind, list: change.dropped });
+    setDraft(change.draft);
+  };
+  const droppedNow = dropped && dropped.id === node.id && dropped.kind === draft.garment && dropped.list.length ? dropped.list : null;
   const top = s.top ?? 'neck';
   const label = 'text-xs text-slate-500 dark:text-slate-400 font-medium';
   const select = 'w-full text-xs border border-slate-200 dark:border-slate-700 rounded-md px-1.5 py-1 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 cursor-pointer';
@@ -39,7 +48,7 @@ export function GarmentDraftCard({ node }: { node: SceneNode }) {
       <label className="text-[10px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wider">Garment</label>
       <ClothWarnings name={node.name || node.id} />
       <div className="grid grid-cols-2 gap-2">
-        <label className="flex flex-col gap-1" title="What it is: a new draft of that kind, with its usual settings">
+        <label className="flex flex-col gap-1" title="What it is: that kind's settings under everything in this draft that still applies">
           <span className={label}>Kind</span>
           <select className={select} value={draft.garment} onChange={(e) => setKind(e.target.value as GarmentKind)}>
             {GARMENT_KINDS.map((k) => <option key={k.id} value={k.id}>{k.label}</option>)}
@@ -60,6 +69,12 @@ export function GarmentDraftCard({ node }: { node: SceneNode }) {
           <SliderValue value={cloth.layer ?? 0} onChange={(v) => updateNode(node.id, { cloth: { ...cloth, layer: Math.max(0, Math.round(v)) } } as Partial<SceneNode>, false, true)} decimals={0} min={0} max={6} className="text-xs text-slate-500 dark:text-slate-400" />
         </label>
       </div>
+      {droppedNow && (
+        <div role="status" className="flex items-start gap-2 text-[11px] leading-snug text-slate-600 dark:text-slate-300 p-2 rounded-md bg-slate-100 dark:bg-slate-800/60">
+          <span className="flex-1">Kept the rest of the draft. Left out: {droppedNow.join('; ')}. Undo brings them back.</span>
+          <button type="button" onClick={() => setDropped(null)} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer" aria-label="Dismiss">×</button>
+        </div>
+      )}
       {s.over ? (
         <label className="flex flex-col gap-1" title="The limb it goes round">
           <span className={label}>Over</span>
