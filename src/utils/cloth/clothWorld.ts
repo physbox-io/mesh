@@ -23,7 +23,24 @@ type Mj = any;
 type Model = any;
 type Data = any;
 
+/**
+ * Each cloth's model by everything it depends on (its `exact` key),
+ * least recently used first: kept for as many cloths as a few edits of a
+ * large scene make (cleared wholesale past 8, a Reset after two edits of
+ * a seven-garment scene modelled all seven again).
+ */
 const modelCache = new Map<string, ClothModel>();
+const MODEL_CACHE_SIZE = 24;
+const cacheModel = (exact: string, m: ClothModel) => {
+  modelCache.delete(exact);
+  modelCache.set(exact, m);
+  while (modelCache.size > MODEL_CACHE_SIZE) modelCache.delete(modelCache.keys().next().value!);
+};
+const cachedModel = (exact: string) => {
+  const m = modelCache.get(exact);
+  if (m) cacheModel(exact, m);
+  return m;
+};
 
 export interface ClothWorld {
   sim: ClothSim;
@@ -169,7 +186,7 @@ export function buildClothWorld(
     const pj = j ?? -1;
     // Exact cache includes visual colours/prints so group FlexInfo stays accurate;
     // `key` strips visual fields and zipper state so carrying across a rebuild preserves ClothSim state!
-    let m = modelCache.get(exact);
+    let m = cachedModel(exact);
     if (!m && carry && pj >= 0 && previous?.keys[pj] === key && previous.models?.[pj]) {
       const prevExact = JSON.stringify([node.name || node.id, previous.models[pj].groups.map((g) => [g.rgba, g.pattern, g.trims?.map((t) => t.rgba)])]);
       const wantVisualChanged = !node.cloth?.garment && !node.cloth?.pieces
@@ -209,8 +226,7 @@ export function buildClothWorld(
     }
     if (!m) {
       m = clothModel(node, world, scene.nodes);
-      if (modelCache.size > 8) modelCache.clear();
-      modelCache.set(exact, m);
+      cacheModel(exact, m);
     }
     return m;
   });
