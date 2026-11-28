@@ -57,6 +57,12 @@ export function GarmentPatternPanel({ nodes, title, fill }: {
             )}
             {/* Drawn to be seen at this size, in colour (the download keeps true-size lines). */}
             {p.channels.map((d, i) => <path key={`c${i}`} d={d} fill="none" stroke={OVERLAY.boning} strokeWidth={1.6 * u} strokeDasharray={`${3 * u} ${1.5 * u}`} />)}
+            {p.darts.map((d, i) => (
+              <g key={`d${i}`}>
+                {d.stitch && <path d={d.stitch} fill="none" stroke="#7c3aed" strokeWidth={Math.max(0.4, layout.width / 520)} strokeDasharray={`${2.4 * u} ${1.4 * u}`} />}
+                {d.points.map((q, j) => <path key={j} d={`M${q.x - 2 * u} ${q.y} L${q.x + 2 * u} ${q.y} M${q.x} ${q.y - 2 * u} L${q.x} ${q.y + 2 * u}`} stroke="#334" strokeWidth={0.7 * u} />)}
+              </g>
+            ))}
             {p.marks.map((m, i) => (m.kind === 'zipper'
               ? <circle key={i} cx={m.x} cy={m.y} r={1.3 * u} fill={OVERLAY.zipper} />
               : <circle key={i} cx={m.x} cy={m.y} r={Math.max(2 * u, m.r)} fill="#fff" stroke={OVERLAY.trim} strokeWidth={0.7 * u} />))}

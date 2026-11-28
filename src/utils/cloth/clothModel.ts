@@ -32,6 +32,7 @@ import { beltPaths, beltPieces, LAP_OFF, pocketPieces, standPiece, type AddOnPie
 import { attachedPieces } from './garmentAttached';
 import { collarPieces, lapelPieces } from './garmentCollars';
 import { fullSides, panelEdgeEase } from './garmentFullness';
+import { cutEdges, type FlatEdge } from './patternEdges';
 
 /** A piece as it is cut: its points flat, metres, v up the body; its outline in order round it; how much it had to stretch to lie flat; its trims, by point. */
 export interface FlatPattern {
@@ -43,6 +44,10 @@ export interface FlatPattern {
   lines?: number[][];
   /** Double-ended darts inside its outline: loops of its points (local indices). */
   darts?: number[][];
+  /** Each point's shell point, or -1 for one of its own: points with the same id on two pieces are sewn together. */
+  ids?: number[];
+  /** Each outline edge (outline[k] to outline[k + 1]): the line it lies on and what it is sewn to. */
+  edges?: FlatEdge[];
 }
 
 /** A stud, button, bead or zipper tooth riding on one of a group's points (its local index), `size` across. */
@@ -570,6 +575,14 @@ function joinGroup(group: ClothRenderGroup, piece: AddOnPiece, particleOf: (loca
     s2 += p[0] * q[1] - q[0] * p[1];
   }
   if (s2 < 0) chosen = [chosen[0], ...chosen.slice(1).reverse()];
+  // Its edges' classes carried to the new outline: the panel's own edges keep
+  // theirs, the add-on's (points of its own) have none.
+  if (flat.edges) {
+    const was = new Map<string, FlatEdge>(), om = flat.outline.length;
+    flat.outline.forEach((p, k) => { const q = flat.outline[(k + 1) % om]; was.set(`${p},${q}`, flat.edges![k]); was.set(`${q},${p}`, flat.edges![k]); });
+    flat.edges = chosen.map((p, k) => was.get(`${p},${chosen[(k + 1) % chosen.length]}`) ?? {});
+  }
+  if (flat.ids) while (flat.ids.length < flat.uv.length) flat.ids.push(-1);
   flat.outline = chosen;
   return true;
 }
@@ -735,6 +748,8 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     const spreadStitches: [number, number][] = [];
     const seamTackAt: { particle: number; group: number; a: number; b: number; t: number; offset: number; across: number }[] = [];
     const spreadRows = new Map<number, { ratio: number; row: [number, number][] }>();
+    // Each panel's piece as cut: its group, its points' shell points, its outline; classified once all are cut.
+    const cutPieces: { group: number; name: string; ids: number[]; outline: number[]; near?: number[] }[] = [];
     const flats = shell.panels.map((panel, k) => {
       const flat = flattenPanel(panel.name, shell.cut ?? shell.points, shell.tris, panel.tris, seamPaths, 15, panel.upAxis, panelEdgeEase(shell, sides, k));
       if (ease < 0 || bandEase < 0) {
@@ -894,6 +909,10 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
           if (tr) trims.push(tr);
         }
       }
+      const ids = spread ? spread.points.slice() : piece.points.slice();
+      let near: number[] | undefined;
+      if (spread) { near = ids.slice(); for (const st of spread.seamStitches) if (near[st.local] < 0) near[st.local] = st.point; }
+      cutPieces.push({ group: groups.length, name: panel.name, ids, outline: piece.outline, ...(near ? { near } : {}) });
       groups.push({
         name: `${name}__${panel.name}`, rgba: panel.name.startsWith('back') ? shade(colour, 0.85) : colour, material: materialName,
         particles: piece.points.map((_, i) => particleOf(i)), tris: piece.tris.slice(),
@@ -901,6 +920,14 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
         trims,
       });
     });
+    {
+      const lines = [
+        ...shell.seams.map((sm) => ({ name: sm.name, path: sm.path, sewn: !sm.open, ...(sm.open ? { open: true } : {}) })),
+        ...shell.edges.map((e) => ({ name: e.name, path: e.path, sewn: false })),
+      ];
+      const classified = cutEdges(cutPieces, lines);
+      cutPieces.forEach((c, i) => { const f = groups[c.group].flat; if (f) { f.ids = c.ids; f.edges = classified[i]; } });
+    }
     // A spread piece hangs from the seam it is tacked to, whose points no
     // longer share its triangles' mass: half of each tacked point's mass is
     // carried on the seam, as a shared point's would be. Without, the slivers

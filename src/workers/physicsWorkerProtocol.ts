@@ -7,6 +7,7 @@ import type { OverloadCause } from '../utils/breakThresholds';
 import type { SceneGraph } from '../types/scene';
 import type { HydroBodyModel, WaterBasinWorld } from '../utils/hydrostatics';
 import type { ClothMaterialName, ClothPatternPrint } from '../types/cloth';
+import type { FlatEdge } from '../utils/cloth/patternEdges';
 import type { CoSimChannel } from '../utils/coSimLink';
 import type { ScriptStateMap } from '../utils/scriptState';
 import type { ConstraintReport } from '../utils/constraintResiduals';
@@ -95,7 +96,7 @@ export interface FlexInfo {
   /** The fabric, for how it is drawn. */
   material?: ClothMaterialName;
   /** The piece as it is cut, flat, for a garment modelled on a form (utils/cloth/clothModel FlatPattern). */
-  flat?: { uv: [number, number][]; outline: number[]; strain95: number; marks?: ClothTrimInfo[]; lines?: number[][]; darts?: number[][] };
+  flat?: { uv: [number, number][]; outline: number[]; strain95: number; marks?: ClothTrimInfo[]; lines?: number[][]; darts?: number[][]; ids?: number[]; edges?: FlatEdge[] };
   /** Studs, buttons, buttonholes, beads, zipper teeth riding on its vertices. */
   trims?: ClothTrimInfo[];
   /** Printed SVG pattern on this piece. */
