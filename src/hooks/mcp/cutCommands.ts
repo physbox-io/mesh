@@ -32,7 +32,15 @@ import { mcpMoldSubject, type MoldSubject } from '../../utils/moldSubject';
 import { isPourTooling, withoutTooling } from '../../utils/pourTooling';
 import { isNodeRotationBaked } from '../../utils/sceneTree';
 import { findNodeInScene, describeFiles } from './bridgeUtils';
-import { collectClothNodes, exportClothPatternUnfold } from '../../utils/cloth/clothSummary';
+import { collectClothNodes, DEFAULT_PATTERN_OPTIONS, exportClothPatternUnfold, stalePatternIds } from '../../utils/cloth/patternExport';
+import { staleBodies } from '../../utils/sceneSummary';
+import { modelBuiltFrom } from '../../store/modelProvenance';
+import { PAPER_SPECS, type PaperFormat } from '../../utils/tiledPaperPrint';
+import { CLOTH_MATERIALS } from '../../utils/cloth/clothMesh';
+import { patternSvg } from '../../utils/cloth/patternSvg';
+import type { ClothMaterialName } from '../../types/cloth';
+
+const PAPER_FORMATS = Object.keys(PAPER_SPECS) as PaperFormat[];
 import type { McpCommands } from './types';
 
 const KINDS = ['panels', 'contour', 'unfold'] as const;
@@ -264,22 +272,72 @@ export const cutCommands: McpCommands = {
         material: state.material,
         machine,
       };
+      // A garment is unfolded as its sewing pattern, whatever else is in the
+      // subject: the form it is fitted to is the mannequin it was cut on, not a
+      // part to unfold (a whole-scene unfold of a dress on its form unfolded
+      // the form's 42 meshes for over ten minutes). Only an explicit papercraft
+      // or sheet-metal mode unfolds the rigid bodies instead.
       const clothNodes = collectClothNodes(subject.scene.nodes);
-      const hasRigidGeoms = subject.scene.nodes.some((n) => !n.cloth && hasOwnPositiveGeoms(n));
-      const exportClothPattern = () => {
-        const clothSeamMm = seam.value ?? (rawMode === 'soft_goods' ? 10 : 0);
+      const rigidMode = rawMode === 'papercraft' || rawMode === 'sheet_metal';
+      if (clothNodes.length > 0 && !rigidMode) {
+        const built = store.model ? modelBuiltFrom().graph : null;
+        const stale = stalePatternIds(clothNodes, store.sceneGraph.nodes, staleBodies(store.sceneGraph, built));
+        const clothSeamMm = seam.value ?? DEFAULT_PATTERN_OPTIONS.seamAllowanceMm;
+        // A sheet preset that is paper prints the pattern tiled 1:1 on it.
+        const paper = sheetPreset && (PAPER_FORMATS as readonly string[]).includes(sheetPreset) ? sheetPreset as PaperFormat : undefined;
         const clothRes = exportClothPatternUnfold(clothNodes, store.sceneGraph.nodes, state.model?.flexes, {
           seamAllowanceMm: clothSeamMm,
-          title: name,
+          title: subject.label,
+          stale,
+          ...(paper ? { paper } : {}),
         });
         if (!clothRes.ok) {
           return { ok: false, error: clothRes.error, warnings: clothRes.warnings };
         }
+        const leftOut: string[] = [];
+        const walkLeft = (list: SceneNode[]) => {
+          for (const n of list) {
+            if (!n.cloth && !n.bodyForm && hasOwnPositiveGeoms(n)) leftOut.push(n.name || n.id);
+            if (n.children?.length) walkLeft(n.children);
+          }
+        };
+        walkLeft(subject.scene.nodes);
+        const warnings = [...clothRes.warnings];
+        if (leftOut.length) {
+          warnings.push(`Only the garment pattern is unfolded; ${leftOut.slice(0, 5).join(', ')}${leftOut.length > 5 ? ` and ${leftOut.length - 5} more` : ''} left out (name them in masterId with sheetMode 'papercraft' or 'sheet_metal' to unfold them).`);
+        }
+        // Said, not dropped: what a sewn garment's pattern has no use for.
+        const unused = ([
+          ['bendRadiusMm', bend.value], ['kFactor', msg.kFactor], ['tabWidthMm', tabW.value],
+          ['stitchPitchMm', stitch.value], ['scaleFactor', scale.value !== undefined && scale.value !== 1 ? scale.value : undefined],
+          ['groupByColor', rawGroupByColor === true ? true : undefined],
+        ] as [string, unknown][]).filter(([, v]) => v !== undefined && v !== null).map(([k]) => k);
+        if (unused.length) warnings.push(`Not used for a garment pattern (drawn 1:1, seams sewn, not glued or bent): ${unused.join(', ')}.`);
+        if (sheetPreset && !paper) warnings.push(`sheetPreset '${sheetPreset}' is not a paper to print on; the pattern is one sheet.`);
+        // Etch is handed the fabric's thickness; it has no fabric stock, so its material is left to choose there.
+        const fabricMm = clothRes.fabrics.map((f) => CLOTH_MATERIALS[f as ClothMaterialName]?.thickness).filter((t): t is number => typeof t === 'number');
+        const clothThick = t1.value ?? t2.value ?? (fabricMm.length ? +(Math.max(...fabricMm) * 1000).toFixed(2) : 1);
+        warnings.push(`Etch has no fabric stock: set its material and laser power for ${clothRes.fabrics.join(', ') || 'the fabric'} before cutting.`);
         const sheetW = Math.round(clothRes.layout.width);
         const sheetH = Math.round(clothRes.layout.height);
-        return pack(
+        const stem = fileSafe(`${subject.label} pattern`);
+        const enc = (t: string) => new TextEncoder().encode(t);
+        const files: Array<{ name: string; bytes: Uint8Array }> = [];
+        if (rawOnePartPerSheet === true) {
+          for (const piece of clothRes.pieceNames) {
+            const one = clothRes.pieces.filter((p) => p.name === piece);
+            files.push({ name: `${stem}_${fileSafe(piece)}.svg`, bytes: enc(patternSvg(one, `${subject.label} ${piece}`, clothRes.options)) });
+          }
+        } else {
+          files.push({ name: `${stem}.svg`, bytes: enc(clothRes.svg) });
+        }
+        if (clothRes.print) {
+          files.push({ name: `${stem}_${clothRes.print.paper}_tiled.html`, bytes: enc(clothRes.print.html) });
+          if (splitSheets) clothRes.print.pageSvgs.forEach((pg, i) => files.push({ name: `${stem}_${clothRes.print!.paper}_page_${i + 1}.svg`, bytes: enc(pg) }));
+        }
+        const reply = pack(
           clothRes.svg,
-          thick,
+          clothThick,
           {
             mode: 'soft_goods',
             pieces: clothRes.layout.pieces.length,
@@ -288,20 +346,18 @@ export const cutCommands: McpCommands = {
             widthMm: sheetW,
             heightMm: sheetH,
             seamAllowanceMm: clothRes.seamAllowanceMm,
-            glueTabs: 0,
-            omittedTabs: 0,
+            fabrics: clothRes.fabrics,
+            ...(clothRes.print ? { paper: clothRes.print.paper, printPages: clothRes.print.pages } : {}),
           },
-          clothRes.warnings,
-          [{ widthMm: sheetW, heightMm: sheetH, thicknessMm: thick }],
+          warnings,
+          [{ widthMm: sheetW, heightMm: sheetH, thicknessMm: clothThick }],
+          files,
         );
-      };
-      if (clothNodes.length > 0 && (rawMode === 'soft_goods' || !hasRigidGeoms)) {
-        return exportClothPattern();
+        return { ...reply, etch: { name: reply.etch.name, thicknessMm: clothThick, machine } };
       }
       try {
         const res = exportSheetUnfold(subject.scene, options);
         if (!res.success || !res.svg) {
-          if (clothNodes.length > 0) return exportClothPattern();
           return { ok: false, error: res.error || 'Nothing here unfolds.', warnings: res.warnings };
         }
         const sheets: EtchSheetSpec[] = res.sheets.map((s) => ({ widthMm: s.widthMm, heightMm: s.heightMm, thicknessMm: thick }));

@@ -123,8 +123,10 @@ describe('darts', () => {
     }
     const m = clothModel(g, new THREE.Matrix4(), [form, g]);
     const svg = patternSvg(m.groups.map((gr) => ({ name: gr.name, ...gr.flat! })));
-    const backPath = svg.split('\n').find((l) => l.startsWith('<path') && (l.match(/ Z/g) ?? []).length === 3);
-    expect(backPath).toBeDefined();
+    // Marked as stitching lines with their points, never cut: a fish-eye cut out was a hole with nothing to sew it by.
+    const cuts = svg.split('\n').filter((l) => l.includes('data-operation="cut"'));
+    for (const l of cuts) expect((l.match(/ Z/g) ?? []).length).toBe(1);
+    expect(svg.split('\n').filter((l) => l.includes('dart: fold and stitch')).length).toBeGreaterThanOrEqual(2);
 
     // Cut as pieces and sewn up: each dart's two sides, the same piece's points, stitched shut.
     const pieces = garmentNode('g', 'dress', { garment: 'dress', darts: [back] }, form);
