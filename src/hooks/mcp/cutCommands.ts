@@ -32,7 +32,7 @@ import { mcpMoldSubject, type MoldSubject } from '../../utils/moldSubject';
 import { isPourTooling, withoutTooling } from '../../utils/pourTooling';
 import { isNodeRotationBaked } from '../../utils/sceneTree';
 import { findNodeInScene, describeFiles } from './bridgeUtils';
-import { collectClothNodes, DEFAULT_PATTERN_OPTIONS, exportClothPatternUnfold, stalePatternIds } from '../../utils/cloth/patternExport';
+import { collectClothNodes, cutLayoutSvg, DEFAULT_PATTERN_OPTIONS, exportClothPatternUnfold, patternLines, stalePatternIds } from '../../utils/cloth/patternExport';
 import { staleBodies } from '../../utils/sceneSummary';
 import { modelBuiltFrom } from '../../store/modelProvenance';
 import { PAPER_SPECS, type PaperFormat } from '../../utils/tiledPaperPrint';
@@ -285,8 +285,25 @@ export const cutCommands: McpCommands = {
         const clothSeamMm = seam.value ?? DEFAULT_PATTERN_OPTIONS.seamAllowanceMm;
         // A sheet preset that is paper prints the pattern tiled 1:1 on it.
         const paper = sheetPreset && (PAPER_FORMATS as readonly string[]).includes(sheetPreset) ? sheetPreset as PaperFormat : undefined;
+        const rawHem = msg.hemAllowanceMm !== undefined ? msg.hemAllowanceMm : msg.hem_allowance_mm;
+        const hem = checkNonNeg(rawHem, 'hemAllowanceMm');
+        if (!hem.ok) return hem;
+        const rawByLine = msg.edgeAllowanceMm !== undefined ? msg.edgeAllowanceMm : msg.edge_allowance_mm;
+        if (rawByLine !== undefined && rawByLine !== null && (typeof rawByLine !== 'object' || Array.isArray(rawByLine)
+          || Object.values(rawByLine as Record<string, unknown>).some((v) => typeof v !== 'number' || !Number.isFinite(v) || v < 0))) {
+          return { ok: false, error: 'edgeAllowanceMm is an object of line name to a non-negative allowance in mm (e.g. the hem, a neckline).' };
+        }
+        const fabricW = checkPos(msg.fabricWidthMm !== undefined ? msg.fabricWidthMm : msg.fabric_width_mm, 'fabricWidthMm');
+        if (!fabricW.ok) return fabricW;
+        const rawFold = msg.fold;
+        if (rawFold !== undefined && rawFold !== null && typeof rawFold !== 'boolean') return { ok: false, error: 'fold must be a boolean.' };
         const clothRes = exportClothPatternUnfold(clothNodes, store.sceneGraph.nodes, state.model?.flexes, {
           seamAllowanceMm: clothSeamMm,
+          ...(hem.value !== undefined ? { hemAllowanceMm: hem.value } : {}),
+          ...(rawByLine ? { edgeAllowanceMm: rawByLine as Record<string, number> } : {}),
+          ...(typeof rawFold === 'boolean' ? { fold: rawFold } : {}),
+          ...(fabricW.value !== undefined ? { fabricWidthMm: fabricW.value } : {}),
+          ...(rawGroupByColor === true ? { groupByColour: true } : {}),
           title: subject.label,
           stale,
           ...(paper ? { paper } : {}),
@@ -310,7 +327,6 @@ export const cutCommands: McpCommands = {
         const unused = ([
           ['bendRadiusMm', bend.value], ['kFactor', msg.kFactor], ['tabWidthMm', tabW.value],
           ['stitchPitchMm', stitch.value], ['scaleFactor', scale.value !== undefined && scale.value !== 1 ? scale.value : undefined],
-          ['groupByColor', rawGroupByColor === true ? true : undefined],
         ] as [string, unknown][]).filter(([, v]) => v !== undefined && v !== null).map(([k]) => k);
         if (unused.length) warnings.push(`Not used for a garment pattern (drawn 1:1, seams sewn, not glued or bent): ${unused.join(', ')}.`);
         if (sheetPreset && !paper) warnings.push(`sheetPreset '${sheetPreset}' is not a paper to print on; the pattern is one sheet.`);
@@ -322,7 +338,16 @@ export const cutCommands: McpCommands = {
         const sheetH = Math.round(clothRes.layout.height);
         const stem = fileSafe(`${subject.label} pattern`);
         const enc = (t: string) => new TextEncoder().encode(t);
+        // First what is cut (each fabric's layout on its width: what Etch is handed), then the pattern to print or trace.
         const files: Array<{ name: string; bytes: Uint8Array }> = [];
+        if (splitSheets && clothRes.cut.layouts.length > 1) {
+          for (const l of clothRes.cut.layouts) {
+            const one = cutLayoutSvg(clothRes.pieces, [l], subject.label, clothRes.options).svg;
+            files.push({ name: `${stem}_cut_${fileSafe(l.fabric + (l.colour ? `_${l.colour.slice(1)}` : ''))}.svg`, bytes: enc(one) });
+          }
+        } else {
+          files.push({ name: `${stem}_cut_layout.svg`, bytes: enc(clothRes.cut.svg) });
+        }
         if (rawOnePartPerSheet === true) {
           for (const piece of clothRes.pieceNames) {
             const one = clothRes.pieces.filter((p) => p.name === piece);
@@ -336,13 +361,19 @@ export const cutCommands: McpCommands = {
           if (splitSheets) clothRes.print.pageSvgs.forEach((pg, i) => files.push({ name: `${stem}_${clothRes.print!.paper}_page_${i + 1}.svg`, bytes: enc(pg) }));
         }
         const reply = pack(
-          clothRes.svg,
+          clothRes.cut.svg,
           clothThick,
           {
             mode: 'soft_goods',
-            pieces: clothRes.layout.pieces.length,
+            pieces: clothRes.pieceNames.length,
             pieceNames: clothRes.pieceNames,
-            sheets: 1,
+            cutList: clothRes.layout.pieces.map((p) => ({ piece: p.name, cut: p.cut, widthMm: Math.round(p.w), heightMm: Math.round(p.h) })),
+            hemAllowanceMm: clothRes.options.hemAllowanceMm,
+            ...(clothRes.options.edgeAllowanceMm ? { edgeAllowanceMm: clothRes.options.edgeAllowanceMm } : {}),
+            lines: patternLines(clothRes.pieces),
+            fabricWidthMm: clothRes.cut.fabricWidthMm,
+            yardage: clothRes.cut.layouts.map((l) => ({ fabric: l.fabric, ...(l.colour ? { colour: l.colour } : {}), widthMm: l.widthMm, lengthMm: l.lengthMm, metres: l.metres, yards: l.yards, pieces: l.pieces })),
+            sheets: clothRes.cut.layouts.length,
             widthMm: sheetW,
             heightMm: sheetH,
             seamAllowanceMm: clothRes.seamAllowanceMm,
@@ -350,10 +381,12 @@ export const cutCommands: McpCommands = {
             ...(clothRes.print ? { paper: clothRes.print.paper, printPages: clothRes.print.pages } : {}),
           },
           warnings,
-          [{ widthMm: sheetW, heightMm: sheetH, thicknessMm: clothThick }],
+          clothRes.cut.sheets.map((sh) => ({ ...sh, thicknessMm: clothThick })),
           files,
         );
-        return { ...reply, etch: { name: reply.etch.name, thicknessMm: clothThick, machine } };
+        const { material: _m, ...etch } = reply.etch;
+        void _m;
+        return { ...reply, etch };
       }
       try {
         const res = exportSheetUnfold(subject.scene, options);

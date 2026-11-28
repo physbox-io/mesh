@@ -4,7 +4,7 @@ import type { SceneNode } from '../src/types/scene';
 import { bodyFormNode, garmentNode } from '../src/utils/cloth/clothNodes';
 import { clothModel } from '../src/utils/cloth/clothModel';
 import { layoutRects, type PatternPiece } from '../src/utils/cloth/patternSvg';
-import { printPattern } from '../src/utils/cloth/patternExport';
+import { patternLayoutOptions, printPattern } from '../src/utils/cloth/patternExport';
 import { tilePages, tileSvgForHomePrint } from '../src/utils/tiledPaperPrint';
 import { cutCommands } from '../src/hooks/mcp/cutCommands';
 import { useStore } from '../src/store/useStore';
@@ -25,10 +25,14 @@ async function exportCut(msg: Record<string, unknown>, nodes: SceneNode[]) {
 }
 
 describe('printing a sewing pattern at home', () => {
-  it('a t-shirt packs onto a handful of A4 pages, not a row of 52 (about its area in pages)', () => {
-    const pr = printPattern(pieces, 'tee', { seamAllowanceMm: 10 }, 'a4');
-    expect(pr.layout.pieces.length).toBe(pieces.length);
-    expect(pr.pages).toBeLessThanOrEqual(30);
+  it('a t-shirt packs onto a handful of A4 pages, not a row of 52', () => {
+    // Every piece whole: about its area in pages.
+    const whole = printPattern(pieces, 'tee', { seamAllowanceMm: 10 }, 'a4');
+    expect(whole.layout.pieces.length).toBe(pieces.length);
+    expect(whole.pages).toBeLessThanOrEqual(30);
+    // As a pattern is printed: pairs once, halves on the fold, with its title block.
+    const pr = printPattern(pieces, 'tee', { ...patternLayoutOptions(), titleBlock: ['tee'] }, 'a4');
+    expect(pr.pages).toBeLessThanOrEqual(18);
     // Every page printed holds part of a piece.
     const grid = tilePages(pr.layout.width, pr.layout.height, 'a4', layoutRects(pr.layout));
     expect(grid.count).toBe(pr.pages);
@@ -51,7 +55,7 @@ describe('printing a sewing pattern at home', () => {
     const s = r.summary as Record<string, unknown>;
     expect(s.paper).toBe('a4');
     expect(s.printPages).toBeGreaterThan(0);
-    expect(s.printPages).toBeLessThanOrEqual(30);
+    expect(s.printPages).toBeLessThanOrEqual(18);
     const files = r.files as { name: string; base64?: string }[];
     expect(files.some((f) => f.name.endsWith('_a4_tiled.html'))).toBe(true);
     expect(files.filter((f) => /_a4_page_\d+\.svg$/.test(f.name)).length).toBe(s.printPages);
@@ -67,6 +71,9 @@ describe('printing a sewing pattern at home', () => {
     const r = await exportCut({ kind: 'unfold', onePartPerSheet: true }, [form, tee]);
     expect(r.ok).toBe(true);
     const names = (r.summary as Record<string, unknown>).pieceNames as string[];
-    expect((r.files as unknown[]).length).toBe(names.length);
+    // The cut layout, then a file per piece.
+    const files = r.files as { name: string }[];
+    expect(files[0].name).toMatch(/_cut_layout\.svg$/);
+    expect(files.length).toBe(names.length + 1);
   }, 120_000);
 });

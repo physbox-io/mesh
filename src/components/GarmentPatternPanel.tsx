@@ -1,10 +1,13 @@
 import { useMemo, useState } from 'react';
-import { Printer, Scissors } from 'lucide-react';
+import { ExternalLink, Printer, Ruler, Scissors } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import type { SceneNode } from '../types/scene';
 import type { ModelMirror } from '../types/sceneLayer';
 import { layoutPattern, patternSvg } from '../utils/cloth/patternSvg';
-import { DEFAULT_PATTERN_OPTIONS, garmentPatternPieces, printPattern, printWidth, stalePatternIds } from '../utils/cloth/patternExport';
+import { cutLayoutSvg, DEFAULT_PATTERN_OPTIONS, FABRIC_WIDTHS_MM, fabricLayouts, garmentPatternPieces, patternLayoutOptions, patternLines, patternTitle, printPattern, printWidth, stalePatternIds } from '../utils/cloth/patternExport';
+import { buildEtchHandoffUrl, openInEtch } from '../utils/etchHandoff';
+import { CLOTH_MATERIALS } from '../utils/cloth/clothMesh';
+import type { ClothMaterialName } from '../types/cloth';
 import { staleBodies } from '../utils/sceneSummary';
 import { modelBuiltFrom } from '../store/modelProvenance';
 import { downloadBlob } from '../utils/downloadBlob';
@@ -34,13 +37,27 @@ export function GarmentPatternPanel({ nodes, title, fill }: {
   // Changed since the model was built (the garment or its form): what the model has is the old pattern.
   const stale = useMemo(() => stalePatternIds(nodes, sceneNodes, staleBodies(sceneGraph, model ? modelBuiltFrom().graph : null)).size > 0, [nodes, sceneNodes, sceneGraph, model]);
   const [seamAllowanceMm, setSeamAllowanceMm] = useState<number>(DEFAULT_PATTERN_OPTIONS.seamAllowanceMm);
+  const [hemAllowanceMm, setHemAllowanceMm] = useState<number>(DEFAULT_PATTERN_OPTIONS.hemAllowanceMm);
+  const [edgeAllowanceMm, setEdgeAllowanceMm] = useState<Record<string, number>>({});
+  const [fold, setFold] = useState<boolean>(DEFAULT_PATTERN_OPTIONS.fold);
+  const [showEdges, setShowEdges] = useState(false);
   const [paperFormat, setPaperFormat] = useState<PaperFormat>('a4');
+  const [fabricWidthMm, setFabricWidthMm] = useState<number>(DEFAULT_PATTERN_OPTIONS.fabricWidthMm);
+  const [byColour, setByColour] = useState(false);
+  const [etchError, setEtchError] = useState<string | null>(null);
   // From the compiled model only: modelling a garment again here would stall the editor.
   const pieces = useMemo(() => garmentPatternPieces(nodes, sceneNodes, model?.flexes, { build: false }).pieces, [nodes, sceneNodes, model]);
-  const layout = useMemo(() => layoutPattern(pieces, { seamAllowanceMm }), [pieces, seamAllowanceMm]);
+  const lines = useMemo(() => patternLines(pieces), [pieces]);
+  const opts = useMemo(() => {
+    const base = patternLayoutOptions({ seamAllowanceMm, hemAllowanceMm, edgeAllowanceMm, fold });
+    return { ...base, titleBlock: patternTitle(nodes, sceneNodes, pieces, base) };
+  }, [seamAllowanceMm, hemAllowanceMm, edgeAllowanceMm, fold, nodes, sceneNodes, pieces]);
+  const layout = useMemo(() => layoutPattern(pieces, opts), [pieces, opts]);
+  // Each fabric's pieces on its width, along the grain: the cut layout and what to buy.
+  const fabrics = useMemo(() => (pieces.length ? fabricLayouts(pieces, opts, fabricWidthMm, byColour) : []), [pieces, opts, fabricWidthMm, byColour]);
   const u = layout.width / 250;
   // Packed to print on the fewest pages of the paper chosen, blank pages left out.
-  const pages = useMemo(() => (pieces.length ? printWidth(pieces, { seamAllowanceMm }, paperFormat).pages : 0), [pieces, seamAllowanceMm, paperFormat]);
+  const pages = useMemo(() => (pieces.length ? printWidth(pieces, opts, paperFormat).pages : 0), [pieces, opts, paperFormat]);
   const legend = useMemo(() => {
     const kinds = new Set(layout.pieces.flatMap((p) => p.marks.map((m) => m.kind)));
     const out: [string, string, boolean][] = [];
@@ -53,7 +70,7 @@ export function GarmentPatternPanel({ nodes, title, fill }: {
   if (pieces.length === 0) {
     return <div className="text-xs text-slate-500 dark:text-slate-400">Built with the scene; run or rebuild to lay the pieces out.</div>;
   }
-  const svg = () => patternSvg(pieces, title, { seamAllowanceMm });
+  const svg = () => patternSvg(pieces, title, opts);
   return (
     <>
       {stale && (
@@ -77,7 +94,11 @@ export function GarmentPatternPanel({ nodes, title, fill }: {
             {p.marks.map((m, i) => (m.kind === 'zipper'
               ? <circle key={i} cx={m.x} cy={m.y} r={1.3 * u} fill={OVERLAY.zipper} />
               : <circle key={i} cx={m.x} cy={m.y} r={Math.max(2 * u, m.r)} fill="#fff" stroke={OVERLAY.trim} strokeWidth={0.7 * u} />))}
-            <text x={p.x + p.w / 2} y={p.y + p.h + 14} fontSize={Math.max(8, layout.width / 40)} textAnchor="middle" fill="#64748b">{p.name}</text>
+            {p.notches.map((n, i) => <line key={`n${i}`} x1={n.x1} y1={n.y1} x2={n.x2} y2={n.y2} stroke="#334" strokeWidth={0.8 * u} />)}
+            {p.fold && <line x1={p.fold.x} y1={p.fold.y0} x2={p.fold.x} y2={p.fold.y1} stroke="#16a34a" strokeWidth={1.2 * u} />}
+            {p.grain && <line x1={p.grain.x} y1={p.grain.y0} x2={p.grain.x} y2={p.grain.y1} stroke="#94a3b8" strokeWidth={0.6 * u} />}
+            <text x={p.label.x} y={p.label.y} fontSize={Math.max(8, layout.width / 45)} textAnchor="middle" fill="#334155">{p.name}</text>
+            <text x={p.label.x} y={p.label.y + Math.max(9, layout.width / 40)} fontSize={Math.max(6, layout.width / 60)} textAnchor="middle" fill="#64748b">{p.cut}</text>
           </g>
         ))}
       </svg>
@@ -92,8 +113,8 @@ export function GarmentPatternPanel({ nodes, title, fill }: {
       )}
       <ul className="text-[10px] text-slate-500 dark:text-slate-400 grid grid-cols-2 gap-x-2">
         {layout.pieces.map((p) => (
-          <li key={p.name} title="The width and height of the piece, and how far 95% of it had to give to lie flat: under a few percent cuts as it is; more wants a dart or a stretch fabric.">
-            {p.name}: {Math.round(p.w)}×{Math.round(p.h)} mm, {(p.strain95 * 100).toFixed(0)}%
+          <li key={p.name} title="How many to cut, its size with allowances, and how far the fabric must stretch (or be eased and pressed) to take its shape: within the fabric's give it sews as cut; more wants a dart or a stretchier fabric.">
+            {p.name}: {p.cut.toLowerCase()}, {Math.round(p.w)}×{Math.round(p.h)} mm{p.strain95 >= 0.02 ? `, stretch to fit ${(p.strain95 * 100).toFixed(0)}%` : ''}
           </li>
         ))}
       </ul>
@@ -106,6 +127,109 @@ export function GarmentPatternPanel({ nodes, title, fill }: {
         />
         <span className="tabular-nums font-mono w-11 text-right">{seamAllowanceMm} mm</span>
       </div>
+      <div className="flex items-center gap-2 text-[11px] text-slate-600 dark:text-slate-300" title="Allowance turned up on the hem, cuffs and leg ends">
+        <span className="font-medium shrink-0">Hem allowance</span>
+        <input
+          type="range" min={0} max={60} step={1} value={hemAllowanceMm}
+          onChange={(e) => setHemAllowanceMm(parseInt(e.target.value, 10) || 0)}
+          className="flex-1 accent-purple-600 cursor-pointer"
+        />
+        <span className="tabular-nums font-mono w-11 text-right">{hemAllowanceMm} mm</span>
+      </div>
+      <label className="flex items-center gap-2 text-[11px] text-slate-600 dark:text-slate-300 cursor-pointer" title="Draw each mirrored pair once, to cut 2, and each piece that is the same either side of its middle as a half, to cut on the fold">
+        <input type="checkbox" checked={fold} onChange={(e) => setFold(e.target.checked)} className="accent-purple-600" />
+        Pairs once, symmetric pieces on the fold
+      </label>
+      {lines.length > 0 && (
+        <div className="text-[11px] text-slate-600 dark:text-slate-300">
+          <button type="button" onClick={() => setShowEdges((v) => !v)} className="font-medium hover:text-purple-600 cursor-pointer" aria-expanded={showEdges}>
+            {showEdges ? '▾' : '▸'} Allowance by edge{Object.keys(edgeAllowanceMm).length ? ` (${Object.keys(edgeAllowanceMm).length} set)` : ''}
+          </button>
+          {showEdges && (
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1 mt-1">
+              {lines.map((ln) => (
+                <label key={ln} className="flex items-center justify-between gap-1" title={`Allowance on ${ln}, mm; empty uses the ${ln === 'hem' || ln === 'end' || ln.startsWith('cuff') ? 'hem' : 'seam'} allowance`}>
+                  <span className="truncate">{ln}</span>
+                  <input
+                    type="number" min={0} max={80} step={1}
+                    value={edgeAllowanceMm[ln] ?? ''}
+                    placeholder="—"
+                    onChange={(e) => setEdgeAllowanceMm((prev) => {
+                      const next = { ...prev };
+                      const v = parseFloat(e.target.value);
+                      if (e.target.value === '' || !Number.isFinite(v) || v < 0) delete next[ln]; else next[ln] = v;
+                      return next;
+                    })}
+                    className="w-14 px-1 py-0.5 border border-slate-200 dark:border-slate-700 rounded bg-white dark:bg-slate-900 text-right font-mono"
+                  />
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      <div className="flex items-center gap-2 pt-1 border-t border-slate-200/70 dark:border-slate-800 text-[11px] text-slate-600 dark:text-slate-300" title="The fabric's width, selvedge to selvedge: the pieces are laid on it along the grain, single layer, to say how much to buy">
+        <Ruler className="w-3.5 h-3.5 shrink-0 text-purple-600 dark:text-purple-400" />
+        <span className="font-medium shrink-0">Fabric width</span>
+        <select
+          value={(FABRIC_WIDTHS_MM as readonly number[]).includes(fabricWidthMm) ? fabricWidthMm : 'custom'}
+          onChange={(e) => { if (e.target.value !== 'custom') setFabricWidthMm(parseInt(e.target.value, 10)); }}
+          aria-label="Fabric width"
+          className="px-1.5 py-1 border border-slate-200 dark:border-slate-700 rounded bg-white dark:bg-slate-900 cursor-pointer"
+        >
+          {FABRIC_WIDTHS_MM.map((w) => <option key={w} value={w}>{w / 10} cm</option>)}
+          <option value="custom">Other</option>
+        </select>
+        <input
+          type="number" min={300} max={3200} step={10} value={fabricWidthMm}
+          onChange={(e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v) && v >= 300) setFabricWidthMm(v); }}
+          aria-label="Fabric width in mm"
+          className="w-16 px-1 py-0.5 border border-slate-200 dark:border-slate-700 rounded bg-white dark:bg-slate-900 text-right font-mono"
+        />
+        <span>mm</span>
+      </div>
+      <label className="flex items-center gap-2 text-[11px] text-slate-600 dark:text-slate-300 cursor-pointer" title="A cut layout for each colour of each fabric, not each fabric alone">
+        <input type="checkbox" checked={byColour} onChange={(e) => setByColour(e.target.checked)} className="accent-purple-600" />
+        A layout per colour
+      </label>
+      <ul className="text-[11px] text-slate-600 dark:text-slate-300">
+        {fabrics.map((f) => (
+          <li key={`${f.fabric}${f.colour ?? ''}`} title={`${f.pieces.join(', ')}, single layer, grain along the selvedge`}>
+            <span className="font-semibold">{f.fabric}{f.colour ? ` ${f.colour}` : ''}</span>: buy {f.metres.toFixed(1)} m ({f.yards} yd) of {Math.round(f.widthMm / 10)} cm
+            {f.tooWide.length > 0 && <span className="text-amber-700 dark:text-amber-300"> · {f.tooWide.join(', ')} wider than the fabric</span>}
+          </li>
+        ))}
+      </ul>
+      <div className="flex items-center gap-1.5">
+        <button
+          disabled={stale}
+          onClick={() => downloadBlob(new Blob([cutLayoutSvg(pieces, fabrics, title, opts).svg], { type: 'image/svg+xml' }), `${fileStem(title)}_cut_layout.svg`)}
+          className="flex items-center justify-center gap-1.5 flex-1 py-1.5 px-2 border border-slate-200 dark:border-slate-700 rounded-lg text-[11px] font-semibold text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+          title="Download each fabric's pieces laid on its width, every piece whole and once, to cut single layer (a laser, a rotary cutter)"
+        >
+          <Scissors className="w-3.5 h-3.5" /> Cut layout (SVG)
+        </button>
+        <button
+          disabled={stale}
+          onClick={async () => {
+            setEtchError(null);
+            const thick = Math.max(...fabrics.map((f) => CLOTH_MATERIALS[f.fabric as ClothMaterialName]?.thickness ?? 0.001)) * 1000;
+            try {
+              await openInEtch(async () => {
+                const c = cutLayoutSvg(pieces, fabrics, title, opts);
+                return buildEtchHandoffUrl({ svg: c.svg, name: `${title} cut layout`, thicknessMm: +thick.toFixed(2), machine: 'laser', sheets: c.sheets.map((sh) => ({ widthMm: sh.widthMm, heightMm: sh.heightMm, thicknessMm: +thick.toFixed(2) })) });
+              });
+            } catch (err) {
+              setEtchError(err instanceof Error ? err.message : 'Could not send the cut layout to Etch.');
+            }
+          }}
+          className="flex items-center justify-center gap-1.5 flex-1 py-1.5 px-2 border border-slate-200 dark:border-slate-700 rounded-lg text-[11px] font-semibold text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+          title="Open the cut layout in Etch at the fabric's thickness; Etch has no fabric stock, so set its material and power there"
+        >
+          <ExternalLink className="w-3.5 h-3.5" /> Open in Etch
+        </button>
+      </div>
+      {etchError && <div className="text-[11px] text-red-600 dark:text-red-400">{etchError}</div>}
       <button
         disabled={stale}
         onClick={() => downloadBlob(new Blob([svg()], { type: 'image/svg+xml' }), `${fileStem(title)}_pattern.svg`)}
@@ -127,7 +251,7 @@ export function GarmentPatternPanel({ nodes, title, fill }: {
           type="button"
           disabled={stale}
           onClick={() => {
-            const pr = printPattern(pieces, title, { seamAllowanceMm }, paperFormat);
+            const pr = printPattern(pieces, title, opts, paperFormat);
             openTiledPrintWindow(pr.svg, { paper: paperFormat, title: `${title} sewing pattern`, fileStem: `${fileStem(title)}_pattern`, occupied: layoutRects(pr.layout) });
           }}
           className="flex items-center justify-center gap-1.5 flex-1 py-1.5 px-2.5 border border-indigo-200 dark:border-indigo-800 rounded-lg text-xs font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/40 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 transition-colors shadow-xs cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
