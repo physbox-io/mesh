@@ -148,7 +148,10 @@ export function buildClothWorld(
   // How far each zip is done up, as the graph asks: done to the cloth as it
   // runs (its slider moved), not built into it.
   const zipsAsked = new Map<string, number>();
-  const models = cloths.map(({ node, world }, i) => {
+  // The same cloth in the last build, by name: one added or deleted before it moves the rest along.
+  const prevIndex = new Map((previous?.models ?? []).map((m, j) => [m.name, j]));
+  const prevOf: (number | undefined)[] = [];
+  const models = cloths.map(({ node, world }) => {
     const draft = node.cloth?.garment, form = formNode(node);
     const cut = draft ? (form?.bodyForm ?? draft.form ?? null) : null;
     const trims = draft ? garmentSettings(draft).trims : undefined;
@@ -161,16 +164,19 @@ export function buildClothWorld(
     const key = JSON.stringify([node.name || node.id, loose, Array.from(world.elements), cut]);
     keys.push(key);
     formBuilds.push(form ? JSON.stringify([form.bodyFormBuilt ?? null, form.geoms?.filter((g) => g.csgDerived !== 'collider' && !g.colliderOf).length ?? 0]) : null);
+    const j = prevIndex.get(node.name || node.id);
+    prevOf.push(j !== undefined && previous?.keys[j] === key ? j : undefined);
+    const pj = j ?? -1;
     // Exact cache includes visual colours/prints so group FlexInfo stays accurate;
     // `key` strips visual fields and zipper state so carrying across a rebuild preserves ClothSim state!
     let m = modelCache.get(exact);
-    if (!m && carry && previous?.keys[i] === key && previous.models?.[i]) {
-      const prevExact = JSON.stringify([node.name || node.id, previous.models[i].groups.map((g) => [g.rgba, g.pattern, g.trims?.map((t) => t.rgba)])]);
+    if (!m && carry && pj >= 0 && previous?.keys[pj] === key && previous.models?.[pj]) {
+      const prevExact = JSON.stringify([node.name || node.id, previous.models[pj].groups.map((g) => [g.rgba, g.pattern, g.trims?.map((t) => t.rgba)])]);
       const wantVisualChanged = !node.cloth?.garment && !node.cloth?.pieces
         ? false
         : prevExact !== JSON.stringify([
           node.name || node.id,
-          previous.models[i].groups.map((g) => {
+          previous.models[pj].groups.map((g) => {
             const pName = g.name.slice((node.name || node.id).length + 2);
             const pc = node.cloth?.pieces?.find((q) => q.name === pName);
             const rgba = pc ? (pc.rgba ?? [0.25, 0.5, 0.85, 1]) : (node.cloth?.garment?.rgba ?? g.rgba);
@@ -179,15 +185,15 @@ export function buildClothWorld(
           }),
         ]);
       if (!wantVisualChanged && !node.cloth?.garment?.trims?.some((t) => t.rgba) && !node.cloth?.garment?.pockets?.some((p) => p.rgba) && !(typeof node.cloth?.garment?.belt === 'object' && node.cloth.garment.belt?.rgba) && !node.cloth?.garment?.collar?.rgba && !node.cloth?.garment?.attached?.some((a) => a.rgba || a.pattern) && !node.cloth?.pieces?.some((p) => p.trims?.some((t) => t.rgba)) && !node.cloth?.fasten?.some((f) => f.trim?.rgba)) {
-        m = previous.models[i];
+        m = previous.models[pj];
       } else if (!node.cloth?.garment && node.cloth?.pieces) {
         // Fast clone of plain-piece groups with updated piece rgba/pattern when no trim colours changed:
         const hasTrimRgba = node.cloth.pieces.some((p) => p.trims?.some((t) => t.rgba)) || node.cloth.fasten?.some((f) => f.trim?.rgba);
         if (!hasTrimRgba) {
           const prefix = `${node.name || node.id}__`;
           m = {
-            ...previous.models[i],
-            groups: previous.models[i].groups.map((g) => {
+            ...previous.models[pj],
+            groups: previous.models[pj].groups.map((g) => {
               const pc = node.cloth!.pieces!.find((q) => `${prefix}${q.name}` === g.name);
               return pc ? { ...g, rgba: pc.rgba ?? [0.25, 0.5, 0.85, 1], pattern: pc.pattern } : g;
             }),
@@ -196,8 +202,8 @@ export function buildClothWorld(
       } else if (node.cloth?.garment && !node.cloth.garment.trims?.some((t) => t.rgba) && !node.cloth.garment.pockets?.some((p) => p.rgba) && !(typeof node.cloth.garment.belt === 'object' && node.cloth.garment.belt?.rgba) && !node.cloth.garment.collar?.rgba && !node.cloth.garment.attached?.some((a) => a.rgba || a.pattern)) {
         const gRgba = garmentSettings(node.cloth.garment).rgba ?? [0.28, 0.36, 0.52, 1];
         m = {
-          ...previous.models[i],
-          groups: previous.models[i].groups.map((g) => ({ ...g, rgba: gRgba })),
+          ...previous.models[pj],
+          groups: previous.models[pj].groups.map((g) => ({ ...g, rgba: gRgba })),
         };
       }
     }
@@ -228,15 +234,26 @@ export function buildClothWorld(
     id >= 0 && id < model.ngeom ? writeFromMujoco(geomScratch, data.geom_xmat, 9 * id, data.geom_xpos, id) : null;
   const sim = new ClothSim(models, [...sceneColliders(scene.nodes, true, true), ...mujocoMeshColliders(mujoco, model, scene.nodes)]);
   sim.setPoses(bodyPose, geomPose);
-  const sameForm = (i: number) => formBuilds[i] === null || previous!.formBuilds?.[i] === formBuilds[i];
-  const carried = seedClothState
-    ? sim.restore(seedClothState)
-    : (carry && previous && previous.keys.length === keys.length && previous.keys.every((k, i) => k === keys[i] && sameForm(i)) && sim.restore(previous.sim.state()));
+  // Each cloth carried over as it was if it is the same cloth on the same
+  // build of its form; if every one is, the whole state is, else those that
+  // are, and only the rest are sewn and settled (one garment's edit re-sewed
+  // a scene of seven from their modelled starts).
+  const same = keys.map((_, i) => {
+    const j = prevOf[i];
+    return j !== undefined && (formBuilds[i] === null || previous!.formBuilds?.[j] === formBuilds[i]) ? j : undefined;
+  });
+  let carriedEach: boolean[];
+  if (seedClothState) { const ok = sim.restore(seedClothState); carriedEach = keys.map(() => ok); }
+  else if (!carry || !previous) carriedEach = keys.map(() => false);
+  else if (previous.keys.length === keys.length && same.every((j, i) => j === i) && sim.restore(previous.sim.state())) carriedEach = keys.map(() => true);
+  else carriedEach = sim.carryCloths(previous.sim, same.flatMap((j, i) => (j === undefined ? [] : [[i, j] as [number, number]])));
+  const clothIndex = new Map(models.map((m, i) => [m.name, i]));
   // A zip the graph now asks to be done up further or less, done so as it
   // runs; otherwise each as it was carried (moved by its slider since).
   for (const [k, f] of zipsAsked) {
-    const cut = k.lastIndexOf('#');
-    if (!carried || (!seedClothState && previous && previous.zipsAsked?.get(k) !== f)) sim.setZip(k.slice(0, cut), Number(k.slice(cut + 1)), f);
+    const cut = k.lastIndexOf('#'), name = k.slice(0, cut);
+    const carried = carriedEach[clothIndex.get(name) ?? -1] ?? false;
+    if (!carried || (!seedClothState && previous && previous.zipsAsked?.get(k) !== f)) sim.setZip(name, Number(k.slice(cut + 1)), f);
   }
   // Settled before it is first drawn: a paused scene shows the cloth at rest, not as modelled.
   sim.settleNow();
