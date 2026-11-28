@@ -18,7 +18,58 @@ import { tileGeometry, tilePages, tileSvgForHomePrint, type PaperFormat } from '
 export const DEFAULT_PATTERN_OPTIONS = {
   /** Outward seam allowance, mm: 10 suits woven seams, 6 overlocked knits. */
   seamAllowanceMm: 10,
+  /** Allowance on the hem, cuffs and leg ends, turned up, mm. */
+  hemAllowanceMm: 25,
+  /** Mirror pairs drawn once (cut 2), symmetric pieces halved on the fold (cut 1 on fold). */
+  fold: true,
 } as const;
+
+/** What an export of a pattern can be asked for, editor and MCP alike. */
+export interface GarmentPatternOptions {
+  seamAllowanceMm?: number;
+  hemAllowanceMm?: number;
+  /** Allowance by line name, mm, over the two above. */
+  edgeAllowanceMm?: Record<string, number>;
+  fold?: boolean;
+}
+
+/** The layout options a pattern sheet is drawn with: the defaults under what was asked. */
+export function patternLayoutOptions(o: GarmentPatternOptions = {}): PatternLayoutOptions {
+  return {
+    seamAllowanceMm: Math.max(0, o.seamAllowanceMm ?? DEFAULT_PATTERN_OPTIONS.seamAllowanceMm),
+    hemAllowanceMm: Math.max(0, o.hemAllowanceMm ?? DEFAULT_PATTERN_OPTIONS.hemAllowanceMm),
+    ...(o.edgeAllowanceMm && Object.keys(o.edgeAllowanceMm).length ? { edgeAllowanceMm: o.edgeAllowanceMm } : {}),
+    fold: o.fold ?? DEFAULT_PATTERN_OPTIONS.fold,
+  };
+}
+
+/** Every line name the pieces' edges lie on, for allowances by edge. */
+export function patternLines(pieces: PatternPiece[]): string[] {
+  return [...new Set(pieces.flatMap((p) => (p.edges ?? []).map((e) => e.line).filter((l): l is string => !!l)))].sort();
+}
+
+/**
+ * A title block's lines: the garments, the form each is fitted to and its
+ * measurements, the fabrics, the allowances, how to read the marks.
+ */
+export function patternTitle(clothNodes: SceneNode[], allSceneNodes: SceneNode[], pieces: PatternPiece[], o: PatternLayoutOptions): string[] {
+  const forms = new Map<string, SceneNode>();
+  const walk = (list: SceneNode[]) => { for (const n of list) { if (n.bodyForm) forms.set(n.name || n.id, n); if (n.children?.length) walk(n.children); } };
+  walk(allSceneNodes);
+  const lines = [`${clothNodes.map((n) => n.name || n.id).join(' + ')}: sewing pattern`];
+  for (const fit of new Set(clothNodes.map((n) => n.cloth?.garment?.fitTo).filter((f): f is string => !!f))) {
+    const m = forms.get(fit)?.bodyForm;
+    if (m) lines.push(`Size: fitted to ${fit}, height ${Math.round(m.height * 1000)}, chest ${Math.round(m.chest * 1000)}, waist ${Math.round(m.waist * 1000)}, hip ${Math.round(m.hip * 1000)} mm`);
+  }
+  const fabrics = [...new Set(pieces.map((p) => p.fabric).filter((f): f is string => !!f))];
+  if (fabrics.length) lines.push(`Fabric: ${fabrics.join(', ')}`);
+  const sa = o.seamAllowanceMm ?? 0, hem = o.hemAllowanceMm ?? sa;
+  const byLine = Object.entries(o.edgeAllowanceMm ?? {}).map(([k, v]) => `${k} ${v}`).join(', ');
+  lines.push(sa > 0 ? `${sa} mm seam allowance included, hem ${hem} mm${byLine ? `; ${byLine} mm` : ''}` : `Net sewing lines: add your own allowance${hem > 0 ? ` (hem ${hem} mm included)` : ''}`);
+  lines.push('Grain arrows parallel to the selvedge. Match notches;');
+  lines.push('dashed: stitching lines and darts (fold, stitch, never cut).');
+  return lines;
+}
 
 /** Every `cloth` node in a scene subtree. */
 export function collectClothNodes(nodes: SceneNode[]): SceneNode[] {
@@ -148,28 +199,29 @@ export function exportClothPatternUnfold(
   clothNodes: SceneNode[],
   allSceneNodes: SceneNode[],
   modelFlexes: ModelMirror['flexes'] | undefined,
-  options?: { seamAllowanceMm?: number; title?: string; stale?: Set<string>; paper?: PaperFormat },
+  options?: GarmentPatternOptions & { title?: string; stale?: Set<string>; paper?: PaperFormat },
 ): ClothPatternUnfoldResult | ClothPatternUnfoldError {
-  const seamAllowanceMm = Math.max(0, options?.seamAllowanceMm ?? DEFAULT_PATTERN_OPTIONS.seamAllowanceMm);
+  const base = patternLayoutOptions(options);
+  const seamAllowanceMm = base.seamAllowanceMm!;
   const { pieces, warnings } = garmentPatternPieces(clothNodes, allSceneNodes, modelFlexes, { stale: options?.stale });
   if (pieces.length === 0) {
     return { ok: false, error: 'No flat 2D garment pattern pieces could be extracted from the selected cloth bodies.', warnings };
   }
   const title = options?.title ?? (clothNodes.length === 1 ? `${clothNodes[0].name || clothNodes[0].id} pattern` : 'garment pattern');
   const fabrics = [...new Set(pieces.map((p) => p.fabric).filter((f): f is string => !!f))];
-  const opts: PatternLayoutOptions = { seamAllowanceMm };
+  const opts: PatternLayoutOptions = { ...base, titleBlock: patternTitle(clothNodes, allSceneNodes, pieces, base) };
   if (options?.paper) {
     const pr = printPattern(pieces, title, opts, options.paper);
     if (pr.layout.pieces.length === 0) return { ok: false, error: 'Cloth pattern pieces had degenerate outlines (fewer than 3 points).', warnings };
     const { svg, layout, ...print } = pr;
-    return { ok: true, svg, layout, seamAllowanceMm, pieceNames: layout.pieces.map((p) => p.name), warnings, print, fabrics, pieces, options: opts };
+    return { ok: true, svg, layout, seamAllowanceMm, pieceNames: pieces.map((p) => p.name), warnings, print, fabrics, pieces, options: opts };
   }
   const layout = layoutPattern(pieces, opts);
   if (layout.pieces.length === 0) {
     return { ok: false, error: 'Cloth pattern pieces had degenerate outlines (fewer than 3 points).', warnings };
   }
   const svg = patternSvg(pieces, title, opts);
-  return { ok: true, svg, layout, seamAllowanceMm, pieceNames: layout.pieces.map((p) => p.name), warnings, fabrics, pieces, options: opts };
+  return { ok: true, svg, layout, seamAllowanceMm, pieceNames: pieces.map((p) => p.name), warnings, fabrics, pieces, options: opts };
 }
 
 /**

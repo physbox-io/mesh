@@ -32,7 +32,7 @@ import { mcpMoldSubject, type MoldSubject } from '../../utils/moldSubject';
 import { isPourTooling, withoutTooling } from '../../utils/pourTooling';
 import { isNodeRotationBaked } from '../../utils/sceneTree';
 import { findNodeInScene, describeFiles } from './bridgeUtils';
-import { collectClothNodes, DEFAULT_PATTERN_OPTIONS, exportClothPatternUnfold, stalePatternIds } from '../../utils/cloth/patternExport';
+import { collectClothNodes, DEFAULT_PATTERN_OPTIONS, exportClothPatternUnfold, patternLines, stalePatternIds } from '../../utils/cloth/patternExport';
 import { staleBodies } from '../../utils/sceneSummary';
 import { modelBuiltFrom } from '../../store/modelProvenance';
 import { PAPER_SPECS, type PaperFormat } from '../../utils/tiledPaperPrint';
@@ -285,8 +285,21 @@ export const cutCommands: McpCommands = {
         const clothSeamMm = seam.value ?? DEFAULT_PATTERN_OPTIONS.seamAllowanceMm;
         // A sheet preset that is paper prints the pattern tiled 1:1 on it.
         const paper = sheetPreset && (PAPER_FORMATS as readonly string[]).includes(sheetPreset) ? sheetPreset as PaperFormat : undefined;
+        const rawHem = msg.hemAllowanceMm !== undefined ? msg.hemAllowanceMm : msg.hem_allowance_mm;
+        const hem = checkNonNeg(rawHem, 'hemAllowanceMm');
+        if (!hem.ok) return hem;
+        const rawByLine = msg.edgeAllowanceMm !== undefined ? msg.edgeAllowanceMm : msg.edge_allowance_mm;
+        if (rawByLine !== undefined && rawByLine !== null && (typeof rawByLine !== 'object' || Array.isArray(rawByLine)
+          || Object.values(rawByLine as Record<string, unknown>).some((v) => typeof v !== 'number' || !Number.isFinite(v) || v < 0))) {
+          return { ok: false, error: 'edgeAllowanceMm is an object of line name to a non-negative allowance in mm (e.g. the hem, a neckline).' };
+        }
+        const rawFold = msg.fold;
+        if (rawFold !== undefined && rawFold !== null && typeof rawFold !== 'boolean') return { ok: false, error: 'fold must be a boolean.' };
         const clothRes = exportClothPatternUnfold(clothNodes, store.sceneGraph.nodes, state.model?.flexes, {
           seamAllowanceMm: clothSeamMm,
+          ...(hem.value !== undefined ? { hemAllowanceMm: hem.value } : {}),
+          ...(rawByLine ? { edgeAllowanceMm: rawByLine as Record<string, number> } : {}),
+          ...(typeof rawFold === 'boolean' ? { fold: rawFold } : {}),
           title: subject.label,
           stale,
           ...(paper ? { paper } : {}),
@@ -340,8 +353,12 @@ export const cutCommands: McpCommands = {
           clothThick,
           {
             mode: 'soft_goods',
-            pieces: clothRes.layout.pieces.length,
+            pieces: clothRes.pieceNames.length,
             pieceNames: clothRes.pieceNames,
+            cutList: clothRes.layout.pieces.map((p) => ({ piece: p.name, cut: p.cut, widthMm: Math.round(p.w), heightMm: Math.round(p.h) })),
+            hemAllowanceMm: clothRes.options.hemAllowanceMm,
+            ...(clothRes.options.edgeAllowanceMm ? { edgeAllowanceMm: clothRes.options.edgeAllowanceMm } : {}),
+            lines: patternLines(clothRes.pieces),
             sheets: 1,
             widthMm: sheetW,
             heightMm: sheetH,
