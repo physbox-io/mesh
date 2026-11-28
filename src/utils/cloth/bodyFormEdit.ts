@@ -53,7 +53,9 @@ export function applySkinTone(geoms: SceneGeom[], skinTone?: number | null): Sce
  */
 export function finishBodyFormGeoms(geoms: SceneGeom[], skinTone?: number | null): SceneGeom[] {
   const rgba = skinTone !== undefined ? skinToneRgba(skinTone) : undefined;
-  const holder = { geoms: geoms.map((g) => ({ ...g, internal: true, ...(rgba ? { rgba: [...rgba] } : {}) })) } as unknown as SceneNode;
+  // Its meshes are made from its measurements and replaced, not edited, when they change: each goes
+  // into the physics worker's file cache on its first build (sent as XML text, a form was 4.5 MB of it).
+  const holder = { geoms: geoms.map((g) => ({ ...g, internal: true, ...(g.type === 'mesh' ? { stableMesh: true } : {}), ...(rgba ? { rgba: [...rgba] } : {}) })) } as unknown as SceneNode;
   promoteMeshGeomsToDynamic(holder);
   return holder.geoms;
 }
