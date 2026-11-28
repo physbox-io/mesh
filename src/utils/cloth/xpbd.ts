@@ -24,7 +24,7 @@ import { SelfContacts } from './clothSelf';
 import { BoardShapes, type Board } from './clothBoards';
 import { contourStep, findCrossings, trianglesNear, untangleMesh, type UntangleMesh } from './clothUntangle';
 import { ClothCcd } from './clothCcd';
-import { colliderContactInto, type Collider, type ContactOut } from './clothColliders';
+import { colliderContactInto, colliderLipschitz, type Collider, type ContactOut } from './clothColliders';
 import { clothBendRigidity } from './clothMesh';
 
 /** Substep, seconds. */
@@ -186,6 +186,8 @@ export class ClothSim {
   private carryStitch: Uint8Array | null = null;
   /** Which cloths a settle after carrying (carryCloths) needs: what moves, and what it can meet. */
   private carryInvolved: boolean[] | null = null;
+  /** The lookups the colliders and ties were last posed from (setPoses), to pose a sim of some of this cloth alike. */
+  private posedBy: [(body: string) => THREE.Matrix4 | null, (geom: number) => THREE.Matrix4 | null] | null = null;
   private carryClock = 0; private carryAccumulator = 0;
   /** Each zip: its cloth, its trim, its pairs' stitches and places up the run (0-1), its length (m), how far it is done up and where its slider is being moved to. */
   private zips: { cloth: string; trim: number; stitch: Int32Array; at: Float64Array; length: number; fastened: number; want: number }[] = [];
@@ -256,6 +258,18 @@ export class ClothSim {
   private nearest: Float64Array;
   private skip: Uint8Array;
   private activeCollideIdx: Int32Array;
+  /**
+   * Per particle and collider, the distance it read last, where the particle
+   * was, and the collider's pose then (colGen; -1 none): a point that cannot
+   * have come within the margin since (the distance changes no faster than
+   * colLip per metre) is not asked again in a pass that only pushes. Null
+   * where the table would be too large.
+   */
+  private colD: Float64Array | null = null;
+  private colP: Float64Array | null = null;
+  private colAt: Int32Array | null = null;
+  private colGen: Int32Array;
+  private colLip: Float64Array;
   private accumulator = 0;
   /** Cloth against cloth along each stretch of substeps (clothCcd): where the stretch began, and how many substeps it is. */
   private ccd: ClothCcd | null = null;
@@ -506,6 +520,13 @@ export class ClothSim {
     for (const pc of this.pieces) for (const b of pc.model.boards ?? []) boards.push({ ...b, particles: b.particles.map((q) => pc.base + q) });
     this.boards = new BoardShapes(boards, this.n);
     this.clearBudget = new Float64Array(n); this.nearest = new Float64Array(n); this.skip = new Uint8Array(n); this.activeCollideIdx = new Int32Array(n);
+    this.colGen = new Int32Array(colliders.length);
+    this.colLip = Float64Array.from(colliders, (c) => colliderLipschitz(c));
+    if (n * colliders.length <= 4_000_000) {
+      this.colD = new Float64Array(n * colliders.length);
+      this.colP = new Float64Array(3 * n * colliders.length);
+      this.colAt = new Int32Array(n * colliders.length).fill(-1);
+    }
     this.tiePrevLambda = new Float64Array(this.ties.length);
     this.tieFastLambda = new Float64Array(this.ties.length);
     this.tieAvgLambda = new Float64Array(this.ties.length);
@@ -552,6 +573,7 @@ export class ClothSim {
    * Call before advancing; static bodies need it only once.
    */
   setPoses(bodyWorld: (body: string) => THREE.Matrix4 | null, geomWorld: (geom: number) => THREE.Matrix4 | null = () => null) {
+    this.posedBy = [bodyWorld, geomWorld];
     const corner = this.poseCorner;
     const nextMat = ClothSim.poseNext;
     let maxStepDisp = 0;
@@ -588,6 +610,8 @@ export class ClothSim {
       }
       this.world[i].copy(nextMat);
       this.inv[i].copy(nextMat).invert();
+      // A new pose: what each point read of it before no longer holds.
+      this.colGen[i]++;
       // Its bounds in the world, grown by the cloth's thickness: most points
       // are turned away by six comparisons, not a transform and a distance.
       let lo0 = Infinity, lo1 = Infinity, lo2 = Infinity, hi0 = -Infinity, hi1 = -Infinity, hi2 = -Infinity;
@@ -636,25 +660,60 @@ export class ClothSim {
     }
   }
 
-  /** Moves the cloth on by `dt`, in whole substeps (the remainder carries over). */
-  advance(dt: number, env: ClothEnv) {
+  /** The env of an advance not yet finished (`finish`), and whether its continuous collision is due before its next substep. */
+  private owedEnv: ClothEnv | null = null;
+  private ccdOwed = false;
+
+  /** Whether an advance stopped at its deadline with work left (`finish` runs it). */
+  get busy() { return this.owedEnv !== null; }
+
+  /**
+   * Moves the cloth on by `dt`, in whole substeps (the remainder carries
+   * over). Past `deadline` (performance.now() ms) it stops between two pieces
+   * of work (a substep, a continuous-collision pass) and returns false, for
+   * `finish` to run the rest exactly as it would have: same poses, same env,
+   * same order. One piece always runs.
+   */
+  advance(dt: number, env: ClothEnv, deadline = Infinity): boolean {
+    // One owed still: done first, so nothing runs out of order.
+    if (this.owedEnv) this.finish();
     this.accumulator += dt;
-    if (this.accumulator < CLOTH_SUBSTEP) return;
+    if (this.accumulator < CLOTH_SUBSTEP) return true;
     const h = CLOTH_SUBSTEP;
     let steps = 0;
     let total = this.accumulator;
     while (total >= h) { steps++; total -= h; }
     this.substepMoveScale = 1 / steps;
-    while (this.accumulator >= h) {
+    this.owedEnv = env;
+    return this.finish(deadline);
+  }
+
+  /** Runs what an advance stopped at its deadline left; true once it is all done. */
+  finish(deadline = Infinity): boolean {
+    const env = this.owedEnv;
+    if (!env) return true;
+    const h = CLOTH_SUBSTEP, timed = deadline !== Infinity;
+    let worked = false;
+    for (;;) {
+      if (this.ccdOwed) {
+        if (worked && timed && performance.now() > deadline) return false;
+        this.collideAlong(this.ccdSince * h);
+        worked = true;
+      }
+      if (this.accumulator < h) break;
+      if (worked && timed && performance.now() > deadline) return false;
       this.externalForces(env);
       this.substep(h, env);
       this.accumulator -= h;
-      if (++this.ccdSince >= CCD_EVERY) this.collideAlong(this.ccdSince * h);
+      worked = true;
+      if (++this.ccdSince >= CCD_EVERY) this.ccdOwed = true;
     }
+    this.owedEnv = null;
     this.substepMoveScale = 1;
     for (let ci = 0; ci < this.colliders.length; ci++) {
       if (this.worldInit[ci]) this.prevWorld[ci].copy(this.world[ci]);
     }
+    return true;
   }
 
   /** The continuous collision, built once: every cloth triangle, sewn points joined. */
@@ -675,6 +734,7 @@ export class ClothSim {
   private collideAlong(span: number) {
     const x = this.x, from = this.ccdFrom;
     this.ccdSince = 0;
+    this.ccdOwed = false;
     if (!from) { this.ccdFrom = Float64Array.from(x); return; }
     const before = this.ccdBefore;
     before.set(x);
@@ -1305,7 +1365,7 @@ export class ClothSim {
       }
       // Once a substep, on the last pass: the constraints have moved the cloth
       // by then, and friction after it holds what this sets.
-      if (this.self.active && pass === STRETCH_PASSES - 1) this.self.collide(x, prev, true);
+      if (this.self.active && pass === STRETCH_PASSES - 1) this.self.collide(x, prev, true, this.settled);
       this.solveTacks();
       this.applyFriction();
     }
@@ -1684,6 +1744,8 @@ export class ClothSim {
       const d12 = (we[12] - pe[12]) * ms, d13 = (we[13] - pe[13]) * ms, d14 = (we[14] - pe[14]) * ms;
       const moved = Math.abs(d12) + Math.abs(d13) + Math.abs(d14) + Math.abs(d0) + Math.abs(d5) + Math.abs(d10) > 1e-12;
       const mu = c.friction;
+      const lip = this.colLip[ci], gen = this.colGen[ci], colD = this.colD, colP = this.colP, colAt = this.colAt;
+      const cache = colD !== null && lip < Infinity;
       for (let ai = 0; ai < nActive; ai++) {
         const i = activeCollideIdx[ai];
         const k = 3 * i;
@@ -1702,11 +1764,23 @@ export class ClothSim {
           }
           continue;
         }
+        const slot = i * nCol + ci;
+        // Not near enough to it at the last read to have reached the margin
+        // since: it would read no contact. A pass that measures each point's
+        // clearance (updateBudget) still reads every one.
+        if (cache && !updateBudget && colAt![slot] === gen) {
+          const s3 = 3 * slot, mx = px - colP![s3], my = py - colP![s3 + 1], mz = pz - colP![s3 + 2];
+          if (colD![slot] - lip * Math.sqrt(mx * mx + my * my + mz * mz) - 1e-9 >= margin) continue;
+        }
         // Into the collider's frame (no allocation).
         const lx = e[0] * px + e[4] * py + e[8] * pz + e[12];
         const ly = e[1] * px + e[5] * py + e[9] * pz + e[13];
         const lz = e[2] * px + e[6] * py + e[10] * pz + e[14];
         const ok = colliderContactInto(c, lx, ly, lz, hitScratch);
+        if (cache) {
+          if (ok) { colD![slot] = hitScratch.d; const s3 = 3 * slot; colP![s3] = px; colP![s3 + 1] = py; colP![s3 + 2] = pz; colAt![slot] = gen; }
+          else colAt![slot] = -1;
+        }
         if (updateBudget) {
           // No answer near a body (just outside its exact bounds, say): look again next substep.
           const d = ok ? hitScratch.d : CLOTH_THICKNESS;
@@ -1762,11 +1836,11 @@ export class ClothSim {
   }
 
   /** The render groups, with where each starts in the render buffer. */
-  renderLayout(): { name: string; vertadr: number; vertnum: number; elems: number[]; rgba: number[]; material: ClothMaterialName; flat?: FlatPattern; trims?: ClothTrim[]; pattern?: ClothPatternPrint }[] {
+  renderLayout(): { name: string; vertadr: number; vertnum: number; elems: number[]; rgba: number[]; tint?: number; material: ClothMaterialName; flat?: FlatPattern; trims?: ClothTrim[]; pattern?: ClothPatternPrint }[] {
     const out: ReturnType<ClothSim['renderLayout']> = [];
     let adr = 0;
     for (const { model } of this.pieces) for (const g of model.groups) {
-      out.push({ name: g.name, vertadr: adr, vertnum: g.particles.length, elems: g.tris.slice(), rgba: g.rgba, material: g.material, flat: g.flat, trims: g.trims, pattern: g.pattern });
+      out.push({ name: g.name, vertadr: adr, vertnum: g.particles.length, elems: g.tris.slice(), rgba: g.rgba, ...(g.tint !== undefined ? { tint: g.tint } : {}), material: g.material, flat: g.flat, trims: g.trims, pattern: g.pattern });
       adr += g.particles.length;
     }
     return out;
@@ -2469,6 +2543,8 @@ export class ClothSim {
     const m = (this.tangleMesh ??= untangleMesh(this.n, this.tris, this.stitches)), crossings = findCrossings(this.x, m);
     this.ccdOf().setTangled(crossings);
     this.ccdFrom = Float64Array.from(this.x); this.ccdSince = 0;
+    // An advance left owed belonged to the state just replaced.
+    this.owedEnv = null; this.ccdOwed = false; this.substepMoveScale = 1;
     this.syncAeroBaselines();
     return true;
   }
@@ -2585,8 +2661,8 @@ export class ClothSim {
 
   /**
    * The settle after carrying cloth over (carryCloths), when some of the
-   * cloth is near none of what moves: run on a sim of only what is, its
-   * colliders posed as here, and copied back. Cloth anywhere in the scene
+   * cloth is near none of what moves: run on a sim of only what is, posed
+   * as here, and copied back. Cloth anywhere in the scene
    * costs a settle's every substep, held still or not.
    */
   private settleInvolved(): boolean {
@@ -2594,7 +2670,8 @@ export class ClothSim {
     if (!involved || involved.every(Boolean)) return false;
     const idx = involved.flatMap((v, pi) => (v ? [pi] : []));
     const sub = new ClothSim(idx.map((pi) => this.pieces[pi].model), this.colliders);
-    sub.world = this.world; sub.inv = this.inv; sub.prevWorld = this.prevWorld; sub.worldInit = this.worldInit; sub.worldBox = this.worldBox;
+    // Posed as this is (its colliders and its ties' anchors), from the same lookups.
+    if (this.posedBy) sub.setPoses(...this.posedBy);
     const into = idx.map((pi, si) => [si, pi] as [number, number]);
     const carriedHere = idx.map((pi) => this.carryPiece![pi] === 1);
     // Into it as carried (only the carried), held or free as here.

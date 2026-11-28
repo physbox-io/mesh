@@ -28,6 +28,8 @@ import { AddSimulationButton } from './MachineJobControls';
 import { useAddSimulation } from '../hooks/useAddSimulation';
 import { sheetFoldSimulationRequest } from '../utils/sheetFoldSimulation';
 import { ExportSubjectLine } from './ExportSubjectLine';
+import { GarmentPatternPanel } from './GarmentPatternPanel';
+import { collectClothNodes } from '../utils/cloth/patternExport';
 
 export interface ExportSheetUnfoldModalProps {
   /** What it works on: the selection, or the whole scene (shown under the title). */
@@ -235,10 +237,16 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
 
   const simulation = useAddSimulation();
 
+  // A garment unfolds as its sewing pattern (the form it is fitted to is the
+  // mannequin it was cut on, not a part): the same pieces and defaults as its
+  // Pattern card and MCP's physics_export_cut.
+  const clothNodes = useMemo(() => (scene ? collectClothNodes(scene.nodes) : []), [scene]);
+  const garmentLabel = clothNodes.map((n) => n.name || n.id).join(' + ');
+
   const exportResult = useMemo(() => {
-    if (!isOpen || !scene) return null;
+    if (!isOpen || !scene || clothNodes.length > 0) return null;
     return exportSheetUnfold(scene, options);
-  }, [isOpen, scene, options]);
+  }, [isOpen, scene, options, clothNodes]);
 
   const previewSvg = useMemo(() => {
     const thickened = (exportResult?.svg || '')
@@ -317,6 +325,15 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
         </div>
 
         {/* Body */}
+        {clothNodes.length > 0 ? (
+          <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3">
+            <h3 className={sectionTitleClass}>Sewing pattern</h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              {clothNodes.length === 1 ? 'The garment is' : `${clothNodes.length} garments are`} unfolded as the pieces {clothNodes.length === 1 ? 'it is' : 'they are'} cut from. Select a rigid part alone to unfold it as a net.
+            </p>
+            <GarmentPatternPanel nodes={clothNodes} title={garmentLabel} />
+          </div>
+        ) : (
         <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5">
           {/* Fabrication Mode & Mode-Specific Parameters */}
           <div className={sectionClass}>
@@ -724,6 +741,7 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
             </div>
           )}
         </div>
+        )}
 
         {/* Footer */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 sm:px-6 py-3 sm:py-4 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50">
@@ -737,6 +755,7 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
             >
               Close
             </button>
+            {clothNodes.length === 0 && (<>
             {etchError && (
               <span className="text-[11px] text-red-600 dark:text-red-400 max-w-xs leading-snug">
                 {etchError}
@@ -793,6 +812,7 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
               <Download className="w-4 h-4" />
               <span>Download SVG</span>
             </button>
+            </>)}
           </div>
         </div>
       </div>

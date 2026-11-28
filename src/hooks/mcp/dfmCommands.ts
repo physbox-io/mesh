@@ -176,7 +176,7 @@ export const dfmCommands: McpCommands = {
       },
       named.length > 0 ? sceneGraph : undefined,
     );
-    if (!report) return { ok: false, error: 'The check could not be run: try again in a moment.' };
+    if (!report) return { ok: false, error: 'The DFM check timed out or the worker restarted — try again in a moment, or pass master_id to check one body at a time.' };
     return {
       ok: true,
       process,

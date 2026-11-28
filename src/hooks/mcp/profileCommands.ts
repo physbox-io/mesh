@@ -62,7 +62,7 @@ export const profileCommands: McpCommands = {
       return { ok: false, error: 'thicknessMm must be a positive finite number.' };
     }
     if (m.pos !== undefined && !isFiniteVec3(m.pos)) {
-      return { ok: false, error: 'pos must be [x, y, z] of finite numbers in metres.' };
+      return { ok: false, error: 'pos must be [x, y, z] of finite numbers in millimetres.' };
     }
     const widthMm = m.widthMm as number | undefined;
     const heightMm = m.heightMm as number | undefined;
@@ -90,7 +90,7 @@ export const profileCommands: McpCommands = {
     }
 
     const thicknessMm = (m.thicknessMm as number | undefined) ?? PROFILE_DEFAULTS.thicknessMm;
-    const pos = m.pos as [number, number, number] | undefined;
+    const pos = m.pos ? ([m.pos[0] / 1000, m.pos[1] / 1000, m.pos[2] / 1000] as [number, number, number]) : undefined;
     const name = typeof m.name === 'string' && m.name.trim() ? m.name.trim() : (svg ? 'svg_profile' : 'traced_profile');
     const node = profileNode(profile, { name, thicknessMm, ...(pos ? { pos } : {}) });
     const res = await settleScene([...(useStore.getState().sceneGraph.nodes || []), node], { replacesScene: false });

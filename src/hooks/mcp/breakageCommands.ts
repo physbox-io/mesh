@@ -239,9 +239,9 @@ export const breakageCommands: McpCommands = {
       if (enablingDent) {
         const cfg: DentConfig = {};
         if (dentYieldNs !== undefined) cfg.dentYieldNs = dentYieldNs ?? undefined;
-        if (dentDepthPerNs !== undefined) cfg.dentDepthPerNs = dentDepthPerNs ?? undefined;
-        if (dentRadius !== undefined) cfg.dentRadius = dentRadius ?? undefined;
-        if (dentMaxDepth !== undefined) cfg.dentMaxDepth = dentMaxDepth ?? undefined;
+        if (dentDepthPerNs !== undefined) cfg.dentDepthPerNs = dentDepthPerNs !== null ? dentDepthPerNs / 1000 : undefined;
+        if (dentRadius !== undefined) cfg.dentRadius = dentRadius !== null ? dentRadius / 1000 : undefined;
+        if (dentMaxDepth !== undefined) cfg.dentMaxDepth = dentMaxDepth !== null ? dentMaxDepth / 1000 : undefined;
         if (pierceImpulseNs !== undefined) cfg.pierceImpulseNs = pierceImpulseNs ?? undefined;
         if (deformCollision !== undefined) cfg.deformCollision = deformCollision || undefined;
         const converted = needsConversionForDenting(geoms[dentIdx]);

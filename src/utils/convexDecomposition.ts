@@ -820,3 +820,26 @@ export function collidersAreStale(node: SceneNode): boolean {
   if (!node.collisionDecomposed) return false;
   return !(node.geoms || []).some(g => g.csgDerived === 'collider');
 }
+
+/**
+ * True when the scene contains at least one movable/dynamic body (a joint,
+ * cloth, composite, simulation, or dynamic-flagged geom). In a static-only
+ * CAD/display scene where nothing can move, two world-fixed bodies never
+ * collide in MuJoCo, so background V-HACD convex decomposition is skipped
+ * unless a body explicitly requests `collision: 'decompose'`.
+ */
+export function sceneHasMovableBodies(nodes: readonly SceneNode[] | undefined): boolean {
+  for (const n of nodes || []) {
+    if (
+      (n.joints?.length ?? 0) > 0 ||
+      !!n.cloth ||
+      !!n.isComposite ||
+      !!n.simulation ||
+      (n.geoms || []).some((g) => (g as { dynamic?: boolean }).dynamic === true)
+    ) {
+      return true;
+    }
+    if (n.children?.length && sceneHasMovableBodies(n.children)) return true;
+  }
+  return false;
+}

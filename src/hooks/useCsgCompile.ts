@@ -21,7 +21,7 @@ import { useEffect } from 'react';
 import { useStore } from '../store/useStore';
 import { recompilesInFlight } from '../store/simulationActions';
 import { csgHashOf, evaluateNodeCsg, hasBooleanOps } from '../utils/csg';
-import { collidersAreStale, collisionHashOf, decomposeNodeColliders, type HfieldNodeContext } from '../utils/convexDecomposition';
+import { collidersAreStale, collisionHashOf, decomposeNodeColliders, sceneHasMovableBodies, type HfieldNodeContext } from '../utils/convexDecomposition';
 import { authoredQuat } from '../utils/bodyOrientation';
 import { isNodeRotationBaked } from '../utils/sceneTree';
 import type { SceneGraph, SceneNode } from '../types/scene';
@@ -102,13 +102,18 @@ export function needsScadBuild(node: SceneNode): boolean {
  * decomposing 15-40 concave meshes into hundreds of convex hulls wastes
  * minutes of WASM CPU and stalls subsequent move/staging commands.
  */
-const shouldAutoDecompose = (node: SceneNode) =>
-  (!node.bodyForm && !node.slipMold && !node.pourBox) || node.collision === 'decompose';
+const shouldAutoDecompose = (node: SceneNode, sceneHasMovable: boolean) =>
+  node.collision === 'decompose' ||
+  (sceneHasMovable && !node.bodyForm && !node.slipMold && !node.pourBox);
 
-function collectStaleColliders(nodes: SceneNode[], out: SceneNode[] = []): SceneNode[] {
+function collectStaleColliders(
+  nodes: SceneNode[],
+  out: SceneNode[] = [],
+  sceneHasMovable: boolean = sceneHasMovableBodies(nodes),
+): SceneNode[] {
   for (const node of nodes || []) {
-    if (!node.csgEnabled && shouldAutoDecompose(node) && collidersAreStale(node)) out.push(node);
-    collectStaleColliders(node.children || [], out);
+    if (!node.csgEnabled && shouldAutoDecompose(node, sceneHasMovable) && collidersAreStale(node)) out.push(node);
+    collectStaleColliders(node.children || [], out, sceneHasMovable);
   }
   return out;
 }
@@ -235,11 +240,13 @@ export function collidersBeingDecomposed(): string[] {
 export function pendingColliderBodies(): string[] {
   const out: string[] = [];
   const running = new Set(collidersInFlight.keys());
+  const rootNodes = useStore.getState().sceneGraph.nodes;
+  const hasMovable = sceneHasMovableBodies(rootNodes);
   const walk = (nodes: SceneNode[] = []) => nodes.forEach(n => {
-    if ((!n.csgEnabled && shouldAutoDecompose(n) && collidersAreStale(n)) || running.has(n.id)) out.push(n.name);
+    if ((!n.csgEnabled && shouldAutoDecompose(n, hasMovable) && collidersAreStale(n)) || running.has(n.id)) out.push(n.name);
     walk(n.children);
   });
-  walk(useStore.getState().sceneGraph.nodes);
+  walk(rootNodes);
   return out;
 }
 

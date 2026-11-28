@@ -584,11 +584,16 @@ export function refineInRadius(
   maxEdge: number,
   /** Told about each midpoint made, and the two vertices it was made between. */
   onMidpoint?: (mid: number, a: number, b: number) => void,
+  /** Optional cap on new vertices created in this pass so we never blow past the mesh budget. */
+  maxNewVertices = Infinity,
 ): number {
   const { faces, faceCount } = mesh;
   const limit2 = maxEdge * maxEdge;
   const reach = radius + maxEdge;
   const reach2 = reach * reach;
+  const minBx = cx - reach, maxBx = cx + reach;
+  const minBy = cy - reach, maxBy = cy + reach;
+  const minBz = cz - reach, maxBz = cz + reach;
 
   // `mesh.positions`, read afresh each time rather than held: addVertex below
   // can reallocate it, and a held array reads past its end as undefined — which
@@ -615,11 +620,24 @@ export function refineInRadius(
   // the triangle it lands inside has no corner near it, and used to refine
   // nothing, move nothing, and leave small brushes on a base mesh dead.
   for (let f = 0; f < faceCount; f++) {
-    const v = [faces[f * 3], faces[f * 3 + 1], faces[f * 3 + 2]];
-    if (!nearBrush(v[0]) && !nearBrush(v[1]) && !nearBrush(v[2])
-      && !triangleWithin(mesh.positions, v[0], v[1], v[2], cx, cy, cz, reach2)) continue;
+    if (midpoints.size >= maxNewVertices) break;
+    const a0 = faces[f * 3], b0 = faces[f * 3 + 1], c0 = faces[f * 3 + 2];
+    const p = mesh.positions;
+    const ax = p[a0 * 3], ay = p[a0 * 3 + 1], az = p[a0 * 3 + 2];
+    const bx = p[b0 * 3], by = p[b0 * 3 + 1], bz = p[b0 * 3 + 2];
+    const cx0 = p[c0 * 3], cy0 = p[c0 * 3 + 1], cz0 = p[c0 * 3 + 2];
+    // Fast 3-axis AABB reject skips >99% of triangles on dense meshes before exact sphere-triangle tests.
+    if (
+      (ax < minBx && bx < minBx && cx0 < minBx) || (ax > maxBx && bx > maxBx && cx0 > maxBx) ||
+      (ay < minBy && by < minBy && cy0 < minBy) || (ay > maxBy && by > maxBy && cy0 > maxBy) ||
+      (az < minBz && bz < minBz && cz0 < minBz) || (az > maxBz && bz > maxBz && cz0 > maxBz)
+    ) continue;
+    const v = [a0, b0, c0];
+    if (!nearBrush(a0) && !nearBrush(b0) && !nearBrush(c0)
+      && !triangleWithin(p, a0, b0, c0, cx, cy, cz, reach2)) continue;
 
     for (let e = 0; e < 3; e++) {
+      if (midpoints.size >= maxNewVertices) break;
       const a = v[e];
       const b = v[(e + 1) % 3];
       if (edgeLen2(a, b) <= limit2) continue;
@@ -1255,7 +1273,7 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
     // soon as one splits nothing, so clay that is already fine pays one scan.
     let split = 0;
     for (let pass = 0; pass < MAX_REFINE_PASSES && mesh.vertexCount < budget; pass++) {
-      const n = refineInRadius(mesh, stamp.x, stamp.y, stamp.z, radius, refineEdge, onMidpoint);
+      const n = refineInRadius(mesh, stamp.x, stamp.y, stamp.z, radius, refineEdge, onMidpoint, budget - mesh.vertexCount);
       split += n;
       if (n === 0) break;
     }

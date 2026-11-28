@@ -287,7 +287,7 @@ export function collectIndividualPartSoups(
   const collectFromNode = (n: SceneNode, frame: THREE.Matrix4, walkChildren: boolean) => {
     const geoms = isNonWoodNode(n)
       ? []
-      : resolveCsgGeoms(n, 'render').filter((g: SceneGeom) => g.role !== 'collision' && !isNonWoodGeom(g));
+      : resolveCsgGeoms(n, 'render').filter((g: SceneGeom) => g.role !== 'collision' && !(g.role === 'visual' && !g.csgDerived) && !isNonWoodGeom(g));
     for (const geom of geoms) {
       const out: number[] = [];
       if (appendSolidTriangles(geom, frame, out) && out.length >= 36) {

@@ -365,8 +365,8 @@ describe('Item 7: symmetry support in physics_paint', () => {
     }));
 
     const res = applyPaintStrokeToBody('paint_sym_ball', {
-      at: [0, 0.03, 0],
-      radius: 0.01,
+      at: [0, 30, 0],
+      radius: 10,
       rgba: [1, 0, 0],
       symmetry: 'y',
     });
@@ -436,8 +436,8 @@ describe('Item 8: fast vessel/planter hollowing on sculpts', () => {
       sceneGraph: { ...s.sceneGraph, nodes: [node] },
     }));
 
-    const r = 0.015;
-    const square = [[-r, -r, 0.04], [r, -r, 0.04], [r, r, 0.04], [-r, r, 0.04]];
+    const r = 15;
+    const square = [[-r, -r, 40], [r, -r, 40], [r, r, 40], [-r, r, 40]];
     const res = await sculptCommands.SCULPT_CUT({
       targetId: 'blind_pocket_ball',
       polygon: square,

@@ -1609,7 +1609,66 @@ function patternLookup(spec: PatternSpec, opts: PatternOptions, scale: number, u
  *
  * Returns false if it stopped at the triangle cap.
  */
-function refine(mesh: Mesh, labels: number[], parents: number[], cells: number[], maxTriangles: number): boolean {
+interface ActiveUvBox {
+  frame: Frame;
+  uMin: number;
+  uMax: number;
+  vMin: number;
+  vMax: number;
+  areaM2: number;
+}
+
+/**
+ * Finds the active UV bounding box of a figure pattern (e.g. text/image) on a
+ * planar face by probing its heightfield on a fast coarse grid. Returns null
+ * when the figure covers most of the face (>65%) or is empty, so full-face
+ * refinement is used as before.
+ */
+function probeFigureActiveBox(
+  spec: PatternSpec,
+  opts: PatternOptions,
+  uv: RegionUv,
+  cellM: number,
+): ActiveUvBox | null {
+  if (!spec.figure || !uv.frame || uv.width <= 0 || uv.height <= 0) return null;
+  const cols = 96;
+  const rows = 96;
+  const data = spec.build(cols, rows, { widthM: uv.width, depthM: uv.height }, opts);
+  if (!data || data.length < cols * rows) return null;
+  let cMin = cols, cMax = -1, rMin = rows, rMax = -1;
+  for (let r = 0; r < rows; r++) {
+    const rowOff = r * cols;
+    for (let c = 0; c < cols; c++) {
+      if (data[rowOff + c] > 0.01) {
+        if (c < cMin) cMin = c;
+        if (c > cMax) cMax = c;
+        if (r < rMin) rMin = r;
+        if (r > rMax) rMax = r;
+      }
+    }
+  }
+  if (cMax < cMin || rMax < rMin) return null;
+  const stepU = uv.width / Math.max(1, cols - 1);
+  const stepV = uv.height / Math.max(1, rows - 1);
+  const padU = Math.max(cellM * 6, stepU * 2, 0.0025);
+  const padV = Math.max(cellM * 6, stepV * 2, 0.0025);
+  const uMin = Math.max(0, cMin * stepU - padU);
+  const uMax = Math.min(uv.width, cMax * stepU + padU);
+  const vMin = Math.max(0, rMin * stepV - padV);
+  const vMax = Math.min(uv.height, rMax * stepV + padV);
+  const areaM2 = (uMax - uMin) * (vMax - vMin);
+  if (areaM2 >= uv.width * uv.height * 0.65) return null;
+  return { frame: uv.frame, uMin, uMax, vMin, vMax, areaM2 };
+}
+
+function refine(
+  mesh: Mesh,
+  labels: number[],
+  parents: number[],
+  cells: number[],
+  maxTriangles: number,
+  activeBoxes?: (ActiveUvBox | null)[],
+): boolean {
   const len2 = (a: number, b: number) => {
     const p = mesh.pos;
     const dx = p[3 * a] - p[3 * b], dy = p[3 * a + 1] - p[3 * b + 1], dz = p[3 * a + 2] - p[3 * b + 2];
@@ -1621,7 +1680,24 @@ function refine(mesh: Mesh, labels: number[], parents: number[], cells: number[]
     for (let f = 0; f < faceCount; f++) {
       const label = labels[f];
       if (label < 0) continue;
-      const limit2 = cells[label] * cells[label];
+      let cell = cells[label];
+      const box = activeBoxes?.[label];
+      if (box) {
+        const a0 = mesh.faces[3 * f], b0 = mesh.faces[3 * f + 1], c0 = mesh.faces[3 * f + 2];
+        const uvA = project(box.frame, vtx(mesh.pos, a0));
+        const uvB = project(box.frame, vtx(mesh.pos, b0));
+        const uvC = project(box.frame, vtx(mesh.pos, c0));
+        const maxU = Math.max(uvA[0], uvB[0], uvC[0]);
+        const minU = Math.min(uvA[0], uvB[0], uvC[0]);
+        const maxV = Math.max(uvA[1], uvB[1], uvC[1]);
+        const minV = Math.min(uvA[1], uvB[1], uvC[1]);
+        if (maxU < box.uMin || minU > box.uMax || maxV < box.vMin || minV > box.vMax) {
+          // Outside the figure's local patch: keep coarse background triangles so
+          // a small text label on a large face doesn't explode triangle count.
+          cell = Math.max(cell * 16, 0.02);
+        }
+      }
+      const limit2 = cell * cell;
       for (let e = 0; e < 3; e++) {
         const a = mesh.faces[3 * f + e], b = mesh.faces[3 * f + ((e + 1) % 3)];
         if (len2(a, b) <= limit2) continue;
@@ -1787,11 +1863,24 @@ export function applySurfaceTextures(
     jobs.push({ index, texture, faces: grown, normal, uv, cellM, depthM, report });
   });
 
+  // For figure patterns (e.g. text/image) on a planar face, refine densely only
+  // inside the figure's active UV patch instead of subdividing the entire face.
+  const activeBoxes: (ActiveUvBox | null)[] = jobs.map((j) => {
+    const spec = patternById(j.texture.pattern);
+    if (!spec) return null;
+    const opts = { ...spec.defaults, ...(j.texture.options ?? {}) };
+    return probeFigureActiveBox(spec, opts, j.uv, j.cellM);
+  });
+
   // Coarsen to fit the cap before refining, rather than stopping half way:
   // a triangle refined to edges under c averages about c²/5 of area.
   const PER_TRIANGLE = 0.2;
   const budget = Math.max(0, maxTriangles - faceCount);
-  const wanted = jobs.reduce((n, j) => n + j.report.areaM2 / (PER_TRIANGLE * j.cellM * j.cellM), 0);
+  const wanted = jobs.reduce((n, j, idx) => {
+    const box = activeBoxes[idx];
+    const fineArea = box ? box.areaM2 : j.report.areaM2;
+    return n + fineArea / (PER_TRIANGLE * j.cellM * j.cellM);
+  }, 0);
   const askedCell = jobs.length ? jobs[0].cellM : 0;
   if (wanted > budget && jobs.length) {
     const k = Math.sqrt(wanted / Math.max(1, budget));
@@ -1814,7 +1903,7 @@ export function applySurfaceTextures(
    * almost any depth: 1 mm of scales on a 560 mm post came out 0.06 mm deep.
    */
   for (let attempt = 0; jobs.length; attempt++) {
-    if (refine(mesh, labels, parents, jobs.map((j) => j.cellM), maxTriangles * 1.25)) break;
+    if (refine(mesh, labels, parents, jobs.map((j) => j.cellM), maxTriangles * 1.25, activeBoxes)) break;
     if (attempt === 8) {
       warnings.push('Refinement stopped at the triangle limit; the pattern is coarser than asked for.');
       break;

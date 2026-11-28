@@ -37,7 +37,7 @@ export interface Collider {
   local: THREE.Matrix4;
   shape: ColliderShape;
   friction: number;
-  /** Bounds in the geom frame, for a quick rejection. */
+  /** Bounds in the geom frame: its world box (the broad phase) and how far a pose change can move it. */
   bounds: { min: number[]; max: number[] };
 }
 
@@ -102,6 +102,29 @@ export class SdfGrid {
     }
     out.d = dist; out.nx = gx / l; out.ny = gy / l; out.nz = gz / l;
     return true;
+  }
+  private slope = -1;
+  /**
+   * Most the trilinear distance can change per metre moved, anywhere on the
+   * grid: within a cell each partial derivative is a blend of that axis's
+   * cell-edge differences, so the gradient is at most the largest of each,
+   * over the cell, together.
+   */
+  lipschitz(): number {
+    if (this.slope >= 0) return this.slope;
+    const [nx, ny, nz] = this.dims, d = this.d, sy = nx, sz = nx * ny;
+    let mx = 0, my = 0, mz = 0;
+    for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) {
+      const o = k * sz + j * sy;
+      for (let i = 0; i < nx; i++) {
+        const v = d[o + i];
+        if (i + 1 < nx) { const e = Math.abs(d[o + i + 1] - v); if (e > mx) mx = e; }
+        if (j + 1 < ny) { const e = Math.abs(d[o + i + sy] - v); if (e > my) my = e; }
+        if (k + 1 < nz) { const e = Math.abs(d[o + i + sz] - v); if (e > mz) mz = e; }
+      }
+    }
+    this.slope = Math.sqrt(mx * mx + my * my + mz * mz) / this.cell;
+    return this.slope;
   }
   /** Distance and outward normal from one read of the eight surrounding cells (trilinear and its gradient). */
   query(x: number, y: number, z: number): Contact | null {
@@ -310,28 +333,42 @@ function primitiveInto(shape: ColliderShape, x: number, y: number, z: number, ou
     case 'plane':
       out.d = z; out.nx = 0; out.ny = 0; out.nz = 1;
       return true;
-    case 'capsule':
-    case 'cylinder': {
+    case 'capsule': {
       const { a, b, r } = shape;
       const abx = b[0] - a[0], aby = b[1] - a[1], abz = b[2] - a[2];
       const L2 = abx * abx + aby * aby + abz * abz || 1e-12;
-      const tRaw = ((x - a[0]) * abx + (y - a[1]) * aby + (z - a[2]) * abz) / L2;
-      const t = Math.min(1, Math.max(0, tRaw));
-      const cx = a[0] + abx * t, cy = a[1] + aby * t, cz = a[2] + abz * t;
-      const vx = x - cx, vy = y - cy, vz = z - cz;
-      const l = Math.sqrt(vx * vx + vy * vy + vz * vz) || 1e-12;
-      if (shape.kind === 'capsule' || (tRaw > 0 && tRaw < 1)) {
-        out.d = l - r; out.nx = vx / l; out.ny = vy / l; out.nz = vz / l;
-        return true;
+      const t = Math.min(1, Math.max(0, ((x - a[0]) * abx + (y - a[1]) * aby + (z - a[2]) * abz) / L2));
+      const vx = x - (a[0] + abx * t), vy = y - (a[1] + aby * t), vz = z - (a[2] + abz * t);
+      const l = Math.sqrt(vx * vx + vy * vy + vz * vz);
+      out.d = l - r;
+      if (l > 1e-12) { out.nx = vx / l; out.ny = vy / l; out.nz = vz / l; }
+      else perpendicularInto(abx, aby, abz, out);
+      return true;
+    }
+    case 'cylinder': {
+      // Exact distance to a capped cylinder: the radial and axial excesses,
+      // inside the larger of them, outside their length (to the nearest rim
+      // point where both are positive).
+      const { a, b, r } = shape;
+      const abx = b[0] - a[0], aby = b[1] - a[1], abz = b[2] - a[2];
+      const L = Math.sqrt(abx * abx + aby * aby + abz * abz) || 1e-12;
+      const ux = abx / L, uy = aby / L, uz = abz / L;
+      const t = (x - a[0]) * ux + (y - a[1]) * uy + (z - a[2]) * uz;
+      const rx = x - a[0] - ux * t, ry = y - a[1] - uy * t, rz = z - a[2] - uz * t;
+      const rl = Math.sqrt(rx * rx + ry * ry + rz * rz);
+      const sgn = t < L / 2 ? -1 : 1;
+      const dAx = sgn < 0 ? -t : t - L, dR = rl - r;
+      if (rl > 1e-12) { out.nx = rx / rl; out.ny = ry / rl; out.nz = rz / rl; }
+      else perpendicularInto(ux, uy, uz, out);
+      if (dAx > 0 && dR > 0) {
+        const d = Math.sqrt(dAx * dAx + dR * dR);
+        out.d = d;
+        out.nx = (out.nx * dR + ux * sgn * dAx) / d; out.ny = (out.ny * dR + uy * sgn * dAx) / d; out.nz = (out.nz * dR + uz * sgn * dAx) / d;
+      } else if (dAx > dR) {
+        out.d = dAx; out.nx = ux * sgn; out.ny = uy * sgn; out.nz = uz * sgn;
+      } else {
+        out.d = dR;
       }
-      // A cylinder's flat end.
-      const L = Math.sqrt(L2), ax0 = abx / L, ax1 = aby / L, ax2 = abz / L, sgn = tRaw <= 0 ? -1 : 1;
-      const along = (tRaw <= 0 ? -tRaw : tRaw - 1) * L;
-      const rdx = vx - ax0 * along * sgn, rdy = vy - ax1 * along * sgn, rdz = vz - ax2 * along * sgn;
-      const rl = Math.sqrt(rdx * rdx + rdy * rdy + rdz * rdz);
-      if (rl <= r) { out.d = along; out.nx = ax0 * sgn; out.ny = ax1 * sgn; out.nz = ax2 * sgn; return true; }
-      out.d = Math.sqrt(along * along + (rl - r) * (rl - r));
-      out.nx = vx / l; out.ny = vy / l; out.nz = vz / l;
       return true;
     }
     case 'box': {
@@ -370,10 +407,41 @@ function primitiveInto(shape: ColliderShape, x: number, y: number, z: number, ou
   }
 }
 
+/** A unit vector perpendicular to (ax, ay, az), into out's normal. */
+function perpendicularInto(ax: number, ay: number, az: number, out: ContactOut) {
+  // Cross with whichever world axis the vector is least along.
+  const fx = Math.abs(ax), fy = Math.abs(ay), fz = Math.abs(az);
+  let px: number, py: number, pz: number;
+  if (fx <= fy && fx <= fz) { px = 0; py = az; pz = -ay; }
+  else if (fy <= fz) { px = -az; py = 0; pz = ax; }
+  else { px = ay; py = -ax; pz = 0; }
+  const l = Math.sqrt(px * px + py * py + pz * pz) || 1;
+  out.nx = px / l; out.ny = py / l; out.nz = pz / l;
+}
+
+/**
+ * Distance and outward normal of a collider at a point in its own frame.
+ * A primitive's distance is exact everywhere, so it answers wherever it is
+ * asked: cloth just off it (within its thickness) needs the contact, for its
+ * standoff and its friction, before it is inside. Only a mesh's grid has an
+ * end, and it says so.
+ */
 export function colliderContactInto(c: Collider, lx: number, ly: number, lz: number, out: ContactOut): boolean {
-  const { min, max } = c.bounds;
-  if (lx < min[0] || ly < min[1] || lz < min[2] || lx > max[0] || ly > max[1] || lz > max[2]) return false;
   return primitiveInto(c.shape, lx, ly, lz, out);
+}
+
+/**
+ * Most a collider's distance can change per metre a point moves (in its
+ * frame, which a pose only turns and moves): 1 for the exact distances, the
+ * grid's own bound for a mesh, none known (Infinity) for the ellipsoid, whose
+ * distance is an estimate.
+ */
+export function colliderLipschitz(c: Collider): number {
+  switch (c.shape.kind) {
+    case 'sdf': return c.shape.grid.lipschitz();
+    case 'ellipsoid': return Infinity;
+    default: return 1;
+  }
 }
 
 export function colliderContact(c: Collider, local: number[]): Contact | null {

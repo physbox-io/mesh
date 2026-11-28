@@ -118,7 +118,7 @@ function triangulatePolygonEarClipping(
   positions: number[],
   manifoldTris: [number, number, number][],
   existingEdges: Set<string>,
-  boundaryEdgeKeys: Set<string>
+  _boundaryEdgeKeys: Set<string>
 ): void {
   const k = loop.length;
   // Reverse loop so triangles have opposite winding to mesh boundary edges
@@ -186,6 +186,7 @@ function triangulatePolygonEarClipping(
 
   const poly = Array.from({ length: k }, (_, i) => i);
   const newTriangles: [number, number, number][] = [];
+  const addedInternalEdges: string[] = [];
   let stalled = false;
 
   while (poly.length > 3) {
@@ -222,13 +223,15 @@ function triangulatePolygonEarClipping(
       // Ensure not degenerate in 3D
       if (triArea3D(positions, P[prevIdx], P[currIdx], P[nextIdx]) <= 1e-18) continue;
 
-      // Ensure interior edge doesn't already exist as a non-boundary edge in the mesh
+      // Never reuse any edge already present in the mesh (interior or another
+      // boundary) as an internal diagonal, or we re-introduce a non-manifold edge.
       const internalEdgeKey = edgeKey(P[prevIdx], P[nextIdx]);
-      if (existingEdges.has(internalEdgeKey) && !boundaryEdgeKeys.has(internalEdgeKey)) {
+      if (existingEdges.has(internalEdgeKey) || addedInternalEdges.includes(internalEdgeKey)) {
         continue;
       }
 
       newTriangles.push([P[prevIdx], P[currIdx], P[nextIdx]]);
+      addedInternalEdges.push(internalEdgeKey);
       poly.splice(i, 1);
       earFound = true;
       break;
@@ -253,6 +256,9 @@ function triangulatePolygonEarClipping(
   } else {
     for (const tri of newTriangles) {
       manifoldTris.push(tri);
+    }
+    for (const e of addedInternalEdges) {
+      existingEdges.add(e);
     }
   }
 }
@@ -750,6 +756,9 @@ export function repairMesh(
       const k = loop.length;
       if (k === 3) {
         manifoldTris.push([loop[0], loop[2], loop[1]]);
+        existingMeshEdges.add(edgeKey(loop[0], loop[1]));
+        existingMeshEdges.add(edgeKey(loop[1], loop[2]));
+        existingMeshEdges.add(edgeKey(loop[2], loop[0]));
         filledLoops++;
       } else if (k === 4) {
         const v0 = loop[0], v1 = loop[1], v2 = loop[2], v3 = loop[3];
@@ -758,15 +767,25 @@ export function repairMesh(
         const p2 = getPos(currentPositions, v2);
         const p3 = getPos(currentPositions, v3);
 
+        const e02 = edgeKey(v0, v2);
+        const e13 = edgeKey(v1, v3);
+        const can02 = !existingMeshEdges.has(e02);
+        const can13 = !existingMeshEdges.has(e13);
         const d02 = distSq(p0, p2);
         const d13 = distSq(p1, p3);
 
-        if (d02 <= d13) {
+        if (can02 && (!can13 || d02 <= d13)) {
           manifoldTris.push([v0, v3, v2]);
           manifoldTris.push([v0, v2, v1]);
-        } else {
+          existingMeshEdges.add(e02);
+        } else if (can13) {
           manifoldTris.push([v1, v0, v3]);
           manifoldTris.push([v1, v3, v2]);
+          existingMeshEdges.add(e13);
+        } else {
+          // Both quad diagonals already exist in the mesh; fan through a fresh
+          // centroid vertex so hole-filling never re-creates a non-manifold edge.
+          addCentroidFan(loop, currentPositions, manifoldTris);
         }
         filledLoops++;
       } else {

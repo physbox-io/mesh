@@ -473,8 +473,8 @@ describe('Sculpt command & state audit fixes', () => {
     await expect(sculptCommands.SCULPT({
       targetId: node.id,
       strokes: [
-        { brush: 'draw', at: [0, 0, 0.05], radius: 0.02, strength: 0.5 },
-        { brush: 'draw', at: [0, 0, 0.05], strength: 5 },
+        { brush: 'draw', at: [0, 0, 50], radius: 20, strength: 0.5 },
+        { brush: 'draw', at: [0, 0, 50], strength: 5 },
       ],
     }, makeCtx())).rejects.toThrow(/strength/i);
     expect(sculptHistory.get(node.id) ?? []).toHaveLength(0);
@@ -483,8 +483,8 @@ describe('Sculpt command & state audit fixes', () => {
     const okRes = await sculptCommands.SCULPT({
       targetId: node.id,
       brush: 'draw',
-      at: [0, 0, 0.05],
-      radius: 0.02,
+      at: [0, 0, 50],
+      radius: 20,
       strength: 0.5,
       dynamicTopology: false,
     }, makeCtx()) as { ok: boolean; error?: string; undoDepth: number };
@@ -579,7 +579,7 @@ describe('View & Section command audit fixes', () => {
     expect(resBadPreset.ok).toBe(false);
     expect(useStore.getState().dimsEnabled).toBe(false);
 
-    const okRes = await viewCommands.SET_CAMERA({ dims: true, position: [0, -1, 1], target: [0, 0, 0] }, makeCtx()) as { ok: boolean };
+    const okRes = await viewCommands.SET_CAMERA({ dims: true, position: [0, -1000, 1000], target: [0, 0, 0] }, makeCtx()) as { ok: boolean };
     expect(okRes.ok).toBe(true);
     expect(useStore.getState().dimsEnabled).toBe(true);
     expect(useStore.getState().cameraOverride).toEqual({ position: [0, -1, 1], target: [0, 0, 0] });
@@ -834,7 +834,7 @@ describe('View & Section command audit fixes', () => {
     expect(badAxis.ok).toBe(false);
 
     // Works in Node without window
-    const dist = await viewCommands.MEASURE({ from: [0, 0, 0], to: [0.1, 0, 0], snap: false }, makeCtx()) as { ok: boolean; distanceMm: number };
+    const dist = await viewCommands.MEASURE({ from: [0, 0, 0], to: [100, 0, 0], snap: false }, makeCtx()) as { ok: boolean; distanceMm: number };
     expect(dist.ok).toBe(true);
     expect(dist.distanceMm).toBeCloseTo(100, 3);
   });
@@ -865,7 +865,7 @@ describe('View & Section command audit fixes', () => {
     await expect(viewCommands.SET_REFERENCE_IMAGE({ imageId: 'r1', height: true }, makeCtx())).rejects.toThrow(/height/i);
     await expect(viewCommands.SET_REFERENCE_IMAGE({ imageId: 'r1', height: [2] }, makeCtx())).rejects.toThrow(/height/i);
     await expect(viewCommands.SET_REFERENCE_IMAGE({ imageId: 'r1', height: NaN }, makeCtx())).rejects.toThrow(/height/i);
-    await expect(viewCommands.SET_REFERENCE_IMAGE({ imageId: 'r1', height: 25 }, makeCtx())).rejects.toThrow(/height/i);
+    await expect(viewCommands.SET_REFERENCE_IMAGE({ imageId: 'r1', height: 25000 }, makeCtx())).rejects.toThrow(/height/i);
   });
 
   it('GET_SCHEMA lists exact SCULPT_BASES and HARDWARE_KINDS names', async () => {

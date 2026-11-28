@@ -29,6 +29,7 @@ import { bodyWorldPositions, walkBodiesWorld } from '../../utils/bodyWorld';
 import { objectReply } from '../../utils/objectReply';
 import { meshPage } from '../../utils/meshPage';
 import { initialContacts } from '../initialContacts';
+import { sceneHasMovableBodies } from '../../utils/convexDecomposition';
 import {
   collectFilledCavities, isFabricationScene, isVisualOnlyNode, staleBodies, stockReport, summarizeNode,
 } from '../../utils/sceneSummary';
@@ -42,6 +43,7 @@ import { sealCheckFor } from './bodyFeatures';
 import { bodyNamer, jointTypes, resolveBodyFilter } from '../../utils/headlessReport';
 import { digestTelemetry } from '../../utils/telemetryDigest';
 import type { NoteCard } from '../../utils/noteCards';
+import { vecMToMm, vecMmToM } from './mcpUnits';
 import type { McpCommands } from './types';
 
 const getPhysicsWindow = (): PhysicsWindow | null =>
@@ -260,7 +262,15 @@ async function takeScreenshot(msg: Record<string, unknown>, waitedInQueue = fals
       const statusNow = usePathTraceStatus.getState();
       const alreadyDone = before.render
         && (statusNow.phase === 'done' || (statusNow.phase === 'rendering' && statusNow.samples >= target));
+      let scaledRenderer = false;
       if (!alreadyDone) {
+        // Scale the renderer before tracing when scale < 1 so CPU/software WebGL
+        // (e.g. SwiftShader) traces proportionally fewer pixels instead of full-res.
+        if (scale < 1) {
+          const scaleState = applyRenderScale(gl, win?._physics_composer, scale);
+          restoreScale = scaleState.restore;
+          scaledRenderer = scaleState.scaledRenderer;
+        }
         await new Promise<void>((resolve) => {
           let settled = false;
           const finish = () => {
@@ -279,7 +289,13 @@ async function takeScreenshot(msg: Record<string, unknown>, waitedInQueue = fals
         });
       }
       actualRenderSamples = usePathTraceStatus.getState().samples;
-      if (scale < 1) {
+      if ((actualRenderSamples ?? 0) === 0) {
+        // Path tracer produced 0 samples (e.g. software WebGL shader compile timeout);
+        // draw the raster view instead of returning a blank black canvas.
+        if (clean) restoreOutlines = suppressComposerOutlines(win?._physics_composer);
+        renderViewportNow();
+      }
+      if (scale < 1 && !scaledRenderer) {
         const down = downsampleCanvas(gl.domElement, scale);
         if (down) {
           dataUrl = down.dataUrl;
@@ -339,7 +355,11 @@ async function takeScreenshot(msg: Record<string, unknown>, waitedInQueue = fals
   const ink = (typeof document !== 'undefined' && document.documentElement?.classList?.contains('dark')) ? 'white' : 'black';
   const notes: string[] = [];
   if (wanted.render) {
-    notes.push(`Ray-traced Render mode (${actualRenderSamples ?? 0} samples).`);
+    if ((actualRenderSamples ?? 0) === 0) {
+      notes.push('Ray-traced Render mode produced 0 samples within the timeout; fell back to standard WebGL render.');
+    } else {
+      notes.push(`Ray-traced Render mode (${actualRenderSamples} samples).`);
+    }
   } else if (wanted.edges) {
     notes.push(`Edges view is on: the thin ${ink} lines along corners, and ${ink} specks on fine detail (text, patterns, sculpted creases, small holes), are ink lines drawn on edges sharper than 20-30 degrees, not geometry or defects. Pass show_edges: false for a frame without them.`);
   }
@@ -401,7 +421,11 @@ export const viewCommands: McpCommands = {
     // last-known override/preset if the viewport hasn't mounted yet.
     const live = getLiveCameraPose();
     return {
-      ...(live ?? {}),
+      ...(live ? {
+        ...live,
+        ...(Array.isArray(live.position) ? { position: vecMToMm(live.position) } : {}),
+        ...(Array.isArray(live.target) ? { target: vecMToMm(live.target) } : {}),
+      } : {}),
       preset: store.cameraOverride ? null : store.cameraView,
       isOverride: store.cameraOverride !== null,
       dims: store.dimsEnabled,
@@ -446,13 +470,13 @@ export const viewCommands: McpCommands = {
       return { ok: true };
     }
     if (!isFiniteVec3(msg.position)) {
-      return { ok: false, error: 'position must be a [x,y,z] array of finite numbers in MuJoCo world space (or pass preset instead)' };
+      return { ok: false, error: 'position must be a [x,y,z] array of finite numbers in millimetres (or pass preset instead)' };
     }
     if (msg.target !== undefined && !isFiniteVec3(msg.target)) {
-      return { ok: false, error: 'target must be a [x,y,z] array of finite numbers in MuJoCo world space' };
+      return { ok: false, error: 'target must be a [x,y,z] array of finite numbers in millimetres' };
     }
-    const target: [number, number, number] = msg.target ? [msg.target[0], msg.target[1], msg.target[2]] : [0, 0, 0];
-    const position: [number, number, number] = [msg.position[0], msg.position[1], msg.position[2]];
+    const target = (msg.target ? vecMmToM([msg.target[0], msg.target[1], msg.target[2]]) : [0, 0, 0]) as [number, number, number];
+    const position = vecMmToM([msg.position[0], msg.position[1], msg.position[2]]) as [number, number, number];
     if (Math.hypot(position[0] - target[0], position[1] - target[1], position[2] - target[2]) < 1e-6) {
       return { ok: false, error: 'position and target must not be coincident' };
     }
@@ -486,7 +510,8 @@ export const viewCommands: McpCommands = {
       } : {}),
       nodes: (() => {
         const world = bodyWorldPositions(store.sceneGraph.nodes, { model: store.model, data: store.data, stale });
-        return (store.sceneGraph.nodes || []).map((n) => summarizeNode(n, { model: store.model, stale, world }));
+        const sceneHasMovable = sceneHasMovableBodies(store.sceneGraph.nodes);
+        return (store.sceneGraph.nodes || []).map((n) => summarizeNode(n, { model: store.model, stale, world, sceneHasMovable }));
       })(),
       // What to buy: every bought part counted, bar stock packed.
       ...(() => {
@@ -566,10 +591,10 @@ export const viewCommands: McpCommands = {
     const patch: Parameters<typeof upsertReferenceImage>[2] = readReferencePatch(msg);
     if (msg.height !== undefined) {
       const h = typeof msg.height === 'string' && msg.height.trim() !== '' ? Number(msg.height) : msg.height;
-      if (typeof h !== 'number' || !Number.isFinite(h) || h <= 0 || h > 20) {
-        throw new Error('height must be a finite number more than 0 and at most 20 m');
+      if (typeof h !== 'number' || !Number.isFinite(h) || h <= 0 || h > 20_000) {
+        throw new Error('height must be a finite number more than 0 and at most 20000 mm');
       }
-      if (msg.width === undefined) patch.height = h;
+      if (msg.width === undefined) patch.height = h / 1000;
     }
     if (typeof image === 'string' && image) {
       Object.assign(patch, await normalizeReferencePicture(image.startsWith('data:') ? image : `data:image/png;base64,${image}`));
@@ -731,9 +756,9 @@ export const viewCommands: McpCommands = {
     }
     const point = (value: unknown, name: string): [number, number, number] => {
       if (!Array.isArray(value) || value.length < 3 || !value.every((v) => typeof v === 'number' && Number.isFinite(v))) {
-        throw new Error(`${name} must be a point [x, y, z] in metres, in the world frame`);
+        throw new Error(`${name} must be a point [x, y, z] in millimetres, in the world frame`);
       }
-      return [value[0], value[1], value[2]];
+      return [value[0] / 1000, value[1] / 1000, value[2] / 1000];
     };
     // The DRAWN scene, not the document: that is where the transforms
     // have been applied, where a boolean has been evaluated, and where a

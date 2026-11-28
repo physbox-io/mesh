@@ -47,6 +47,12 @@ export function seedClothModels(models: [string, ClothModel][] | undefined): voi
   for (const [exact, m] of models ?? []) cacheModel(exact, m);
 }
 
+const tinted = (c: number[], k: number) => [c[0] * k, c[1] * k, c[2] * k, c[3] ?? 1];
+
+/** The cloths the last build left out, and why: reported even when none was built. */
+let lastFailures: string[] = [];
+export const clothBuildFailures = (): string[] => lastFailures;
+
 export interface ClothWorld {
   sim: ClothSim;
   /** What each cloth was built from, to tell whether a rebuild is the same cloth (how far its zips are done up aside: that is done to it as it runs). */
@@ -61,7 +67,13 @@ export interface ClothWorld {
   warnings: string[];
   /** Pose the colliders from where MuJoCo has every body now. */
   pose: () => void;
-  advance: (dt: number, env: ClothEnv) => void;
+  /**
+   * The cloth on by `dt`, posed first if a substep is due. With a deadline
+   * (performance.now() ms) it may stop between substeps and return false;
+   * `finish` then runs the rest, exactly as it would have run.
+   */
+  advance: (dt: number, env: ClothEnv, deadline?: number) => boolean;
+  finish: (deadline?: number) => boolean;
 }
 
 /** Write row-major 3x3 and a position into `out` without allocating. */
@@ -145,6 +157,7 @@ export function buildClothWorld(
   const graphWorlds = new Map<string, THREE.Matrix4>();
   walkBodiesWorld(scene.nodes, (n, world) => { graphWorlds.set(n.name || n.id, world); });
   const cloths = clothInputs(scene.nodes);
+  lastFailures = [];
   if (!cloths.length) return null;
   // What each cloth is built from (its spec, where it stands, and the
   // measurements it is cut to), and the build of its form's geoms. A garment
@@ -163,7 +176,8 @@ export function buildClothWorld(
   // The same cloth in the last build, by name: one added or deleted before it moves the rest along.
   const prevIndex = new Map((previous?.models ?? []).map((m, j) => [m.name, j]));
   const prevOf: (number | undefined)[] = [];
-  const models = cloths.map(({ node, world, form, cut, exact }) => {
+  const failed: string[] = [];
+  const built = cloths.map(({ node, world, form, cut, exact }): ClothModel | null => {
     const draft = node.cloth?.garment;
     const trims = draft ? garmentSettings(draft).trims : undefined;
     trims?.forEach((t, k) => { if (t.kind === 'zipper') zipsAsked.set(`${node.name || node.id}#${k}`, doneUp(t)); });
@@ -189,7 +203,7 @@ export function buildClothWorld(
           previous.models[pj].groups.map((g) => {
             const pName = g.name.slice((node.name || node.id).length + 2);
             const pc = node.cloth?.pieces?.find((q) => q.name === pName);
-            const rgba = pc ? (pc.rgba ?? [0.25, 0.5, 0.85, 1]) : (node.cloth?.garment?.rgba ?? g.rgba);
+            const rgba = pc ? (pc.rgba ?? [0.25, 0.5, 0.85, 1]) : (node.cloth?.garment && g.tint !== undefined ? tinted(garmentSettings(node.cloth.garment).rgba, g.tint) : g.rgba);
             const pat = pc ? pc.pattern : g.pattern;
             return [rgba, pat, g.trims?.map((t) => t.rgba)];
           }),
@@ -210,19 +224,40 @@ export function buildClothWorld(
           };
         }
       } else if (node.cloth?.garment && !node.cloth.garment.trims?.some((t) => t.rgba) && !node.cloth.garment.pockets?.some((p) => p.rgba) && !(typeof node.cloth.garment.belt === 'object' && node.cloth.garment.belt?.rgba) && !node.cloth.garment.collar?.rgba && !node.cloth.garment.attached?.some((a) => a.rgba || a.pattern)) {
+        // Each piece its own shade of the new colour (backs darker); one with a colour of its own keeps it.
         const gRgba = garmentSettings(node.cloth.garment).rgba ?? [0.28, 0.36, 0.52, 1];
         m = {
           ...previous.models[pj],
-          groups: previous.models[pj].groups.map((g) => ({ ...g, rgba: gRgba })),
+          // The pieces that take the garment's colour take the new one, shaded as they were; the rest keep their own.
+          groups: previous.models[pj].groups.map((g) => (g.tint !== undefined ? { ...g, rgba: tinted(gRgba, g.tint) } : g)),
         };
       }
     }
     if (!m) {
-      m = clothModel(node, world, scene.nodes);
+      // A cloth that cannot be built (a kind or fabric that is not one, a form
+      // that is gone) is left out with a warning, and the rest of the scene's
+      // cloth still runs: thrown from here, it took the whole load down.
+      try {
+        m = clothModel(node, world, scene.nodes);
+      } catch (err) {
+        failed.push(`${node.name || node.id}: not built: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
       cacheModel(exact, m);
     }
     return m;
   });
+  const kept = built.map((m, i) => (m ? i : -1)).filter((i) => i >= 0);
+  if (kept.length < built.length) {
+    const k = kept.map((i) => keys[i]), f = kept.map((i) => formBuilds[i]);
+    keys.length = 0; keys.push(...k);
+    formBuilds.length = 0; formBuilds.push(...f);
+    const po = kept.map((i) => prevOf[i]);
+    prevOf.length = 0; prevOf.push(...po);
+  }
+  const models = kept.map((i) => built[i]!);
+  lastFailures = failed;
+  if (!models.length) return null;
   const bodyIdMap = new Map<string, number>();
   const lookupBodyId = (name: string): number => {
     let id = bodyIdMap.get(name);
@@ -267,13 +302,16 @@ export function buildClothWorld(
   // Settled before it is first drawn: a paused scene shows the cloth at rest, not as modelled.
   sim.settleNow();
   const pose = () => sim.setPoses(bodyPose, geomPose);
-  const warnings = models.flatMap((m) => (m.warnings ?? []).map((w) => `${m.name}: ${w}`));
+  const warnings = [...failed, ...models.flatMap((m) => (m.warnings ?? []).map((w) => `${m.name}: ${w}`))];
   if (sim.settleCut) warnings.push(sim.settleCut);
   return {
     sim, keys, models, zipsAsked, formBuilds, warnings, pose,
-    advance: (dt, env) => {
+    advance: (dt, env, deadline) => {
+      // One owed still runs on its own poses, before these are taken.
+      if (sim.busy) sim.finish();
       if (sim.willSubstep(dt)) pose();
-      sim.advance(dt, env);
+      return sim.advance(dt, env, deadline);
     },
+    finish: (deadline) => sim.finish(deadline),
   };
 }

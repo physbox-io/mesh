@@ -14,9 +14,10 @@
  * Positions in the world frame (the node's transform applied), Z-up, metres.
  */
 
-import { garmentNameWarnings, linePicks } from './clothNames';
+import { assertClothSpec } from './clothValidate';
+import { garmentNameWarnings, linePicks, pieceNamePicks } from './clothNames';
 import * as THREE from 'three';
-import type { BodyFormMeasurements, ClothMaterial, ClothMaterialName, ClothPatternPrint, GarmentBelt, GarmentDraft, GarmentTrim } from '../../types/cloth';
+import type { BodyFormMeasurements, ClothMaterial, ClothMaterialName, ClothPatternPrint, GarmentBelt, GarmentDraft, GarmentPieceFabric, GarmentTrim } from '../../types/cloth';
 import type { SceneNode } from '../../types/scene';
 import { chain, CLOTH_MATERIALS, clothBendRigidity, clothMaterial, DEFAULT_CLOTH_SPACING, DEFAULT_SEW_TIME, meshCloth, resolveClothMaterial } from './clothMesh';
 import { restOff } from './garmentPlan';
@@ -32,6 +33,8 @@ import { beltPaths, beltPieces, LAP_OFF, pocketPieces, standPiece, type AddOnPie
 import { attachedPieces } from './garmentAttached';
 import { collarPieces, lapelPieces } from './garmentCollars';
 import { fullSides, panelEdgeEase } from './garmentFullness';
+import { openWedges } from './openWedges';
+import { cutEdges, type FlatEdge } from './patternEdges';
 
 /** A piece as it is cut: its points flat, metres, v up the body; its outline in order round it; how much it had to stretch to lie flat; its trims, by point. */
 export interface FlatPattern {
@@ -43,6 +46,10 @@ export interface FlatPattern {
   lines?: number[][];
   /** Double-ended darts inside its outline: loops of its points (local indices). */
   darts?: number[][];
+  /** Each point's shell point, or -1 for one of its own: points with the same id on two pieces are sewn together. */
+  ids?: number[];
+  /** Each outline edge (outline[k] to outline[k + 1]): the line it lies on and what it is sewn to. */
+  edges?: FlatEdge[];
 }
 
 /** A stud, button, bead or zipper tooth riding on one of a group's points (its local index), `size` across. */
@@ -245,6 +252,12 @@ export interface ClothRenderGroup {
   /** `<body>__<piece>`, as the viewport names a cloth piece. */
   name: string;
   rgba: number[];
+  /**
+   * Its colour as a shade of the garment's (rgba is the garment's times
+   * this: a back panel's 0.85); unset where it has a colour of its own. What
+   * a recolour carries the cloth over by.
+   */
+  tint?: number;
   /** The fabric, for how it is drawn. */
   material: ClothMaterialName;
   /** The piece flat, for a garment cut from a modelled shell. */
@@ -253,6 +266,8 @@ export interface ClothRenderGroup {
   trims?: ClothTrim[];
   /** Printed SVG pattern on this group. */
   pattern?: ClothPatternPrint;
+  /** Its colour is the garment's times this, and follows it as it changes (a back a shade darker); unset, its own. */
+  tint?: number;
   /** Particle drawn at each of the group's vertices. */
   particles: number[];
   /** Triangles, as indices into `particles`. */
@@ -372,7 +387,7 @@ function vertexNormals(points: number[][], tris: number[], world: THREE.Matrix4)
   return n.map((q) => { w.set(q[0], q[1], q[2]).applyMatrix3(nm).normalize(); return [w.x, w.y, w.z]; });
 }
 
-const shade = (c: number[], k: number) => [c[0] * k, c[1] * k, c[2] * k, c[3] ?? 1];
+export const shade = (c: number[], k: number) => [c[0] * k, c[1] * k, c[2] * k, c[3] ?? 1];
 
 /** Pairs of edges into a map keyed by particle pair, averaging lengths seen more than once. */
 class EdgeSet {
@@ -570,6 +585,14 @@ function joinGroup(group: ClothRenderGroup, piece: AddOnPiece, particleOf: (loca
     s2 += p[0] * q[1] - q[0] * p[1];
   }
   if (s2 < 0) chosen = [chosen[0], ...chosen.slice(1).reverse()];
+  // Its edges' classes carried to the new outline: the panel's own edges keep
+  // theirs, the add-on's (points of its own) have none.
+  if (flat.edges) {
+    const was = new Map<string, FlatEdge>(), om = flat.outline.length;
+    flat.outline.forEach((p, k) => { const q = flat.outline[(k + 1) % om]; was.set(`${p},${q}`, flat.edges![k]); was.set(`${q},${p}`, flat.edges![k]); });
+    flat.edges = chosen.map((p, k) => was.get(`${p},${chosen[(k + 1) % chosen.length]}`) ?? {});
+  }
+  if (flat.ids) while (flat.ids.length < flat.uv.length) flat.ids.push(-1);
   flat.outline = chosen;
   return true;
 }
@@ -597,6 +620,8 @@ function paintlessShell(draft: GarmentDraft, form: BodyFormMeasurements, layer: 
 
 export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNode[]): ClothModel {
   const spec = node.cloth!;
+  // A kind or fabric that is not one stops here in words: read off undefined, it hung the worker.
+  assertClothSpec(spec, node.name || node.id);
   const material = clothMaterial(spec), materialName: ClothMaterialName = spec.material ?? 'jersey';
   const sewTime = spec.sewTime ?? DEFAULT_SEW_TIME;
   const name = node.name || node.id;
@@ -620,8 +645,8 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     stitchSew.push(sew);
   };
   const ties: ClothTieSpec[] = [];
-  const addMass = (a: number, b: number, c: number, area: number) => {
-    const m = (material.arealDensity * area) / 3;
+  const addMass = (a: number, b: number, c: number, area: number, density = material.arealDensity) => {
+    const m = (density * area) / 3;
     mass[a] += m; mass[b] += m; mass[c] += m;
   };
   const flatArea = (p: number[], q: number[], r: number[]) => Math.abs((q[0] - p[0]) * (r[1] - p[1]) - (r[0] - p[0]) * (q[1] - p[1])) / 2;
@@ -691,6 +716,8 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     x0 = shell.points.map(toWorld);
     mass = new Array(x0.length).fill(0);
     const settings = garmentSettings(spec.garment);
+    /** What pieceFabrics says of a piece, its entries merged in order. */
+    const fabricOf = (piece: string): GarmentPieceFabric => Object.assign({}, ...(settings.pieceFabrics ?? []).filter((f) => pieceNamePicks(piece, f.piece)));
     const L = bodyLandmarks(form.bodyForm);
     const colour = settings.rgba;
     const seamPaths = shell.seams.map((sm) => sm.path);
@@ -702,15 +729,18 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     // share becomes a stitch between their copies, closed when the scene plays.
     const asPieces = spec.layout === 'pieces';
     if (asPieces) { x0 = []; mass = []; }
-    const copies = new Map<number, number[]>();
-    // Points on an open seam (a jacket's front) belong to one panel each:
-    // the second panel to reach one gets its own, unsewn copy.
+    const copies = new Map<number, number[]>(), copyPanel = new Map<number, number[]>();
+    // Points on an open seam (a jacket's front) belong to the cloth on each
+    // side of the cut separately: round each, its panels fall into wedges
+    // parted by the open edges there (openWedges), and each wedge past the
+    // first gets its own, unsewn copy. Panels on one side, a yoke and the
+    // front below it, share theirs and stay sewn.
     const openPoints = new Set<number>();
     for (const sm of shell.seams) if (sm.open) for (const i of sm.path) openPoints.add(i);
-    const claimed = new Map<number, number>();
-    const openFirst = new Map<number, number>(), openSecond = new Map<number, number>();
-    /** The panel each open point's second copy is on. */
-    const secondPanel = new Map<number, number>();
+    const wedges = openWedges(shell);
+    /** Each open point's particle per wedge (the first wedge to reach it keeps the point), and the first panel in each wedge. */
+    const wedgeParticle = new Map<number, Map<number, number>>(), wedgePanel = new Map<number, Map<number, number>>();
+    const wedgeHere = (g: number, k: number) => wedges.wedgeOf.get(g)?.get(k) ?? 0;
     const trimList = trimPoints(shell.points, [...shell.edges, ...shell.seams, ...(shell.marks ?? [])], settings.trims ?? [], shell.tris);
     const sliderDrawn = new Set<TrimPlace>();
     const pointDrawn = new Set<TrimPlace>();
@@ -756,6 +786,8 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     const spreadStitches: [number, number][] = [];
     const seamTackAt: { particle: number; group: number; a: number; b: number; t: number; offset: number; across: number }[] = [];
     const spreadRows = new Map<number, { ratio: number; row: [number, number][] }>();
+    // Each panel's piece as cut: its group, its points' shell points, its outline; classified once all are cut.
+    const cutPieces: { group: number; name: string; ids: number[]; outline: number[]; near?: number[] }[] = [];
     const flats = shell.panels.map((panel, k) => {
       const flat = flattenPanel(panel.name, shell.cut ?? shell.points, shell.tris, panel.tris, seamPaths, 15, panel.upAxis, panelEdgeEase(shell, sides, k));
       if (ease < 0 || bandEase < 0) {
@@ -796,7 +828,8 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
           shellNormals.push(turn.set(spread.normal[l][0], spread.normal[l][1], spread.normal[l][2]).transformDirection(world).toArray());
           return x0.length - 1;
         });
-        piece = { ...flat, points: ids, uv: spread.uv, tris: spread.tris, outline: spread.outline };
+        // Its ease and darts as carried onto its own mesh: the flat piece's are by the flat piece's corners and points.
+        piece = { ...flat, points: ids, uv: spread.uv, tris: spread.tris, outline: spread.outline, edgeEase: spread.edgeEase, darts: spread.darts };
       }
       let particleOf = (local: number) => piece.points[local];
       let facing = [0, -1, 0];
@@ -804,10 +837,15 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
         const own = new Map<number, number>();
         piece.points.forEach((g, local) => {
           if (!openPoints.has(g)) return;
-          if (claimed.get(g) === undefined) { claimed.set(g, k); openFirst.set(g, g); return; }
-          const dup = openSecond.get(g) ?? x0.length;
-          if (!openSecond.has(g)) { openSecond.set(g, dup); secondPanel.set(g, k); x0.push(x0[g].slice()); mass.push(0); }
-          own.set(local, dup);
+          const w = wedgeHere(g, k);
+          const at = wedgeParticle.get(g) ?? wedgeParticle.set(g, new Map()).get(g)!;
+          const by = wedgePanel.get(g) ?? wedgePanel.set(g, new Map()).get(g)!;
+          if (!at.has(w)) {
+            if (!at.size) at.set(w, g);
+            else { at.set(w, x0.length); x0.push(x0[g].slice()); mass.push(0); }
+            by.set(w, k);
+          }
+          if (at.get(w) !== g) own.set(local, at.get(w)!);
         });
         if (own.size) particleOf = (local: number) => own.get(local) ?? piece.points[local];
       }
@@ -822,29 +860,32 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
         for (const [u, v] of piece.uv) x0.push(toWorld([n[0] * along + right[0] * u, n[1] * along + right[1] * u, Math.max(0.02, centre[2] + v - zMean)]));
         for (let i = 0; i < piece.uv.length; i++) {
           const g = piece.points[i];
-          if (openPoints.has(g) && claimed.get(g) === undefined) claimed.set(g, k);
           mass.push(0);
-          if (g >= 0) (copies.get(g) ?? copies.set(g, []).get(g)!).push(base + i);
+          if (g >= 0) { (copies.get(g) ?? copies.set(g, []).get(g)!).push(base + i); (copyPanel.get(g) ?? copyPanel.set(g, []).get(g)!).push(k); }
         }
         particleOf = (local: number) => base + local;
         facing = new THREE.Vector3(n[0], n[1], n[2]).transformDirection(world).toArray();
       }
       hostPanels.push({ name: panel.name, uv: piece.uv, tris: piece.tris, particles: piece.points.map((_, i) => particleOf(i)), normal: asPieces ? () => facing : (l) => shellNormals[piece.points[l]] });
       wornPanels.push({ name: panel.name, uv: piece.uv, tris: piece.tris, particles: piece.points, normal: (l) => shellNormals[piece.points[l]] });
+      // A panel in a fabric of its own (pieceFabrics): its stretch, bending and weight that fabric's, against the garment's.
+      const fab = fabricOf(panel.name);
+      const pm = fab.material || fab.materialOverrides ? resolveClothMaterial(CLOTH_MATERIALS[fab.material ?? materialName], { ...spec.materialOverrides, ...fab.materialOverrides }) : material;
+      const stretch = (pm.young * pm.thickness) / (material.young * material.thickness), bendScale = clothBendRigidity(pm) / Math.max(1e-12, clothBendRigidity(material));
       for (let t = 0; t < piece.tris.length; t += 3) {
         const [i, j, l] = [piece.tris[t], piece.tris[t + 1], piece.tris[t + 2]];
         const [a, b, c] = [particleOf(i), particleOf(j), particleOf(l)];
         tris.push(a, b, c);
         panelOf.push(k);
-        for (const [p, q] of [[i, j], [j, l], [l, i]]) edges.add(particleOf(p), particleOf(q), Math.hypot(piece.uv[p][0] - piece.uv[q][0], piece.uv[p][1] - piece.uv[q][1]));
-        addMass(a, b, c, flatArea(piece.uv[i], piece.uv[j], piece.uv[l]));
+        for (const [p, q] of [[i, j], [j, l], [l, i]]) edges.add(particleOf(p), particleOf(q), Math.hypot(piece.uv[p][0] - piece.uv[q][0], piece.uv[p][1] - piece.uv[q][1]), stretch);
+        addMass(a, b, c, flatArea(piece.uv[i], piece.uv[j], piece.uv[l]), pm.arealDensity);
       }
       // Eased cloth goes into its shorter seam evenly, its points shared: free to sit that much shorter than cut.
       if (piece.edgeEase) piece.edgeEase.forEach((e, c) => { if (e > 0) edges.setMinRatio(particleOf(piece.tris[c]), particleOf(piece.tris[c - (c % 3) + ((c + 1) % 3)]), 1 / (1 + e)); });
       if (material.bending) {
         const before = bends.quads.length / 4;
         const pressedRest = settings.pressed && !spread ? piece.points.map((g) => toWorld(shell.points[g])) : undefined;
-        addBends(piece.tris, piece.uv, particleOf, bends, 1, pressedRest);
+        addBends(piece.tris, piece.uv, particleOf, bends, bendScale, pressedRest);
         // Gathered or pleated cloth keeps the set of its folds as sewn, as a seam
         // keeps its modelled curve (addSeamBends): resting flat, a spread piece
         // never came to rest (a woven skirt gathered 2x still moved 120 mm/s
@@ -915,13 +956,26 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
           if (tr) trims.push(tr);
         }
       }
+      const tint = panel.name.startsWith('back') ? 0.85 : 1;
+      const ids = spread ? spread.points.slice() : piece.points.slice();
+      let near: number[] | undefined;
+      if (spread) { near = ids.slice(); for (const st of spread.seamStitches) if (near[st.local] < 0) near[st.local] = st.point; }
+      cutPieces.push({ group: groups.length, name: panel.name, ids, outline: piece.outline, ...(near ? { near } : {}) });
       groups.push({
-        name: `${name}__${panel.name}`, rgba: panel.name.startsWith('back') ? shade(colour, 0.85) : colour, material: materialName,
+        name: `${name}__${panel.name}`, rgba: fab.rgba ?? shade(colour, tint), ...(fab.rgba ? {} : { tint }), material: fab.material ?? materialName,
         particles: piece.points.map((_, i) => particleOf(i)), tris: piece.tris.slice(),
         flat: { uv: piece.uv.map(([u, v]) => [u, v]), outline: piece.outline.slice(), strain95: piece.strain95, marks: trims, ...(piece.darts ? { darts: piece.darts.map((l) => l.slice()) } : {}) },
         trims,
       });
     });
+    {
+      const lines = [
+        ...shell.seams.map((sm) => ({ name: sm.name, path: sm.path, sewn: !sm.open, ...(sm.open ? { open: true } : {}) })),
+        ...shell.edges.map((e) => ({ name: e.name, path: e.path, sewn: false })),
+      ];
+      const classified = cutEdges(cutPieces, lines);
+      cutPieces.forEach((c, i) => { const f = groups[c.group].flat; if (f) { f.ids = c.ids; f.edges = classified[i]; } });
+    }
     // A spread piece hangs from the seam it is tacked to, whose points no
     // longer share its triangles' mass: half of each tacked point's mass is
     // carried on the seam, as a shared point's would be. Without, the slivers
@@ -992,9 +1046,14 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     if (rodRuns.length) for (const grp of groups) { const lines = rodLines(grp.particles, rodRuns); if (lines.length && grp.flat) grp.flat.lines = lines; }
     if (asPieces) {
       for (const [p, g] of spreadStitches) { const to = copies.get(g)?.[0]; if (to !== undefined) addStitch(p, to, sewTime); }
+      // An open point's copies sewn only to the others on their side of the cut.
       for (const [g, list] of copies.entries()) {
-        if (openPoints.has(g)) continue;
-        for (let i = 1; i < list.length; i++) addStitch(list[i - 1], list[i], sewTime);
+        const ks = copyPanel.get(g)!, last = new Map<number, number>();
+        list.forEach((p, i) => {
+          const w = openPoints.has(g) ? wedgeHere(g, ks[i]) : 0, prev = last.get(w);
+          if (prev !== undefined) addStitch(prev, p, sewTime);
+          last.set(w, p);
+        });
       }
     } else if (material.bending) {
       addSeamBends(x0, tris, bends, bends);
@@ -1015,20 +1074,28 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       if (!pl.closed || (pl.trim.kind !== 'button' && pl.trim.kind !== 'buckle')) continue;
       fastenAt.set(pl.point, pl.trim);
     }
-    const pairOf = (g: number): [number, number, number] | null => {
-      if (!openPoints.has(g)) return null;
-      if (asPieces) {
-        const list = copies.get(g);
-        return list && list.length >= 2 ? [list[0], list[1], sewTime] : null;
-      }
-      const p1 = openFirst.get(g), p2 = openSecond.get(g);
-      return p1 !== undefined && p2 !== undefined && p1 !== p2 ? [p1, p2, 0] : null;
+    /** The particle each wedge round an open point has: worn, its own; as pieces, the first copy of it on a panel in that wedge. */
+    const wedgeParticles = (g: number): Map<number, number> => {
+      if (!asPieces) return wedgeParticle.get(g) ?? new Map();
+      const out = new Map<number, number>(), ks = copyPanel.get(g) ?? [];
+      (copies.get(g) ?? []).forEach((p, i) => { const w = wedgeHere(g, ks[i]); if (!out.has(w)) out.set(w, p); });
+      return out;
     };
-    for (const [g] of fastenAt) { const pr = pairOf(g); if (pr) addStitch(pr[0], pr[1], pr[2]); }
+    /** The copies facing each other across the cut at an open point, to fasten (each pair once). */
+    const pairsOf = (g: number): [number, number, number][] => {
+      if (!openPoints.has(g)) return [];
+      const at = wedgeParticles(g), out: [number, number, number][] = [];
+      for (const [a, b] of wedges.across.get(g) ?? []) {
+        const p1 = at.get(a), p2 = at.get(b);
+        if (p1 !== undefined && p2 !== undefined && p1 !== p2) out.push([p1, p2, asPieces ? sewTime : 0]);
+      }
+      return out;
+    };
+    for (const [g] of fastenAt) for (const pr of pairsOf(g)) addStitch(pr[0], pr[1], pr[2]);
     for (const [trim, at] of zipAt) {
       const z: ClothZip = { trim: (settings.trims ?? []).indexOf(trim), pairs: [], at: [], sew: [], fastened: doneUp(trim) };
       for (const [g, up] of [...at].sort((p, q) => p[1] - q[1])) {
-        const pr = pairOf(g);
+        const pr = pairsOf(g)[0];
         if (pr) { z.pairs.push(pr[0], pr[1]); z.at.push(up); z.sew.push(pr[2]); }
       }
       if (z.at.length) zips.push(z);
@@ -1042,10 +1109,12 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     // two are sewn shut edge to edge, and stay together.
     if (!asPieces) {
       const lap = (settings.trims ?? []).find((t) => t.lap)?.lap ?? 'right';
-      for (const [g, dup] of openSecond) {
-        if (fastenAt.has(g)) continue;
-        const over = panelSide[claimed.get(g)!] === lap ? g : panelSide[secondPanel.get(g)!] === lap ? dup : -1, n = shellNormals[g];
-        if (over < 0 || !n) continue;
+      for (const [g, at] of wedgeParticle) {
+        if (fastenAt.has(g) || at.size < 2) continue;
+        const by = wedgePanel.get(g)!, n = shellNormals[g];
+        const w = [...at.keys()].find((q) => panelSide[by.get(q)!] === lap);
+        if (w === undefined || !n) continue;
+        const over = at.get(w)!;
         for (let c = 0; c < 3; c++) x0[over][c] += LAP_OFF * n[c];
       }
     }
@@ -1056,7 +1125,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     // the neck).
     if (!asPieces) {
       const into = new Map<number, number[]>();
-      for (const [g, p2] of openSecond) if (!fastenAt.has(g) && openFirst.has(g)) { into.set(g, [0, 0, 0]); into.set(p2, [0, 0, 0]); }
+      for (const [g, at] of wedgeParticle) if (!fastenAt.has(g) && at.size > 1) for (const p of at.values()) into.set(p, [0, 0, 0]);
       if (into.size) {
         for (let t = 0; t < tris.length; t += 3) for (let q = 0; q < 3; q++) {
           const acc = into.get(tris[t + q]);
@@ -1098,7 +1167,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
           const overK = holders.find((k) => panelSide[k] === (trim.lap ?? 'right')), underK = holders.find((k) => panelSide[k] !== (trim.lap ?? 'right'));
           if (overK === undefined || underK === undefined) continue;
           const stand = standPiece(`stand_${hostPanels[overK].name}`, run, hostPanels[overK], hostPanels[underK], wornPanels[overK].particles, wornPanels[underK].particles, standWidth(trim), buttons, { ...trim, size: trim.size ?? TRIM_DEFAULTS.button.size, rgba: trim.rgba ?? TRIM_DEFAULTS.button.rgba }, doneUp(trim) > 0, x0);
-          if (stand) { stand.rgba = colour; addOns.push(stand); }
+          if (stand) { stand.rgba = colour; stand.tint = 1; addOns.push(stand); }
         }
       }
     }
@@ -1139,7 +1208,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
         }
       };
       const lapels = settings.lapels && settings.opening ? lapelPieces(settings.lapels, chainLineRuns(shell.edges, 'roll').map((r) => r.run), hostPanels, wornPanels, xUp, spacing) : [];
-      for (const l of lapels) { l.piece.rgba = colour; addOns.push(l.piece); }
+      for (const l of lapels) { l.piece.rgba = colour; l.piece.tint = 1; addOns.push(l.piece); }
       // A shawl's lapels run on round the neck as the collar, cut in one with the fronts.
       const shawl = lapels.length > 0 && !!settings.lapels?.shawl;
       if ((settings.collar || shawl) && !asPieces) {
@@ -1197,6 +1266,11 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       if (sharedAt.size) anyShared = true;
       // Tacked onto an earlier add-on (a belt over a pocket): its points, as particles now.
       piece.tacks = piece.tacks.map((tk) => { const on = tk.onPiece ? placed.get(tk.onPiece) : undefined; return on ? { ...tk, tri: [on(tk.tri[0]), on(tk.tri[1]), on(tk.tri[2])], onPiece: undefined } : tk; });
+      // Its own fabric (pieceFabrics) over the one it was made in.
+      const fab = fabricOf(piece.name);
+      if (fab.material) piece.material = fab.material;
+      if (fab.materialOverrides) piece.materialOverrides = { ...piece.materialOverrides, ...fab.materialOverrides };
+      if (fab.rgba) { piece.rgba = fab.rgba; delete piece.tint; }
       const pm = resolveClothMaterial(CLOTH_MATERIALS[piece.material ?? materialName] ?? material, piece.materialOverrides);
       const stretch = (pm.young * pm.thickness) / (material.young * material.thickness), bend = clothBendRigidity(pm) / Math.max(1e-12, clothBendRigidity(material));
       if (clothBendRigidity(pm) >= BOARD_STIFFNESS) boards.push({ particles: piece.uv.map((_, i) => particleOf(i)), rest: piece.rest3 ?? piece.uv.map(([u, vv]) => [u * (piece.shrink ?? 1), vv]), tris: piece.tris, held: [...piece.tacks.map((tk) => tk.local), ...(piece.shared ?? []).map((sh) => sh.local)] });
@@ -1310,7 +1384,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
       const trims: ClothTrim[] = (piece.trims ?? []).map(({ trim, local }) => ({ kind: trim.kind, particle: local, size: trim.size ?? TRIM_DEFAULTS[trim.kind].size, rgba: trim.rgba ?? TRIM_DEFAULTS[trim.kind].rgba }));
       if (host && joinGroup(host, { ...piece, tris: wound }, particleOf)) continue;
       groups.push({
-        name: `${name}__${piece.name}`, rgba: piece.rgba, material: piece.material ?? materialName,
+        name: `${name}__${piece.name}`, rgba: piece.rgba, ...(piece.tint !== undefined ? { tint: piece.tint } : {}), material: piece.material ?? materialName,
         particles: piece.uv.map((_, i) => particleOf(i)), tris: wound,
         flat: { uv: uv.map(([u, vv]) => [u, vv]), outline: piece.outline.slice(), strain95: piece.strain95 ?? 0, marks: trims },
         ...(trims.length ? { trims } : {}),

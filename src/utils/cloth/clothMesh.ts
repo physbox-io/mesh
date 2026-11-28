@@ -183,8 +183,13 @@ export interface PieceMesh {
   edgeVerts: Record<string, number[]>;
 }
 
-/** Boundary sampled at `step`, interior a triangular lattice, Delaunay, clipped to the outline. */
-export function meshOutline(edges: ClothEdge[], step: number, counts: Record<string, number> = {}): Omit<PieceMesh, 'pts' | 'start'> {
+/**
+ * Boundary sampled at `step`, interior a triangular lattice, Delaunay, clipped
+ * to the outline. `holes`: loops left open inside it (a double-ended dart),
+ * their points used as given, after the outline's; `holeVerts` are their
+ * points' indices, in the loops' order.
+ */
+export function meshOutline(edges: ClothEdge[], step: number, counts: Record<string, number> = {}, holes: UV[][] = []): Omit<PieceMesh, 'pts' | 'start'> & { holeVerts: number[][] } {
   if (edges.length === 0) throw new Error('a cloth piece needs at least one edge');
   const uv: UV[] = [];
   const ids: number[][] = [];
@@ -198,6 +203,9 @@ export function meshOutline(edges: ClothEdge[], step: number, counts: Record<str
   }
   for (let k = 0; k < ids.length; k++) ids[k][ids[k].length - 1] = ids[(k + 1) % ids.length][0];
   const outline = uv.slice();
+  const holeVerts = holes.map((h) => h.map((q) => { uv.push([q[0], q[1]]); return uv.length - 1; }));
+  const holeIndex = holes.map((h) => outlineIndex(h, 2 * step));
+  const inHole = (p: UV) => holeIndex.some((h) => h.inside(p));
   let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
   for (const [u, v] of outline) { minU = Math.min(minU, u); maxU = Math.max(maxU, u); minV = Math.min(minV, v); maxV = Math.max(maxV, v); }
   const dv = (step * Math.sqrt(3)) / 2;
@@ -205,7 +213,7 @@ export function meshOutline(edges: ClothEdge[], step: number, counts: Record<str
   for (let row = 0, v = minV + dv / 2; v < maxV; v += dv, row++) {
     for (let u = minU + (row % 2 ? step / 2 : 0); u < maxU; u += step) {
       const p: UV = [u, v];
-      if (index.inside(p) && index.clearOf(p, step * 0.55)) uv.push(p);
+      if (index.inside(p) && index.clearOf(p, step * 0.55) && !inHole(p) && holeIndex.every((h) => h.clearOf(p, step * 0.55))) uv.push(p);
     }
   }
   const all = delaunay(uv);
@@ -213,7 +221,7 @@ export function meshOutline(edges: ClothEdge[], step: number, counts: Record<str
   for (let t = 0; t < all.length; t += 3) {
     const a = all[t], b = all[t + 1], c = all[t + 2];
     const cx = (uv[a][0] + uv[b][0] + uv[c][0]) / 3, cy = (uv[a][1] + uv[b][1] + uv[c][1]) / 3;
-    if (!index.inside([cx, cy])) continue;
+    if (!index.inside([cx, cy]) || inHole([cx, cy])) continue;
     // Three collinear points along a straight edge make a zero-area sliver,
     // and a flex element with no area has no defined stiffness.
     const cross = (uv[b][0] - uv[a][0]) * (uv[c][1] - uv[a][1]) - (uv[c][0] - uv[a][0]) * (uv[b][1] - uv[a][1]);
@@ -223,7 +231,7 @@ export function meshOutline(edges: ClothEdge[], step: number, counts: Record<str
   }
   const edgeVerts: Record<string, number[]> = {};
   edges.forEach((e, k) => { edgeVerts[e.id] = ids[k]; });
-  return { uv, tris, edgeVerts };
+  return { uv, tris, edgeVerts, holeVerts };
 }
 
 // ---------- 3D ----------

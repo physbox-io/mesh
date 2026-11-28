@@ -23,7 +23,7 @@ import { needsBodyFormBuild } from '../utils/cloth/bodyFormEdit';
 import {
   type PhysicsWindow, MUJOCO_SHIM, buildModelMirror, buildDataMirror, RECYCLE_HEAP_BYTES,
   lastHeapBytes, setLastHeapBytes, lastScriptState, lastClothState, setLastClothState,
-  onNextPaint, liveModelGraph, recycleWorker,
+  onNextPaint, liveModelGraph, recycleWorker, refreshClothStateForRecycle,
   getPhysicsWorkerClient, endVoltLink, prewarmSceneAcousticIRs, silenceAllLiveAcoustics,
 } from './physicsEngine';
 import type { PhysicsState } from './useStore';
@@ -343,6 +343,7 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
         let recycled = false;
         if (lastHeapBytes > RECYCLE_HEAP_BYTES) {
           console.warn(`Proactively recycling the physics worker: the WASM heap has reached ${(lastHeapBytes / 1048576).toFixed(0)} MB, past the ${(RECYCLE_HEAP_BYTES / 1048576).toFixed(0)} MB mark, to stay well clear of the ceiling.`);
+          await refreshClothStateForRecycle();
           recycleWorker();
           recycled = true;
         }
@@ -576,6 +577,10 @@ export function simulationActions({ set, get }: SliceDeps): SimulationActions {
       // the worker mid-build fails a rebuild that was about to succeed (and an
       // MCP command driving one would be told its scene didn't build). The
       // recycle is purely housekeeping — 20s later is just as good.
+      if (recompilesInFlight > 0 || getPhysicsWorkerClient().hasPendingWork()) return;
+      // The cloth as it is now, read before the bodies are below, so the two
+      // are from (nearly) the same moment.
+      await refreshClothStateForRecycle();
       if (recompilesInFlight > 0 || getPhysicsWorkerClient().hasPendingWork()) return;
       console.warn(`Seamlessly recycling the physics worker mid-play: the WASM heap has reached ${(lastHeapBytes / 1048576).toFixed(0)} MB, past the ${(RECYCLE_HEAP_BYTES / 1048576).toFixed(0)} MB mark.`);
       const seedState = {

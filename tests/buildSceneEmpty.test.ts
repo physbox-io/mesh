@@ -38,7 +38,7 @@ const ctx = () => ({ store: useStore.getState(), toId: (v: unknown) => v });
 describe('physics_build_scene', () => {
   it('clears the scene when given no bodies', async () => {
     const built = await sceneCommands.BUILD_SCENE({
-      bodies: [{ id: 'box', name: 'box', pos: [0, 0, 0.1], geoms: [{ type: 'box', size: [0.01, 0.01, 0.01] }] }],
+      bodies: [{ id: 'box', name: 'box', pos: [0, 0, 100], geoms: [{ type: 'box', size: [10, 10, 10] }] }],
     }, ctx());
     expect(built).toMatchObject({ ok: true, nodeCount: 1 });
     expect(useStore.getState().sceneGraph.nodes).toHaveLength(1);
@@ -52,7 +52,7 @@ describe('physics_build_scene', () => {
   });
 
   it('names the scene, and a later build without a name drops it', async () => {
-    const box = { id: 'box', name: 'box', pos: [0, 0, 0.1], geoms: [{ type: 'box', size: [0.01, 0.01, 0.01] }] };
+    const box = { id: 'box', name: 'box', pos: [0, 0, 100], geoms: [{ type: 'box', size: [10, 10, 10] }] };
     await sceneCommands.BUILD_SCENE({ bodies: [box], name: ' Gear housing ' }, ctx());
     expect(useStore.getState().sceneGraph.name).toBe('Gear housing');
     expect(useStore.getState().sceneGraph.nodes).toHaveLength(1);

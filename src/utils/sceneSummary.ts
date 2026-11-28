@@ -313,13 +313,16 @@ const um = (v: number[] | undefined) => v?.map((x) => (typeof x === 'number' ? +
  * only until it lands, a few seconds to minutes later. Reporting "convex hull"
  * then read as the verdict; it is reported as pending instead.
  */
-export function collisionReport(node: SceneNode): Record<string, unknown> {
+export function collisionReport(node: SceneNode, opts?: { sceneHasMovable?: boolean }): Record<string, unknown> {
   if (node.cloth) return {};
   if (node.bodyForm && node.collision !== 'decompose') {
     return { collidesAs: 'body form (exact cloth SDF; hull for rigid contact)' };
   }
   const colliders = (node.geoms || []).filter(g => g.csgDerived === 'collider');
   if (collidersAreStale(node)) {
+    if (opts?.sceneHasMovable === false && node.collision !== 'decompose') {
+      return { collidesAs: 'static display (convex hull; decomposes automatically if a movable body is added)' };
+    }
     return {
       collidesAs: colliders.length > 0
         ? `${colliders.length} convex pieces, out of date: re-decomposing`
@@ -587,6 +590,8 @@ export interface SummaryContext {
   full?: boolean;
   /** World positions by body id (bodyWorldPositions), given where they differ from `pos`. */
   world?: Map<string, BodyWorldPos>;
+  /** Whether the scene has at least one movable/dynamic body needing concave collision. */
+  sceneHasMovable?: boolean;
 }
 
 /**
@@ -676,7 +681,7 @@ export const summarizeNode = (node: SceneNode, ctx: SummaryContext): Record<stri
         ...(node.csgError ? { error: node.csgError } : {}),
       },
     } : {}),
-    ...(node.csgEnabled ? {} : collisionReport(node)),
+    ...(node.csgEnabled ? {} : collisionReport(node, { sceneHasMovable: ctx.sceneHasMovable })),
     ...(node.printPose ? { printPose: { up: node.printPose.up, spinDeg: +(node.printPose.spin * 180 / Math.PI).toFixed(2) } } : {}),
     joints: (node.joints || []).map((j) => ({ name: j.name, type: j.type })),
     ...geomListing(node, !!ctx.full),

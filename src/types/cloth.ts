@@ -714,6 +714,20 @@ export interface GarmentAttachment {
   bend?: number;
 }
 
+/**
+ * A piece of a garment in a fabric or colour of its own: one of its panels
+ * (`front` takes frontL and frontR, as a pocket's panel does) or a piece sewn
+ * on (`collar`, a pocket, an attachment by its name). A yoke in a contrast
+ * colour, sleeves in another cloth, a leather collar on a wool coat.
+ */
+export interface GarmentPieceFabric {
+  piece: string;
+  material?: ClothMaterialName;
+  /** Its fabric's properties changed from `material`'s, as a cloth's own `materialOverrides`. */
+  materialOverrides?: Partial<ClothMaterial>;
+  rgba?: number[];
+}
+
 export interface GarmentDraft {
   garment: GarmentKind;
   /** Name of the body form it is fitted to, refitted whenever that form changes. */
@@ -832,6 +846,8 @@ export interface GarmentDraft {
   curves?: GarmentCurve[];
   /** Cloth of any shape sewn on along its lines: ruffles, ribbons, capes, flounces. */
   attached?: GarmentAttachment[];
+  /** Pieces in a fabric or colour of their own, over the garment's; later entries win. */
+  pieceFabrics?: GarmentPieceFabric[];
   material?: ClothMaterialName;
   rgba?: number[];
 }

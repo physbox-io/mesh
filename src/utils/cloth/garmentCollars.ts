@@ -633,7 +633,7 @@ export function collarPieces(collar: GarmentCollar, run0: number[], closed: bool
       ...Array.from({ length: m - 1 }, (_, k) => loc(i1 - 1 - k, j1)),
       ...Array.from({ length: cols - 2 }, (_, k) => loc(i0, j1 - 1 - k)),
     ];
-    return { name, rgba: colour, ...(collar.material ? { material: collar.material } : {}), ...(collar.materialOverrides ? { materialOverrides: collar.materialOverrides } : {}), uv, tris, outline, start, tacks, shared, pressed: true, strain95: flat.strain95, loc };
+    return { name, rgba: colour, ...(collar.rgba ? {} : { tint: 1 }), ...(collar.material ? { material: collar.material } : {}), ...(collar.materialOverrides ? { materialOverrides: collar.materialOverrides } : {}), uv, tris, outline, start, tacks, shared, pressed: true, strain95: flat.strain95, loc };
   };
   const onNeck = (i: number, j: number) => (j === 0 ? neckPts[i].ref : undefined);
   if (shawl) {

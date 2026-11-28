@@ -13,7 +13,8 @@ import { setSettleBudgetMs, setUntangleBudgetMs, type ClothEnv, type ClothSim } 
 // leaves crossings a faster machine would have sewn out.
 setSettleBudgetMs(Infinity);
 setUntangleBudgetMs(Infinity);
-import { buildClothWorld } from '../src/utils/cloth/clothWorld';
+import { buildClothWorld, type ClothWorld } from '../src/utils/cloth/clothWorld';
+import { syncKinematics } from '../src/workers/bodyKinematics';
 import { clothCrossings, type Crossing } from './clothIntersections';
 import { compileToMJCF } from '../src/utils/mjcf';
 import { withoutMeshData } from '../src/store/physicsWorkerClient';
@@ -57,6 +58,10 @@ export interface ClothRun {
   speedOver: (dt: number, env?: Partial<ClothEnv>) => number;
   /** Cloth edges crossing cloth triangles they are not joined to: cloth through cloth (tests/clothIntersections). */
   crossings: () => Crossing[];
+  /** The MuJoCo model and data it steps beside, and the cloth world (what the worker steps). */
+  mjModel: any;
+  mjData: any;
+  world: ClothWorld;
 }
 
 export async function clothRun(scene: SceneNode[]): Promise<ClothRun> {
@@ -72,11 +77,12 @@ export async function clothRun(scene: SceneNode[]): Promise<ClothRun> {
   const colliders = (sim as unknown as { colliders: Collider[] }).colliders;
   const worlds = new Map<string, THREE.Matrix4>();
   const env = (e: Partial<ClothEnv> = {}): ClothEnv => ({ gravity: [0, 0, -9.81], wind: [0, 0, 0], airDensity: 1.225, ...e });
-  // MuJoCo steps too, as in the worker: the cloth reads where the bodies are after each.
+  // MuJoCo steps too, as in the worker: the cloth reads where the bodies are
+  // after each (mj_step leaves xpos at the step's start, so kinematics first).
   const dtMj = model.opt.timestep;
   const run = (seconds: number, e: Partial<ClothEnv> = {}) => {
     const end = sim.time + seconds;
-    while (sim.time < end - 1e-9) { mj.mj_step(model, data); world.advance(dtMj, env(e)); }
+    while (sim.time < end - 1e-9) { mj.mj_step(model, data); syncKinematics(mj, model, data); world.advance(dtMj, env(e)); }
     // Read as it is drawn: collision over the substeps since it last looked.
     sim.collidePending();
   };
@@ -153,7 +159,7 @@ export async function clothRun(scene: SceneNode[]): Promise<ClothRun> {
   }
   const internals = sim as unknown as { tris: Int32Array; stitches: Int32Array };
   const crossings = () => clothCrossings(sim.x, internals.tris, internals.stitches, (i) => pieceAt[i]);
-  return { sim, models, colliders, worlds, run, clearance, strains, speedOver, crossings };
+  return { sim, models, colliders, worlds, run, clearance, strains, speedOver, crossings, mjModel: model, mjData: data, world };
 }
 
 export const percentile = (sorted: number[], f: number) => sorted[Math.min(sorted.length - 1, Math.floor(f * (sorted.length - 1)))];

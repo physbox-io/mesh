@@ -3,6 +3,7 @@
 // constraints, cuts, rounded edges, hardware, patterns, the knife
 // ---------------------------------------------------------------------------
 
+import { clothNamesIn, clothWarningsFor } from '../../store/clothStatus';
 import { scriptSyntaxError, scriptWarnings } from '../../utils/scriptCheck';
 import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
 import { framingPatch } from '../../store/sceneFraming';
@@ -31,6 +32,7 @@ import {
   isPlainObject, isFiniteNumber, isFiniteVec3,
 } from './bridgeUtils';
 import { sculptHistory } from './sculptState';
+import { mmToM, vecMmToM } from './mcpUnits';
 import {
   normalizeRgba, fillGeomDefaults, fillJointDefaults, resolveUpdatedGeoms, resolveBreakFields,
   fillBodyDefaults, parseTuneTo, applyTuneTo, applyPendingTuneTo, type PendingDeclarativeOps,
@@ -173,6 +175,7 @@ export const objectCommands: McpCommands = {
     // Applied either way; a script that does not compile is said so here.
     const added = scriptWarnings(landed ? [landed] : [node]);
     const axes = jointAxisWarnings(landed ? [landed] : [node]);
+    const cloth = clothWarningsFor(clothNamesIn([landed ?? node]));
     return {
       ok: !addError && !!landed,
       ...(addError ? { error: addError } : {}),
@@ -180,6 +183,7 @@ export const objectCommands: McpCommands = {
       ...(added.length ? { scriptWarnings: added } : {}),
       ...(referenceWarnings.length ? { referenceWarnings } : {}),
       ...(axes.length ? { warnings: axes } : {}),
+      ...(cloth.length ? { clothWarnings: cloth } : {}),
       id: node.id,
       name: landed?.name ?? node.name,
       ...(parent ? { parent: parent.id } : {}),
@@ -214,6 +218,21 @@ export const objectCommands: McpCommands = {
       if (updates[k] !== null) continue;
       if (k === 'id' || k === 'name' || k === 'pos') delete updates[k];
       else updates[k] = undefined;
+    }
+    if (isFiniteVec3(updates.pos)) {
+      updates.pos = vecMmToM(updates.pos) as [number, number, number];
+    }
+    if (isFiniteVec3(updates.connectAnchor)) {
+      updates.connectAnchor = vecMmToM(updates.connectAnchor) as [number, number, number];
+    }
+    if (Array.isArray(updates.curvePoints)) {
+      updates.curvePoints = updates.curvePoints.map((p: unknown) => (isFiniteVec3(p) ? vecMmToM(p) : p)) as number[][];
+    }
+    if (typeof updates.curveWidth === 'number' && Number.isFinite(updates.curveWidth)) {
+      updates.curveWidth = mmToM(updates.curveWidth);
+    }
+    if (typeof updates.curveThickness === 'number' && Number.isFinite(updates.curveThickness)) {
+      updates.curveThickness = mmToM(updates.curveThickness);
     }
     if (updates.joints !== undefined) {
       if (!Array.isArray(updates.joints) || !updates.joints.every(isPlainObject)) {
@@ -526,11 +545,15 @@ export const objectCommands: McpCommands = {
     // Only when the joints were sent: a body already warned about is not warned again on every edit.
     const updated = Array.isArray(rawUpdates.joints) ? findNodeInScene(useStore.getState().sceneGraph.nodes, targetId) : null;
     const axes = updated ? jointAxisWarnings([{ ...updated, children: [] }]) : [];
+    // What the cloth now names that it does not have, said to the command that wrote it.
+    const landedNode = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+    const cloth = landedNode?.cloth ? clothWarningsFor([landedNode.name || landedNode.id]) : [];
     // Says what was taken, so a caller can see its whole update landed.
     return {
       ok: !error, applied: Object.keys(rawUpdates), ...(error ? { error } : {}),
       ...(referenceWarnings.length ? { referenceWarnings } : {}),
       ...(axes.length ? { warnings: axes } : {}),
+      ...(cloth.length ? { clothWarnings: cloth } : {}),
       ...(scriptError ? { scriptWarnings: [`Script on '${target.name || targetId}' does not compile: ${scriptError}. It was saved as written and will do nothing until fixed.`] } : {}),
     };
   },
@@ -1261,15 +1284,30 @@ export const objectCommands: McpCommands = {
       }
       const beforeScene = useStore.getState().sceneGraph;
       const results = [];
+      const batchWarnings: string[] = [];
+      const seenSlots = new Set<string>();
       for (const p of patterns) {
         const res = await applySinglePatternToBody(targetId, p);
         if (!res.ok) {
           if (results.length > 0) useStore.getState().updateScene(beforeScene, true);
           return res;
         }
+        const slotKey = `${res.geomName}:${res.index}`;
+        if (seenSlots.has(slotKey)) {
+          batchWarnings.push(
+            `Pattern #${results.length + 1} landed on the same unsplit face as an earlier item in this batch and replaced it (index ${res.index}). Use physics_knife to split the face into separate regions, or combine labels into one text pattern.`,
+          );
+        }
+        seenSlots.add(slotKey);
         results.push(res);
       }
-      return { ok: true, id: targetId, patternsApplied: results.length, patterns: results };
+      return {
+        ok: true,
+        id: targetId,
+        patternsApplied: results.length,
+        patterns: results,
+        ...(batchWarnings.length ? { warnings: batchWarnings } : {}),
+      };
     }
     return await applySinglePatternToBody(targetId, msg);
   },

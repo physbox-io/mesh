@@ -140,9 +140,9 @@ describe('H3: pendingDeclarativeOps cleanup & ADD_OBJECT child ID deduplication'
       {
         body: {
           id: 'parent',
-          geoms: [{ type: 'box', size: [0.05, 0.05, 0.05] }],
+          geoms: [{ type: 'box', size: [50, 50, 50] }],
           children: [
-            { id: 'sub', geoms: [{ type: 'box', size: [0.02, 0.02, 0.02] }] },
+            { id: 'sub', geoms: [{ type: 'box', size: [20, 20, 20] }] },
           ],
         },
       },
@@ -412,7 +412,7 @@ describe('H10, H11, M2–M8, L2: scene/object/profile/preset/constraint validati
 
     // Valid BUILD_SCENE clears breakage and activePreset and sets scene name
     const ok = await sceneCommands.BUILD_SCENE(
-      { name: 'My Custom Rig', bodies: [{ id: 'b1', geoms: [{ type: 'box', size: [0.05, 0.05, 0.05] }] }] },
+      { name: 'My Custom Rig', bodies: [{ id: 'b1', geoms: [{ type: 'box', size: [50, 50, 50] }] }] },
       makeCtx(),
     ) as { ok: boolean };
     expect(ok.ok).toBe(true);

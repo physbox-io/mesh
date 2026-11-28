@@ -999,8 +999,11 @@ export function synthesizeTimberJoinery(
           cleanExt.delete();
         }
 
-        // Signed length adjustment along endOutward (+ when trimmed back, - when bridged forward)
-        const signedTrim = dot(sub3(endCenter, shoulderCenterMm), endOutward);
+        // Signed length adjustment along endOutward (+ when trimmed back, - when bridged forward).
+        // Clamp positive trims to at most 45% of the member length per end so curved/non-rectilinear
+        // parts cannot yield negative shoulder-to-shoulder lengths or negative stock usage.
+        const rawTrim = dot(sub3(endCenter, shoulderCenterMm), endOutward);
+        const signedTrim = Math.min(rawTrim, mA.dimsMm[0] * 0.45);
         if (Math.abs(signedTrim) > 0.05) {
           lengthTrimMm[i][endKind === 'start' ? 0 : 1] = signedTrim;
         }
@@ -1689,8 +1692,8 @@ export function synthesizeTimberJoinery(
       const endTenon = tenons.find((t) => t.railEnd === 'end');
       const extraTenonLen =
         endAllowanceAlongAxisMm(m, startTenon) + endAllowanceAlongAxisMm(m, endTenon);
-      const shoulderToShoulderMm = +(m.dimsMm[0] - lengthTrimMm[i][0] - lengthTrimMm[i][1]).toFixed(2);
-      const totalFinishedLengthMm = +(shoulderToShoulderMm + extraTenonLen).toFixed(2);
+      const shoulderToShoulderMm = +Math.max(1, m.dimsMm[0] - lengthTrimMm[i][0] - lengthTrimMm[i][1]).toFixed(2);
+      const totalFinishedLengthMm = +Math.max(1, shoulderToShoulderMm + extraTenonLen).toFixed(2);
 
       const hull = plainSolids[i].hull();
       const solidity = Math.min(1, plainMesh.volumeMm3 / Math.max(1e-6, hull.volume()));

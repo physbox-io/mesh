@@ -7,6 +7,7 @@
 
 import type { BodyFormMeasurements, GarmentDraft, GarmentKind } from '../../types/cloth';
 import type { SceneNode } from '../../types/scene';
+import { pieceNamePicks } from './clothNames';
 
 type OptionalGarmentFields = 'collar' | 'lapels' | 'top' | 'legs' | 'over' | 'from' | 'to' | 'cap' | 'gores' | 'opening' | 'trims' | 'waistEase' | 'elastics' | 'pockets' | 'beltLoops' | 'belt' | 'pattern' | 'cuts' | 'seams' | 'rods' | 'darts' | 'fullness' | 'edges' | 'sculpt' | 'curves' | 'attached' | 'pressed' | 'sleeveL' | 'sleeveR';
 
@@ -21,8 +22,8 @@ export const GARMENT_DEFAULTS: Record<GarmentKind, GarmentSettings> = {
   // the waist to a narrow cuff.
   gown: { top: 'neck', ease: 0.06, length: 1.07, flare: 3, train: 0.7, sleeve: 0.5, cuff: 0.2, armhole: 0.2, neckline: 0.15, fitted: true, material: 'taffeta', rgba: [0.42, 0.18, 0.55, 1] },
   // Worn over a shirt: roomier, to the hip, long sleeves to a fitted cuff.
-  // Its zip open, studded round the neck and the cuffs.
-  jacket: { top: 'neck', opening: true, trims: [{ kind: 'zipper', along: 'opening', fastened: false }, { kind: 'stud', along: 'neckline', spacing: 0.022 }, { kind: 'stud', along: 'cuff', spacing: 0.018 }], ease: 0.22, length: 0.24, flare: 1, train: 0, sleeve: 0.6, cuff: 0.3, armhole: 0.02, neckline: 0.11, fitted: false, material: 'leather', rgba: [0.12, 0.1, 0.09, 1] },
+  // A plain woven jacket, zipped up the front; a look (leather, studs) is the draft's.
+  jacket: { top: 'neck', opening: true, trims: [{ kind: 'zipper', along: 'opening', fastened: true }], ease: 0.22, length: 0.24, flare: 1, train: 0, sleeve: 0.6, cuff: 0.3, armhole: 0.02, neckline: 0.11, fitted: false, material: 'woven', rgba: [0.17, 0.21, 0.3, 1] },
   // Waistband just below the waist, to the ankle, the leg tapering a little.
   // Round any span of a limb (over, from, to; capped or open): a sleeve on
   // its own, a leg warmer, a cuff.
@@ -37,7 +38,8 @@ export const GARMENT_DEFAULTS: Record<GarmentKind, GarmentSettings> = {
 
 /** A draft with its kind's defaults under it: every setting the builder reads, whatever the draft left out. */
 export function garmentSettings(draft: GarmentDraft): GarmentSettings & GarmentDraft {
-  const given = Object.fromEntries(Object.entries(draft).filter(([, v]) => v !== undefined));
+  // A null is an unset field (utils/withoutNulls), and leaves the kind's default.
+  const given = Object.fromEntries(Object.entries(draft).filter(([, v]) => v != null));
   return { ...GARMENT_DEFAULTS[draft.garment], ...given } as GarmentSettings & GarmentDraft;
 }
 
@@ -57,4 +59,10 @@ export function garmentForm(draft: GarmentDraft, nodes: SceneNode[]): BodyFormMe
     return undefined;
   };
   return find(nodes)?.bodyForm;
+}
+
+/** The colour a piece of a garment was given of its own (pieceFabrics, last first; an attachment's), or undefined when it takes the garment's. */
+export function garmentPieceRgba(draft: GarmentDraft, piece: string): number[] | undefined {
+  const fab = [...(draft.pieceFabrics ?? [])].reverse().find((f) => f.rgba && pieceNamePicks(piece, f.piece));
+  return fab?.rgba ?? draft.attached?.find((a) => a.name === piece)?.rgba;
 }

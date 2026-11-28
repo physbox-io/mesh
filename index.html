@@ -22,9 +22,52 @@
     <meta name="twitter:title" content="PhysBox: Mesh | Real-Time Physics & CAD Fabrication Lab" />
     <meta name="twitter:description" content="Browser-based rigid-body physics simulator powered by MuJoCo WASM with CSG modeling, laser cut exporters, and WebSerial HIL hardware control." />
     <meta name="twitter:image" content="https://mesh.physbox.io/og-image.png" />
+    <link rel="canonical" href="https://mesh.physbox.io/" />
+    <link rel="privacy-policy" href="https://physbox.io/privacy.html" />
+    <link rel="terms-of-service" href="https://physbox.io/terms.html" />
+
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "WebApplication",
+      "@id": "https://mesh.physbox.io/#app",
+      "name": "PhysBox: Mesh",
+      "url": "https://mesh.physbox.io/",
+      "applicationCategory": "DesignApplication",
+      "applicationSubCategory": "CAD, CAM, Physics Simulation",
+      "operatingSystem": "Web Browser (WebAssembly / WebGL)",
+      "description": "Browser-based 3D CAD and physics simulator: MuJoCo rigid-body physics, CSG modelling, 3D-print analysis and CNC, laser and mold exports.",
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "isPartOf": { "@id": "https://physbox.io/#suite" },
+      "publisher": {
+        "@type": "Organization",
+        "@id": "https://physbox.io/#organization",
+        "name": "PhysBox",
+        "url": "https://physbox.io/"
+      },
+      "termsOfService": "https://physbox.io/terms.html"
+    }
+    </script>
   </head>
   <body class="bg-slate-950 text-slate-100 antialiased selection:bg-blue-500 selection:text-white">
     <div id="root"></div>
+    <!-- Never shown with JavaScript on. Read by crawlers and web-gateway
+         categorizers (Netskope etc.), which otherwise see an empty page. -->
+    <noscript>
+      <main>
+        <h1>PhysBox: Mesh</h1>
+        <p>Mesh is a free 3D design and physics simulation app that runs in your browser.
+          Model parts with solid (CSG) modelling, sculpting and lattice box-modelling, simulate them with
+          the MuJoCo physics engine, and prepare them for fabrication: 3D-print analysis and 3MF/STL export,
+          CNC relief carving and machining toolpaths, laser cutting, and mold making for casting.</p>
+        <p>Part of the <a href="https://physbox.io/">PhysBox</a> suite of engineering tools, with
+          <a href="https://volt.physbox.io/">Volt</a> (electronics) and <a href="https://etch.physbox.io/">Etch</a> (laser cutting).</p>
+        <p><a href="https://physbox.io/privacy.html">Privacy</a> ·
+          <a href="https://physbox.io/terms.html">Terms</a> ·
+          <a href="https://physbox.io/contact.html">Contact</a></p>
+        <p>Mesh needs JavaScript and WebGL to run.</p>
+      </main>
+    </noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -77,13 +77,13 @@ export function readReferencePatch(msg: Record<string, unknown>): Partial<Omit<R
     out.plane = msg.plane as ReferencePlane;
   }
   if (msg.center !== undefined) {
-    if (!Array.isArray(msg.center) || msg.center.length !== 3) throw new Error('center must be [x, y, z] in metres');
-    out.pos = msg.center.map((v, i) => num(`center[${i}]`, v)) as [number, number, number];
+    if (!Array.isArray(msg.center) || msg.center.length !== 3) throw new Error('center must be [x, y, z] in millimetres');
+    out.pos = msg.center.map((v, i) => num(`center[${i}]`, v) / 1000) as [number, number, number];
   }
   if (msg.width !== undefined) {
     const w = num('width', msg.width);
-    if (w <= 0 || w > 20) throw new Error('width must be more than 0 and at most 20 m');
-    out.width = w;
+    if (w <= 0 || w > 20_000) throw new Error('width must be more than 0 and at most 20000 mm');
+    out.width = w / 1000;
   }
   if (msg.opacity !== undefined) {
     const o = num('opacity', msg.opacity);

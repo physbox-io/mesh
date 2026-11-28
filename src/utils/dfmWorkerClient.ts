@@ -41,7 +41,7 @@ export interface DfmWorkerLike {
   terminate: () => void;
 }
 
-export const DEFAULT_DFM_JOB_TIMEOUT_MS = 30_000;
+export const DEFAULT_DFM_JOB_TIMEOUT_MS = 60_000;
 
 type Ask = { type: 'DFM'; process: DfmProcess; bench: DfmBenchArgs; wholeScene?: SceneGraph } | { type: 'WEAK_SPOTS' };
 type JobKind = 'ui' | 'imperative';

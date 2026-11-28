@@ -23,6 +23,7 @@ import {
 } from '../../utils/latticeMesh';
 import { generatedMeshMass } from '../../utils/generatedMeshMass';
 import { isFiniteNumber, isFiniteVec3, isPlainObject, pointList, toRenderVertices } from './bridgeUtils';
+import { mmToM, vecMmToM } from './mcpUnits';
 import { type LatticeOpSpec, runLatticeOps } from './latticeState';
 import { latticeBodyPos } from '../../utils/latticeFrame';
 import { sceneContentBounds } from '../../utils/frameScene';
@@ -114,12 +115,66 @@ const PARAMETRIC_POSITIVE_DIM_KEYS = [
 const PARAMETRIC_SEGMENT_KEYS = ['segments', 'radialSegments', 'tubularSegments'] as const;
 const MAX_PARAMETRIC_SEGMENTS = 512;
 
-export const fillGeomDefaults = (rawG: RawGeom, bodyName: string, idx: number, bodyIsJointed: boolean): SceneGeom => {
+/**
+ * Converts spatial fields of an incoming MCP geom descriptor from millimetres
+ * to internal SI metres. Dimensionless fields (`rgba`, `mass`, `density`,
+ * `friction`, `quat`, `euler`, `mesh` scale `size`) are left untouched.
+ */
+function convertRawGeomMmToM(raw: RawGeom, fallbackType?: string): RawGeom {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out: Record<string, any> = { ...raw };
+  const effectiveType = out.type ?? fallbackType ?? 'box';
+  if (isFiniteVec3(out.pos)) out.pos = vecMmToM(out.pos);
+  if (Array.isArray(out.fromto) && out.fromto.length === 6 && out.fromto.every(isFiniteNumber)) {
+    out.fromto = vecMmToM(out.fromto);
+  }
+  if (
+    effectiveType !== 'mesh' &&
+    effectiveType !== 'plane' &&
+    Array.isArray(out.size) &&
+    out.size.every(isFiniteNumber)
+  ) {
+    out.size = vecMmToM(out.size);
+  }
+  for (const key of PARAMETRIC_POSITIVE_DIM_KEYS) {
+    if (isFiniteNumber(out[key])) out[key] = mmToM(out[key]);
+  }
+  if (Array.isArray(out.polygon)) {
+    out.polygon = out.polygon.map((p: unknown) =>
+      Array.isArray(p) && p.length >= 2 && p.every(isFiniteNumber) ? vecMmToM(p) : p,
+    );
+  }
+  if (Array.isArray(out.profile)) {
+    out.profile = out.profile.map((p: unknown) =>
+      Array.isArray(p) && p.length >= 2 && p.every(isFiniteNumber) ? vecMmToM(p) : p,
+    );
+  }
+  if (Array.isArray(out.holes)) {
+    out.holes = out.holes.map((hole: unknown) =>
+      Array.isArray(hole)
+        ? hole.map((p: unknown) => (Array.isArray(p) && p.length >= 2 && p.every(isFiniteNumber) ? vecMmToM(p) : p))
+        : hole,
+    );
+  }
+  if (isFiniteNumber(out.dentRadius)) out.dentRadius = mmToM(out.dentRadius);
+  if (isFiniteNumber(out.dentMaxDepth)) out.dentMaxDepth = mmToM(out.dentMaxDepth);
+  if (isFiniteNumber(out.dentDepthPerNs)) out.dentDepthPerNs = mmToM(out.dentDepthPerNs);
+  return out as RawGeom;
+}
+
+export const fillGeomDefaults = (
+  rawG: RawGeom,
+  bodyName: string,
+  idx: number,
+  bodyIsJointed: boolean,
+  alreadyMetres = false,
+): SceneGeom => {
   if (!isPlainObject(rawG)) {
     throw new Error(`Geom ${idx} on body "${bodyName}" must be a plain object.`);
   }
   // A null field is an unset one (utils/withoutNulls.ts).
-  const g: RawGeom = withoutNulls({ ...rawG });
+  const cleaned: RawGeom = withoutNulls({ ...rawG });
+  const g: RawGeom = alreadyMetres ? cleaned : convertRawGeomMmToM(cleaned);
   const geomName = g.name ?? `${bodyName}_geom_${idx}`;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const gAny = g as Record<string, any>;
@@ -264,11 +319,12 @@ export function resolveUpdatedGeoms(
         gAny.profile !== undefined;
       if (g.type !== undefined) allPartialPatches = false;
 
+      const gM = convertRawGeomMmToM(g, existing.type);
       let resolved: SceneGeom;
       if (!changesType && !changesVertices && existing.type === 'mesh') {
         let nextRgba: [number, number, number, number] | number[] | undefined;
-        if (g.rgba !== undefined) {
-          const norm = normalizeRgba(g.rgba, existing.rgba?.[3] ?? 1);
+        if (gM.rgba !== undefined) {
+          const norm = normalizeRgba(gM.rgba, existing.rgba?.[3] ?? 1);
           if (!norm) {
             return { ok: false, error: 'rgba must be [r, g, b] or [r, g, b, a], each a finite number in 0..1' };
           }
@@ -278,13 +334,13 @@ export function resolveUpdatedGeoms(
         }
         resolved = {
           ...existing,
-          ...(g as Partial<SceneGeom>),
+          ...(gM as Partial<SceneGeom>),
           ...(nextRgba ? { rgba: nextRgba } : {}),
         };
         for (const k of cleared) delete (resolved as unknown as Record<string, unknown>)[k];
       } else {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const base: RawGeom & Record<string, any> = { ...existing, ...g };
+        const base: RawGeom & Record<string, any> = { ...existing, ...gM };
         for (const k of cleared) delete base[k];
         if (gAny.verticesZUp !== undefined) {
           delete base.vertices;
@@ -303,7 +359,7 @@ export function resolveUpdatedGeoms(
           delete base.paint;
         }
         if (g.rgba === undefined && bodyRgba !== undefined) base.rgba = bodyRgba;
-        resolved = fillGeomDefaults(base, bodyName, i, moves);
+        resolved = fillGeomDefaults(base, bodyName, i, moves, true);
       }
       resolvedList.push(resolved);
       matchedMap.set(existing, resolved);
@@ -343,19 +399,27 @@ const fillJoint = (
   bodyName: string,
   idx: number,
   defaultType: SceneJoint['type'] = 'free',
-): SceneJoint => ({
-  // As for geoms: springref and the crumple fields were dropped by a whitelist.
-  ...(j as SceneJoint),
-  name:    j.name    ?? `${bodyName}_joint_${idx}`,
-  type:    j.type    ?? defaultType,
-  ...(j.axis     !== undefined ? { axis: j.axis }         : {}),
-  ...(j.pos      !== undefined ? { pos: j.pos }           : {}),
-  ...(j.damping  !== undefined ? { damping: j.damping }   : {}),
-  ...(j.stiffness!== undefined ? { stiffness: j.stiffness}: {}),
-  ...(j.limited  !== undefined ? { limited: j.limited }   : {}),
-  ...(j.range    !== undefined ? { range: j.range }       : {}),
-  ...(j.actuator !== undefined ? { actuator: j.actuator } : {}),
-});
+): SceneJoint => {
+  const type = j.type ?? defaultType;
+  const posM = isFiniteVec3(j.pos) ? (vecMmToM(j.pos) as [number, number, number]) : j.pos;
+  const rangeM =
+    type === 'slide' && Array.isArray(j.range) && j.range.length === 2 && j.range.every(isFiniteNumber)
+      ? (vecMmToM(j.range) as [number, number])
+      : j.range;
+  return {
+    // As for geoms: springref and the crumple fields were dropped by a whitelist.
+    ...(j as SceneJoint),
+    name:    j.name    ?? `${bodyName}_joint_${idx}`,
+    type,
+    ...(j.axis     !== undefined ? { axis: j.axis }         : {}),
+    ...(posM       !== undefined ? { pos: posM }            : {}),
+    ...(j.damping  !== undefined ? { damping: j.damping }   : {}),
+    ...(j.stiffness!== undefined ? { stiffness: j.stiffness}: {}),
+    ...(j.limited  !== undefined ? { limited: j.limited }   : {}),
+    ...(rangeM     !== undefined ? { range: rangeM }        : {}),
+    ...(j.actuator !== undefined ? { actuator: j.actuator } : {}),
+  };
+};
 
 /**
  * `parentMoves` is null for a top-level body. For a nested one it says whether
@@ -462,6 +526,21 @@ export const fillBodyDefaults = (
   if (b.pos === undefined && bAlias.position !== undefined) {
     b.pos = bAlias.position as [number, number, number];
     delete bAlias.position;
+  }
+  if (isFiniteVec3(b.pos)) {
+    b.pos = vecMmToM(b.pos) as [number, number, number];
+  }
+  if (isFiniteVec3(b.connectAnchor)) {
+    b.connectAnchor = vecMmToM(b.connectAnchor) as [number, number, number];
+  }
+  if (Array.isArray(b.curvePoints)) {
+    b.curvePoints = b.curvePoints.map((p) => (isFiniteVec3(p) ? vecMmToM(p) : p));
+  }
+  if (isFiniteNumber(b.curveWidth)) {
+    b.curveWidth = mmToM(b.curveWidth);
+  }
+  if (isFiniteNumber(b.curveThickness)) {
+    b.curveThickness = mmToM(b.curveThickness);
   }
   const name = b.name ?? b.id ?? `body_${Math.random().toString(36).slice(2, 7)}`;
   const id   = b.id   ?? name;
@@ -642,24 +721,27 @@ export const fillBodyDefaults = (
     if (Array.isArray(sculptSpec.strokes)) {
       for (const s of sculptSpec.strokes) {
         if (!s || typeof s !== 'object') continue;
-        const pts = pointList(s.at);
+        const rawAt = s.at !== undefined ? s.at : s.atMm;
+        const pts = pointList(rawAt).map((p: unknown) => (isFiniteVec3(p) ? vecMmToM(p) : p));
         if (!pts.length || pts.some((p: unknown) => !isFiniteVec3(p))) {
-          throw new Error("sculpt stroke 'at' must be [x, y, z] or a list of them, with finite numbers in the body's own frame (metres)");
+          throw new Error("sculpt stroke 'at' must be [x, y, z] or a list of them, with finite numbers in the body's own frame (millimetres)");
         }
+        const rawRadius = s.radius !== undefined ? s.radius : s.radiusMm;
+        const rawDelta = s.delta !== undefined ? s.delta : s.deltaMm;
         applySculptStroke(mesh, {
           brush: s.brush,
-          at: pts,
+          at: pts as number[][],
           // An unsized base keeps the 40 mm brush it always had, so an old
           // scene's strokes come out as they did; sized clay gets one in
           // proportion (defaultRadiusFor).
-          radius: s.radius ?? (sculptSpec.sizeMm ? undefined : 0.04),
+          radius: typeof rawRadius === 'number' ? mmToM(rawRadius) : (sculptSpec.sizeMm ? undefined : 0.04),
           strength: s.strength,
           invert: s.invert,
           symmetryX: s.symmetryX,
           symmetry: s.symmetry,
           detail: s.detail,
           dynamicTopology: s.dynamicTopology,
-          delta: s.delta,
+          delta: isFiniteVec3(rawDelta) ? vecMmToM(rawDelta) : rawDelta,
           depthMm: s.depthMm,
           hardness: s.hardness,
         });
@@ -840,6 +922,7 @@ export const fillBodyDefaults = (
   delete rest.radialSegments;
   delete rest.tubularSegments;
 
+  const geomsAlreadyMetres = curveGeoms !== null || latticeGeoms !== null || sculptGeoms !== null;
   const chosenGeoms = curveGeoms ?? latticeGeoms ?? sculptGeoms ?? b.geoms ?? (logical ? [] : synthesizedSingleGeom);
   const resolvedGeoms = chosenGeoms.map((g: RawGeom, i: number) =>
     fillGeomDefaults(
@@ -849,6 +932,7 @@ export const fillBodyDefaults = (
       name,
       i,
       moves,
+      geomsAlreadyMetres,
     ),
   );
 

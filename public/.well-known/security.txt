@@ -1,0 +1,6 @@
+Contact: https://physbox.io/contact.html
+Contact: https://github.com/physbox-io
+Expires: 2027-11-13T00:00:00.000Z
+Preferred-Languages: en
+Canonical: https://mesh.physbox.io/.well-known/security.txt
+Policy: https://physbox.io/privacy.html
