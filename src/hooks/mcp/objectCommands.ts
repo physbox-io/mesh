@@ -1261,15 +1261,30 @@ export const objectCommands: McpCommands = {
       }
       const beforeScene = useStore.getState().sceneGraph;
       const results = [];
+      const batchWarnings: string[] = [];
+      const seenSlots = new Set<string>();
       for (const p of patterns) {
         const res = await applySinglePatternToBody(targetId, p);
         if (!res.ok) {
           if (results.length > 0) useStore.getState().updateScene(beforeScene, true);
           return res;
         }
+        const slotKey = `${res.geomName}:${res.index}`;
+        if (seenSlots.has(slotKey)) {
+          batchWarnings.push(
+            `Pattern #${results.length + 1} landed on the same unsplit face as an earlier item in this batch and replaced it (index ${res.index}). Use physics_knife to split the face into separate regions, or combine labels into one text pattern.`,
+          );
+        }
+        seenSlots.add(slotKey);
         results.push(res);
       }
-      return { ok: true, id: targetId, patternsApplied: results.length, patterns: results };
+      return {
+        ok: true,
+        id: targetId,
+        patternsApplied: results.length,
+        patterns: results,
+        ...(batchWarnings.length ? { warnings: batchWarnings } : {}),
+      };
     }
     return await applySinglePatternToBody(targetId, msg);
   },

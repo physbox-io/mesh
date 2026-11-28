@@ -279,7 +279,21 @@ export const sculptCommands: McpCommands = {
       const perStroke: { brush?: string; applied: number; missed: number; moved: number; maxDisplacement: number; topologyChanged?: boolean }[] = [];
       const pendingUndos: SculptUndoEntry[] = [];
 
-      for (const { spec: s, points, resolvedRadius } of validatedStrokes) {
+      const batchStartMs = Date.now();
+      const DYNTOPO_BATCH_BUDGET_MS = 15_000;
+      let dyntopoBudgetExceeded = false;
+      for (let strokeIdx = 0; strokeIdx < validatedStrokes.length; strokeIdx++) {
+        const { spec: s, points, resolvedRadius } = validatedStrokes[strokeIdx];
+        if (strokeIdx > 0) {
+          // Yield between strokes in a batch so the browser event loop and MCP
+          // WORKING heartbeat stay responsive instead of wedging the tab.
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        }
+        let strokeDynTopo = s.dynamicTopology as boolean | undefined;
+        if (strokeDynTopo !== false && validatedStrokes.length > 1 && Date.now() - batchStartMs > DYNTOPO_BATCH_BUDGET_MS) {
+          strokeDynTopo = false;
+          dyntopoBudgetExceeded = true;
+        }
         const sink: { undo?: SculptUndoEntry | null } = {};
         lastResult = applySculptStroke(mesh, {
           brush: s.brush as BrushType | undefined,
@@ -290,7 +304,7 @@ export const sculptCommands: McpCommands = {
           symmetryX: s.symmetryX as boolean | undefined,
           symmetry: s.symmetry as 'x' | 'y' | 'z' | undefined,
           detail: s.detail as number | undefined,
-          dynamicTopology: s.dynamicTopology as boolean | undefined,
+          dynamicTopology: strokeDynTopo,
           delta: s.delta as number[] | undefined,
           depthMm: s.depthMm as number | undefined,
           hardness: s.hardness as number | undefined,
@@ -357,6 +371,7 @@ export const sculptCommands: McpCommands = {
           dabsApplied: perStroke.reduce((n, r) => n + r.applied, 0),
           pointsMissed: perStroke.reduce((n, r) => n + r.missed, 0),
           strokes: perStroke,
+          ...(dyntopoBudgetExceeded ? { warnings: ['Dynamic topology time budget (15 s) reached mid-batch; remaining strokes ran with dynamicTopology: false to keep the viewport responsive.'] } : {}),
         } : {}),
         undoDepth: (sculptHistory.get(targetId) ?? []).length,
       };
