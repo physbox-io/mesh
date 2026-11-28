@@ -208,6 +208,7 @@ export function buildClothWorld(
           };
         }
       } else if (node.cloth?.garment && !node.cloth.garment.trims?.some((t) => t.rgba) && !node.cloth.garment.pockets?.some((p) => p.rgba) && !(typeof node.cloth.garment.belt === 'object' && node.cloth.garment.belt?.rgba) && !node.cloth.garment.collar?.rgba && !node.cloth.garment.attached?.some((a) => a.rgba || a.pattern)) {
+        // Each piece its own shade of the new colour (backs darker); one with a colour of its own keeps it.
         const gRgba = garmentSettings(node.cloth.garment).rgba ?? [0.28, 0.36, 0.52, 1];
         m = {
           ...previous.models[i],

@@ -62,9 +62,9 @@ describe('elastics, negative ease, pockets, and belts on garments', () => {
     expect(tacked.some((t) => t.lift)).toBe(true);
     expect(tacked.some((t) => !t.lift)).toBe(true);
     // And on a sleeve.
-    const jacket = garmentNode('jacket', 'jacket', { garment: 'jacket', pockets: [{ panel: 'sleeveLUpper', at: [0.5, 0.5], width: 0.06, height: 0.08 }] }, form);
+    const jacket = garmentNode('jacket', 'jacket', { garment: 'jacket', pockets: [{ panel: 'sleeveL', at: [0.5, 0.5], width: 0.06, height: 0.08 }] }, form);
     const mj = clothModel(jacket, new THREE.Matrix4(), [form, jacket]);
-    const sp = mj.groups.find((gr) => gr.name.endsWith('__pocket_sleeveLUpper'))!;
+    const sp = mj.groups.find((gr) => gr.name.endsWith('__pocket_sleeveL'))!;
     expect(sp).toBeDefined();
     expect(sp.particles.reduce((acc, p) => acc + mj.x0[3 * p], 0) / sp.particles.length).toBeGreaterThan(0.2);
     // Cut as pieces too: in the pattern.

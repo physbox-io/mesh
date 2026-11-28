@@ -252,6 +252,12 @@ export interface ClothRenderGroup {
   /** `<body>__<piece>`, as the viewport names a cloth piece. */
   name: string;
   rgba: number[];
+  /**
+   * Its colour as a shade of the garment's (rgba is the garment's times
+   * this: a back panel's 0.85); unset where it has a colour of its own. What
+   * a recolour carries the cloth over by.
+   */
+  tint?: number;
   /** The fabric, for how it is drawn. */
   material: ClothMaterialName;
   /** The piece flat, for a garment cut from a modelled shell. */
@@ -381,7 +387,7 @@ function vertexNormals(points: number[][], tris: number[], world: THREE.Matrix4)
   return n.map((q) => { w.set(q[0], q[1], q[2]).applyMatrix3(nm).normalize(); return [w.x, w.y, w.z]; });
 }
 
-const shade = (c: number[], k: number) => [c[0] * k, c[1] * k, c[2] * k, c[3] ?? 1];
+export const shade = (c: number[], k: number) => [c[0] * k, c[1] * k, c[2] * k, c[3] ?? 1];
 
 /** Pairs of edges into a map keyed by particle pair, averaging lengths seen more than once. */
 class EdgeSet {

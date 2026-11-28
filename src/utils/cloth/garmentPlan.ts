@@ -117,8 +117,9 @@ export function garmentPlan(draft: GarmentDraft, form: BodyFormMeasurements, lay
     if (!d.cap) cuts.push({ kind: 'limbEnd', limb: d.over, s: to * limb.length, on: [d.over], profile: edgeOf(draft, 'end')?.profile });
     seams.push({ kind: 'roundLimb', limb: d.over, n: Math.max(2, Math.round(d.gores ?? 2)), at: from * limb.length });
     if (d.opening) seams.push({ kind: 'frontOpening', on: [d.over] });
+    // Cut round at a joint the limb is drafted bent at (an ankle), not one the pose bends.
     const joint = limb.path.jointAt + 0.006 * s;
-    if (limb.path.bend > RING_BEND && from * limb.length < joint && (d.cap || to * limb.length > joint)) seams.push({ kind: 'limbRing', name: 'joint', limb: d.over, s: joint });
+    if ((limb.straight ?? limb.path).bend > RING_BEND && from * limb.length < joint && (d.cap || to * limb.length > joint)) seams.push({ kind: 'limbRing', name: 'joint', limb: d.over, s: joint });
     addDraftPlanes(draft, cuts, seams);
     for (const line of draftDarts(draft, form)) seams.push({ kind: 'dart', ...line });
     addDrawnLines(draft, seams);
@@ -185,7 +186,7 @@ export function garmentPlan(draft: GarmentDraft, form: BodyFormMeasurements, lay
       else {
         armholes.push({ kind: 'partBoundary', name: `armhole${arm.slice(3)}`, a: 'skin', b: arm, within: 0.45 });
         underarms.push({ kind: 'alongLimb', name: `underarm${arm.slice(3)}`, limb: arm, over: false });
-        if (sleeveLen > limb.path.jointAt && limb.path.bend > RING_BEND) underarms.push({ kind: 'limbRing', name: `elbow${arm.slice(3)}`, limb: arm, s: limb.path.jointAt });
+        if (sleeveLen > limb.path.jointAt && (limb.straight ?? limb.path).bend > RING_BEND) underarms.push({ kind: 'limbRing', name: `elbow${arm.slice(3)}`, limb: arm, s: limb.path.jointAt });
       }
     }
   }
@@ -281,14 +282,44 @@ function addDrawnLines(draft: GarmentDraft, seams: GarmentSeam[]) {
 /** The draft's own darts, placed on the form. */
 const draftDarts = (draft: GarmentDraft, form: BodyFormMeasurements) => (Array.isArray(draft.darts) ? dartLines(draft.darts, form) : []);
 
-/** Whether one of the draft's own seams (or its mirror) passes within `r` of `p`, on that face. */
+/**
+ * Whether one of the draft's own seams (or its mirror) passes within `r` of
+ * `p` (a point on the body), on that face: where it reaches, as the shell
+ * cuts it (its `on`, `front`, `z` and `x`).
+ */
 function seamedNear(draft: GarmentDraft, p: number[], front: boolean, r: number): boolean {
   return (draft.seams ?? []).flatMap((sm) => (sm.mirror ? [sm, mirrored(sm)] : [sm])).some((sm) => {
+    if (!matchesOnMask(sm.on, 'skin', front, p[0])) return false;
     if (sm.front !== undefined && sm.front !== front) return false;
     if (sm.z && (p[2] < sm.z[0] || p[2] > sm.z[1])) return false;
+    if (sm.x && (p[0] < sm.x[0] || p[0] > sm.x[1])) return false;
     const n = sm.normal, l = Math.hypot(n[0], n[1], n[2]) || 1;
     return Math.abs(((p[0] - sm.point[0]) * n[0] + (p[1] - sm.point[1]) * n[1] + (p[2] - sm.point[2]) * n[2]) / l) < r;
   });
+}
+
+/** Whether a point/triangle on `part` (and `isFront` side, horizontal `x`) matches a plane's `on` scope. */
+export function matchesOnMask(on: string | string[] | undefined, part: Part, isFront: boolean, x: number): boolean {
+  if (on === undefined) return true;
+  const list = Array.isArray(on) ? on : [on];
+  if (list.length === 0) return true;
+  const isArm = part === 'armL' || part === 'armR';
+  const isBody = !isArm && part !== 'head';
+  for (const raw of list) {
+    const token = raw.trim();
+    if (token === part) return true;
+    if ((token === 'torso' || token === 'body') && (part === 'skin' || part === 'webL' || part === 'webR')) return true;
+    if (token === 'front' && isBody && isFront) return true;
+    if (token === 'back' && isBody && !isFront) return true;
+    if (token === 'frontL' && isBody && isFront && x >= -1e-4) return true;
+    if (token === 'frontR' && isBody && isFront && x <= 1e-4) return true;
+    if (token === 'backL' && isBody && !isFront && x >= -1e-4) return true;
+    if (token === 'backR' && isBody && !isFront && x <= 1e-4) return true;
+    if (token === 'sleeve' && isArm) return true;
+    if (token === 'sleeveL' && part === 'armL') return true;
+    if (token === 'sleeveR' && part === 'armR') return true;
+  }
+  return false;
 }
 
 /** Swap L/R suffix in a plane `on` scope token when mirroring across x = 0. */

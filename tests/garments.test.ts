@@ -102,7 +102,7 @@ describe('trims', () => {
     expect(zipper.length).toBeGreaterThan(20);
     expect(new Set(zipper)).toEqual(new Set(['frontL', 'frontR']));
     expect(studs.length).toBeGreaterThan(12);
-    expect(new Set(studs)).toEqual(new Set(['frontL', 'frontR', 'back', 'sleeveLLower', 'sleeveRLower']));
+    expect(new Set(studs)).toEqual(new Set(['frontL', 'frontR', 'back', 'sleeveL', 'sleeveR']));
     const svg = patternSvg(m.groups.map((gr) => ({ name: gr.name, ...gr.flat! })));
     expect((svg.match(/<circle/g) ?? []).length).toBe(zipper.length + studs.length);
   });

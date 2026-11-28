@@ -35,7 +35,7 @@ import type { EdgeProfile } from '../../types/cloth';
 
 /** The most a profile lengthens its edge anywhere (none below 0). */
 const profileMax = (pr?: EdgeProfile) => (pr ? Math.max(0, ...pr.points.map((q) => q[1] ?? 0)) : 0);
-import { garmentPlan, restOff, type GarmentCut, type Part, type PartCover } from './garmentPlan';
+import { garmentPlan, matchesOnMask, restOff, type GarmentCut, type Part, type PartCover } from './garmentPlan';
 
 export { boundaryLoops, splitPanels } from './garmentSurface';
 
@@ -64,29 +64,6 @@ export interface GarmentShell {
   warnings?: string[];
 }
 
-/** Whether a point/triangle on `part` (and `isFront` side, horizontal `x`) matches a plane's `on` scope. */
-function matchesOnMask(on: string | string[] | undefined, part: Part, isFront: boolean, x: number): boolean {
-  if (on === undefined) return true;
-  const list = Array.isArray(on) ? on : [on];
-  if (list.length === 0) return true;
-  const isArm = part === 'armL' || part === 'armR';
-  const isBody = !isArm && part !== 'head';
-  for (const raw of list) {
-    const token = raw.trim();
-    if (token === part) return true;
-    if ((token === 'torso' || token === 'body') && (part === 'skin' || part === 'webL' || part === 'webR')) return true;
-    if (token === 'front' && isBody && isFront) return true;
-    if (token === 'back' && isBody && !isFront) return true;
-    if (token === 'frontL' && isBody && isFront && x >= -1e-4) return true;
-    if (token === 'frontR' && isBody && isFront && x <= 1e-4) return true;
-    if (token === 'backL' && isBody && !isFront && x >= -1e-4) return true;
-    if (token === 'backR' && isBody && !isFront && x <= 1e-4) return true;
-    if (token === 'sleeve' && isArm) return true;
-    if (token === 'sleeveL' && part === 'armL') return true;
-    if (token === 'sleeveR' && part === 'armR') return true;
-  }
-  return false;
-}
 
 /** The grid's spacing at most: about the size of a triangle of a garment round the body. */
 const H_MAX = 0.025;
@@ -94,6 +71,8 @@ const H_MAX = 0.025;
 const H_MIN = 0.0075;
 /** How near the floor (the form stands on z = 0) cloth lies. */
 const FLOOR = 0.006;
+/** Over how much of a limb from its root (at a 1.75 m figure) a point is carried from where it is onto the limb's drafted line. */
+const DRAFT_BLEND = 0.08;
 /** Over this, where parts' distances are within it of each other, their ease blends (an armpit). */
 const BLEND = 0.02;
 /** Past this a part's ease no longer blends with a nearer one's (its weight under 1e-3). */
@@ -256,7 +235,11 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
   // front and back) are drawn on the form standing, so a trouser leg is cut
   // as it hangs and worn as the leg is posed; anywhere else, the point itself.
   const posedLegs = new Map<Part, FormLimb>();
-  for (const part of parts) { const l = part === 'skin' || part === 'webL' || part === 'webR' ? undefined : rawLimbs[part]; if (l?.straight && l.straight !== l.path) posedLegs.set(part, l); }
+  for (const part of parts) { const l = part === 'legL' || part === 'legR' ? rawLimbs[part] : undefined; if (l?.straight && l.straight !== l.path) posedLegs.set(part, l); }
+  // Every limb's line as drafted (FormLimb.straight: an arm at its natural bend, a leg
+  // hung straight), where the pose bends it otherwise: what the pieces are cut on.
+  const draftedLimbs = new Map<Part, FormLimb>();
+  for (const part of parts) { const l = part === 'skin' || part === 'webL' || part === 'webR' ? undefined : rawLimbs[part]; if (l?.straight && l.straight !== l.path) draftedLimbs.set(part, l); }
   const frameAt = (path: LimbPath, s: number) => {
     const t = path.tangent(s), k = t[0], side = [1 - k * t[0], -k * t[1], -k * t[2]], l = Math.hypot(side[0], side[1], side[2]) || 1;
     const sd = side.map((v) => v / l);
@@ -886,7 +869,8 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
       : cover.names === 'sleeve' ? `sleeve${tag}${ring !== undefined ? (alongLimb(part, c) < ring ? 'Upper' : 'Lower') : ''}`
         : cover.names === 'frontBackSide' ? `${fb}${c[0] > 0 ? 'L' : 'R'}` : fb;
     const limb = limbOf(part);
-    const t = limb ? limb.path.tangent(alongLimb(part, c)) : null;
+    // Up the piece as it is cut: along the limb's drafted line.
+    const t = limb ? (draftedLimbs.get(part)?.straight ?? limb.path).tangent(alongLimb(part, c)) : null;
     const upAxis = t ? (t[2] <= 0 ? [-t[0], -t[1], -t[2]] : t) : [0, 0, 1];
     return { base, cx: c[0], gore: cover.names === 'gore', tris: p, upAxis };
   });
@@ -911,7 +895,20 @@ export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, la
     for (let it = 0; it < 4; it++) z = p[2] - sinkAt([p[0], p[1], z]);
     p[2] = z;
   }
-  const cut = points.map((p) => p.slice());
+  // Cut as drafted, not as posed: each point over a limb carried, at its
+  // distance along it and its offset round it (turned with the line from the
+  // root), onto the limb's drafted line; easing in from the root, where the
+  // two lines are one. Cut as posed, a sleeve on a bent elbow was seamed
+  // across there and changing the pose changed the pattern.
+  const cut = points.map((p) => {
+    if (!draftedLimbs.size) return p.slice();
+    const l = draftedLimbs.get(nearest(p));
+    if (!l) return p.slice();
+    const cl = l.path.closest(p, l.length + 0.2);
+    const v = l.straight!.carry(l.path.carry([p[0] - cl.p[0], p[1] - cl.p[1], p[2] - cl.p[2]], cl.s, 0), 0, cl.s), c = l.straight!.at(cl.s);
+    const u = Math.min(1, Math.max(0, cl.s / ((DRAFT_BLEND * form.height) / 1.75))), w = u * u * (3 - 2 * u);
+    return [0, 1, 2].map((k) => p[k] + (c[k] + v[k] - p[k]) * w);
+  });
   // A skirt (`skin` carried below the seat, not cut into trouser legs) keeps its
   // exact standing pattern (`cut`), while its starting 3D placement (`points`)
   // clears posed knees, shins, and feet radially from the hip axis so `settleNow()`
