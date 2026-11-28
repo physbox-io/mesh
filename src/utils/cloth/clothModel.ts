@@ -16,11 +16,11 @@
 
 import { garmentNameWarnings, linePicks } from './clothNames';
 import * as THREE from 'three';
-import type { ClothMaterial, ClothMaterialName, ClothPatternPrint, GarmentBelt, GarmentTrim } from '../../types/cloth';
+import type { BodyFormMeasurements, ClothMaterial, ClothMaterialName, ClothPatternPrint, GarmentBelt, GarmentDraft, GarmentTrim } from '../../types/cloth';
 import type { SceneNode } from '../../types/scene';
 import { chain, CLOTH_MATERIALS, clothBendRigidity, clothMaterial, DEFAULT_CLOTH_SPACING, DEFAULT_SEW_TIME, meshCloth, resolveClothMaterial } from './clothMesh';
 import { restOff } from './garmentPlan';
-import { garmentShell } from './garmentShell';
+import { garmentShell, type GarmentShell } from './garmentShell';
 import { doneUp } from './fastening';
 import { flattenPanel, type FlatPiece } from './garmentFlatten';
 import { meshSpacing, spreadOver, spreadPanel } from './garmentSpread';
@@ -574,6 +574,27 @@ function joinGroup(group: ClothRenderGroup, piece: AddOnPiece, particleOf: (loca
   return true;
 }
 
+/** A draft without what only paints it (colours, prints), at any depth: what its shell does not depend on. */
+const paintless = (v: unknown): unknown => (Array.isArray(v) ? v.map(paintless)
+  : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).filter(([k]) => k !== 'rgba' && k !== 'pattern').map(([k, x]) => [k, paintless(x)]))
+  : v);
+const shellCache = new Map<string, GarmentShell>();
+/**
+ * garmentShell, kept by everything it depends on (most of a garment's
+ * modelling): a garment recoloured, or a trim, pocket, collar or piece of
+ * it, is modelled again from the same shell (urban_collection's recolour
+ * was 2 s of clothModel). Copied out, so nothing done to one changes another.
+ */
+function paintlessShell(draft: GarmentDraft, form: BodyFormMeasurements, layer: number): GarmentShell {
+  const key = JSON.stringify([paintless(draft), form, layer]);
+  const hit = shellCache.get(key);
+  if (hit) { shellCache.delete(key); shellCache.set(key, hit); return structuredClone(hit); }
+  const shell = garmentShell(draft, form, layer);
+  shellCache.set(key, structuredClone(shell));
+  while (shellCache.size > 16) shellCache.delete(shellCache.keys().next().value!);
+  return shell;
+}
+
 export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNode[]): ClothModel {
   const spec = node.cloth!;
   const material = clothMaterial(spec), materialName: ClothMaterialName = spec.material ?? 'jersey';
@@ -664,7 +685,7 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
     if (!form.bodyForm) throw new Error(`the garment '${name}' is fitted to '${spec.garment.fitTo}', which is not a body form here`);
     fitTo = spec.garment.fitTo;
     loose = !spec.garment.fitTo;
-    const shell = garmentShell(spec.garment, form.bodyForm, spec.layer ?? 0);
+    const shell = paintlessShell(spec.garment, form.bodyForm, spec.layer ?? 0);
     if (shell.warnings?.length) warnings.push(...shell.warnings);
     if (shell.part?.length) garmentParts = [...new Set(shell.part)];
     x0 = shell.points.map(toWorld);
