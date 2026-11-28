@@ -4,7 +4,9 @@ import { useStore } from '../store/useStore';
 import type { SceneNode } from '../types/scene';
 import type { ModelMirror } from '../types/sceneLayer';
 import { layoutPattern, patternSvg } from '../utils/cloth/patternSvg';
-import { DEFAULT_PATTERN_OPTIONS, garmentPatternPieces, printPattern, printWidth } from '../utils/cloth/patternExport';
+import { DEFAULT_PATTERN_OPTIONS, garmentPatternPieces, printPattern, printWidth, stalePatternIds } from '../utils/cloth/patternExport';
+import { staleBodies } from '../utils/sceneSummary';
+import { modelBuiltFrom } from '../store/modelProvenance';
 import { downloadBlob } from '../utils/downloadBlob';
 import { openTiledPrintWindow, PAPER_SPECS, type PaperFormat } from '../utils/tiledPaperPrint';
 import { layoutRects } from '../utils/cloth/patternSvg';
@@ -27,7 +29,10 @@ export function GarmentPatternPanel({ nodes, title, fill }: {
   fill?: string;
 }) {
   const model = useStore((s) => s.model) as ModelMirror | null;
-  const sceneNodes = useStore((s) => s.sceneGraph.nodes);
+  const sceneGraph = useStore((s) => s.sceneGraph);
+  const sceneNodes = sceneGraph.nodes;
+  // Changed since the model was built (the garment or its form): what the model has is the old pattern.
+  const stale = useMemo(() => stalePatternIds(nodes, sceneNodes, staleBodies(sceneGraph, model ? modelBuiltFrom().graph : null)).size > 0, [nodes, sceneNodes, sceneGraph, model]);
   const [seamAllowanceMm, setSeamAllowanceMm] = useState<number>(DEFAULT_PATTERN_OPTIONS.seamAllowanceMm);
   const [paperFormat, setPaperFormat] = useState<PaperFormat>('a4');
   // From the compiled model only: modelling a garment again here would stall the editor.
@@ -51,6 +56,9 @@ export function GarmentPatternPanel({ nodes, title, fill }: {
   const svg = () => patternSvg(pieces, title, { seamAllowanceMm });
   return (
     <>
+      {stale && (
+        <div className="text-[11px] text-amber-700 dark:text-amber-300">Rebuilding the pattern from your changes; this is the previous one, so downloads wait for it.</div>
+      )}
       <svg viewBox={`0 0 ${layout.width} ${layout.height}`} className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded" preserveAspectRatio="xMidYMid meet">
         {layout.pieces.map((p) => (
           <g key={p.name}>
@@ -99,8 +107,9 @@ export function GarmentPatternPanel({ nodes, title, fill }: {
         <span className="tabular-nums font-mono w-11 text-right">{seamAllowanceMm} mm</span>
       </div>
       <button
+        disabled={stale}
         onClick={() => downloadBlob(new Blob([svg()], { type: 'image/svg+xml' }), `${fileStem(title)}_pattern.svg`)}
-        className="flex items-center justify-center gap-2 w-full py-2 border border-emerald-200 dark:border-emerald-800 rounded-lg text-xs font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 hover:border-emerald-300 transition-colors shadow-sm cursor-pointer"
+        className="flex items-center justify-center gap-2 w-full py-2 border border-emerald-200 dark:border-emerald-800 rounded-lg text-xs font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 hover:border-emerald-300 transition-colors shadow-sm cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
         title="Download the pieces as a 1:1 millimetre SVG (with seam allowance and dashed stitching line if > 0 mm)"
       >
         <Scissors className="w-4 h-4" /> Download pattern (SVG)
@@ -116,11 +125,12 @@ export function GarmentPatternPanel({ nodes, title, fill }: {
         </select>
         <button
           type="button"
+          disabled={stale}
           onClick={() => {
             const pr = printPattern(pieces, title, { seamAllowanceMm }, paperFormat);
             openTiledPrintWindow(pr.svg, { paper: paperFormat, title: `${title} sewing pattern`, fileStem: `${fileStem(title)}_pattern`, occupied: layoutRects(pr.layout) });
           }}
-          className="flex items-center justify-center gap-1.5 flex-1 py-1.5 px-2.5 border border-indigo-200 dark:border-indigo-800 rounded-lg text-xs font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/40 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 transition-colors shadow-xs cursor-pointer"
+          className="flex items-center justify-center gap-1.5 flex-1 py-1.5 px-2.5 border border-indigo-200 dark:border-indigo-800 rounded-lg text-xs font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/40 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 transition-colors shadow-xs cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
           title="Packed to print 1:1 on the fewest pages, blank pages left out, with corner alignment diamonds and a 50 × 50 mm test square"
         >
           <Printer className="w-3.5 h-3.5" /> Print 1:1 ({pages} page{pages === 1 ? '' : 's'})

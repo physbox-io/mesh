@@ -4,13 +4,13 @@
  * directly without pulling Zustand into workers.
  */
 
-import * as THREE from 'three';
 import type { BodyFormMeasurements } from '../../types/cloth';
 import type { SceneNode } from '../../types/scene';
 import type { ModelMirror } from '../../types/sceneLayer';
 import { bodyLandmarks } from './bodyForm';
 import { legPose, proportions } from './formProportions';
 import { clothModel } from './clothModel';
+import { clothWorldMatrix } from './clothFrame';
 
 const r1 = (v: number) => +v.toFixed(1);
 const r4 = (v: number) => +v.toFixed(4);
@@ -125,11 +125,6 @@ function bboxFromCoords(pts: Iterable<[number, number, number]>): ClothSummaryRe
   };
 }
 
-function nodeWorldMatrix(node: SceneNode): THREE.Matrix4 {
-  const pos = new THREE.Vector3(...(node.pos ?? [0, 0, 0]));
-  const [w, x, y, z] = node.quat ?? [1, 0, 0, 0];
-  return new THREE.Matrix4().compose(pos, new THREE.Quaternion(x, y, z, w), new THREE.Vector3(1, 1, 1));
-}
 
 /** Computes a concise cloth/garment summary for `physics_get_object`. */
 export function clothNodeSummary(
@@ -175,7 +170,7 @@ export function clothNodeSummary(
   // Fallback when physics model flexes aren't populated yet (e.g. headless/unit calls):
   // build the cloth model directly from the scene graph.
   try {
-    const built = clothModel(node, nodeWorldMatrix(node), opts?.scene ?? [node]);
+    const built = clothModel(node, clothWorldMatrix(opts?.scene ?? [node], node), opts?.scene ?? [node]);
     const pieces = built.groups.map((g) => {
       const sep = g.name.lastIndexOf('__');
       return sep > 0 ? g.name.slice(sep + 2) : g.name;
