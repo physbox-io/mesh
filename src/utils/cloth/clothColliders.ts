@@ -103,6 +103,29 @@ export class SdfGrid {
     out.d = dist; out.nx = gx / l; out.ny = gy / l; out.nz = gz / l;
     return true;
   }
+  private slope = -1;
+  /**
+   * Most the trilinear distance can change per metre moved, anywhere on the
+   * grid: within a cell each partial derivative is a blend of that axis's
+   * cell-edge differences, so the gradient is at most the largest of each,
+   * over the cell, together.
+   */
+  lipschitz(): number {
+    if (this.slope >= 0) return this.slope;
+    const [nx, ny, nz] = this.dims, d = this.d, sy = nx, sz = nx * ny;
+    let mx = 0, my = 0, mz = 0;
+    for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) {
+      const o = k * sz + j * sy;
+      for (let i = 0; i < nx; i++) {
+        const v = d[o + i];
+        if (i + 1 < nx) { const e = Math.abs(d[o + i + 1] - v); if (e > mx) mx = e; }
+        if (j + 1 < ny) { const e = Math.abs(d[o + i + sy] - v); if (e > my) my = e; }
+        if (k + 1 < nz) { const e = Math.abs(d[o + i + sz] - v); if (e > mz) mz = e; }
+      }
+    }
+    this.slope = Math.sqrt(mx * mx + my * my + mz * mz) / this.cell;
+    return this.slope;
+  }
   /** Distance and outward normal from one read of the eight surrounding cells (trilinear and its gradient). */
   query(x: number, y: number, z: number): Contact | null {
     const tmp: ContactOut = { d: 0, nx: 0, ny: 0, nz: 0 };
@@ -405,6 +428,20 @@ function perpendicularInto(ax: number, ay: number, az: number, out: ContactOut) 
  */
 export function colliderContactInto(c: Collider, lx: number, ly: number, lz: number, out: ContactOut): boolean {
   return primitiveInto(c.shape, lx, ly, lz, out);
+}
+
+/**
+ * Most a collider's distance can change per metre a point moves (in its
+ * frame, which a pose only turns and moves): 1 for the exact distances, the
+ * grid's own bound for a mesh, none known (Infinity) for the ellipsoid, whose
+ * distance is an estimate.
+ */
+export function colliderLipschitz(c: Collider): number {
+  switch (c.shape.kind) {
+    case 'sdf': return c.shape.grid.lipschitz();
+    case 'ellipsoid': return Infinity;
+    default: return 1;
+  }
 }
 
 export function colliderContact(c: Collider, local: number[]): Contact | null {
