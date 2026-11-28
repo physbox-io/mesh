@@ -6,9 +6,12 @@
  * over a shirt over jeans; an ornament on a gown. One way: the outer cloth
  * is kept off the inner, which does not feel it (it rests on the body).
  *
- * Triangles go into a spatial hash rebuilt every substep from where they
- * are; each particle looks only in its own cell (triangles are entered in
- * every cell their box, grown by the reach, touches).
+ * Triangles go into a spatial hash rebuilt every few substeps from where
+ * they are (entered in every cell their box, grown by the reach and how far
+ * cloth moves meanwhile, touches). At each rebuild every particle lists the
+ * triangles of its cell truly near enough to matter before the next, and
+ * between rebuilds only those are tested; most list none. One that has moved
+ * since (more than half the margin) looks in its own cell again instead.
  */
 
 import type { ClothModel } from './clothModel';
@@ -56,6 +59,15 @@ interface Group {
   entries: Int32Array; // triangle numbers
   /** Each triangle's box as of the last build, grown by the reach: min x, y, z, max x, y, z. */
   box: Float64Array;
+  /**
+   * As of the last build: each particle's triangles near enough, in hash
+   * order (CSR, by its slot), and where each particle was.
+   */
+  candStart: Int32Array;
+  cand: Int32Array;
+  /** Per particle: its slot in candStart, or -1 for no triangle near. */
+  slot: Int32Array;
+  xp: Float64Array;
 }
 
 const hash = (ix: number, iy: number, iz: number, mask: number) => ((Math.imul(ix, 73856093) ^ Math.imul(iy, 19349663) ^ Math.imul(iz, 83492791)) >>> 0) & mask;
@@ -127,7 +139,7 @@ export class LayerContacts {
           const nt = (t1 - t0) / 3;
           for (let t = 0; t < nt; t++) outward.push(model.outward ? 1 : 0);
           const buckets = nextPow2(Math.max(1024, 2 * nt));
-          this.groups.push({ tris: Int32Array.from(tris), outward: Uint8Array.from(outward), particles: Int32Array.from(particles), mu: Float64Array.from(mu), buckets, mask: buckets - 1, start: new Int32Array(buckets + 1), fill: new Int32Array(buckets), range: new Int32Array(nt * 6), entries: new Int32Array(0), box: new Float64Array(nt * 6) });
+          this.groups.push({ tris: Int32Array.from(tris), outward: Uint8Array.from(outward), particles: Int32Array.from(particles), mu: Float64Array.from(mu), buckets, mask: buckets - 1, start: new Int32Array(buckets + 1), fill: new Int32Array(buckets), range: new Int32Array(nt * 6), entries: new Int32Array(0), box: new Float64Array(nt * 6), ...lists(particles.length) });
         }
       }
       // Reciprocal pass for this layer: keep outer garment triangles clear of concentric inner particles.
@@ -149,7 +161,7 @@ export class LayerContacts {
         if (!innerParticles.length) continue;
         const nt = outerTris.length / 3;
         const buckets = nextPow2(Math.max(1024, 2 * nt));
-        this.groups.push({ tris: Int32Array.from(outerTris), outward: Uint8Array.from(outerOutward), particles: Int32Array.from(innerParticles), mu: Float64Array.from(innerMu), pushTris: true, buckets, mask: buckets - 1, start: new Int32Array(buckets + 1), fill: new Int32Array(buckets), range: new Int32Array(nt * 6), entries: new Int32Array(0), box: new Float64Array(nt * 6) });
+        this.groups.push({ tris: Int32Array.from(outerTris), outward: Uint8Array.from(outerOutward), particles: Int32Array.from(innerParticles), mu: Float64Array.from(innerMu), pushTris: true, buckets, mask: buckets - 1, start: new Int32Array(buckets + 1), fill: new Int32Array(buckets), range: new Int32Array(nt * 6), entries: new Int32Array(0), box: new Float64Array(nt * 6), ...lists(innerParticles.length) });
       }
     }
     // Cloth against itself and non-concentric cloth: clothSelf.
@@ -184,22 +196,40 @@ export class LayerContacts {
       const deep = settle && !g.pushTris && g.outward[0] === 1;
       const reach = deep ? SETTLE_DEPTH : g.pushTris || g.outward[0] ? thick * 2.5 : thick * 2;
       const maxDepth = deep ? SETTLE_DEPTH : MAX_DEPTH;
-      if (rebuild) this.build(g, x, reach + MOVE_MARGIN);
-      const T = g.tris, mask = g.mask, B = g.box, reach2 = reach * reach;
+      // Grown by half the margin more than the triangles can move, for how far
+      // a particle may move from where it was listed before it looks again.
+      if (rebuild) { this.build(g, x, reach + 1.5 * MOVE_MARGIN); listNear(g, x, reach + 1.5 * MOVE_MARGIN); }
+      const T = g.tris, mask = g.mask, B = g.box, reach2 = reach * reach, xp = g.xp, slot = g.slot;
+      const stray2 = (0.5 * MOVE_MARGIN) ** 2;
       for (let pi = 0; pi < g.particles.length; pi++) {
-        const i = g.particles[pi], k = 3 * i;
+        const i = g.particles[pi], k = 3 * i, o3 = 3 * pi;
         const px = x[k], py = x[k + 1], pz = x[k + 2];
-        const b = hash(Math.floor(px * INV_CELL), Math.floor(py * INV_CELL), Math.floor(pz * INV_CELL), mask);
-        const e0 = g.start[b], e1 = g.start[b + 1];
-        if (e0 === e1) continue;
         let best2 = reach2, bq0 = 0, bq1 = 0, bq2 = 0, bt = -1;
-        for (let e = e0; e < e1; e++) {
-          const t = g.entries[e], o = 6 * t;
-          if (px < B[o] || py < B[o + 1] || pz < B[o + 2] || px > B[o + 3] || py > B[o + 4] || pz > B[o + 5]) continue;
-          const a = 3 * T[3 * t], bb = 3 * T[3 * t + 1], c = 3 * T[3 * t + 2];
-          closest(px, py, pz, x, a, bb, c, out);
-          const dx = px - out[0], dy = py - out[1], dz = pz - out[2], d2 = dx * dx + dy * dy + dz * dz;
-          if (d2 < best2) { best2 = d2; bq0 = out[0]; bq1 = out[1]; bq2 = out[2]; bt = t; }
+        const mx = px - xp[o3], my = py - xp[o3 + 1], mz = pz - xp[o3 + 2];
+        if (mx * mx + my * my + mz * mz <= stray2) {
+          // Near where it was listed: its list holds every triangle that can
+          // be within the reach now (they move no more than the hash allows).
+          const s = slot[pi];
+          if (s < 0) continue;
+          for (let e = g.candStart[s]; e < g.candStart[s + 1]; e++) {
+            const t = g.cand[e];
+            const a = 3 * T[3 * t], bb = 3 * T[3 * t + 1], c = 3 * T[3 * t + 2];
+            closest(px, py, pz, x, a, bb, c, out);
+            const dx = px - out[0], dy = py - out[1], dz = pz - out[2], d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 < best2) { best2 = d2; bq0 = out[0]; bq1 = out[1]; bq2 = out[2]; bt = t; }
+          }
+        } else {
+          const b = hash(Math.floor(px * INV_CELL), Math.floor(py * INV_CELL), Math.floor(pz * INV_CELL), mask);
+          const e0 = g.start[b], e1 = g.start[b + 1];
+          if (e0 === e1) continue;
+          for (let e = e0; e < e1; e++) {
+            const t = g.entries[e], o = 6 * t;
+            if (px < B[o] || py < B[o + 1] || pz < B[o + 2] || px > B[o + 3] || py > B[o + 4] || pz > B[o + 5]) continue;
+            const a = 3 * T[3 * t], bb = 3 * T[3 * t + 1], c = 3 * T[3 * t + 2];
+            closest(px, py, pz, x, a, bb, c, out);
+            const dx = px - out[0], dy = py - out[1], dz = pz - out[2], d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 < best2) { best2 = d2; bq0 = out[0]; bq1 = out[1]; bq2 = out[2]; bt = t; }
+          }
         }
         if (bt < 0) continue;
         const a = 3 * T[3 * bt], bb = 3 * T[3 * bt + 1], c = 3 * T[3 * bt + 2];
@@ -324,6 +354,43 @@ export class LayerContacts {
 }
 
 const out = [0, 0, 0];
+
+/** Empty candidate lists for a group of `np` particles (listNear fills them). */
+function lists(np: number) {
+  return {
+    candStart: new Int32Array(np + 1), cand: new Int32Array(1024),
+    slot: new Int32Array(np).fill(-1), xp: new Float64Array(3 * np).fill(Infinity),
+  };
+}
+
+/**
+ * Each particle's triangles from the hash just built, as collide would find
+ * them in its cell (box-tested, in hash order), kept only if within `keep`
+ * of it; and where it is now.
+ */
+function listNear(g: Group, x: Float64Array, keep: number) {
+  const T = g.tris, B = g.box, mask = g.mask, keep2 = keep * keep, xp = g.xp, slot = g.slot;
+  let count = 0, total = 0;
+  g.candStart[0] = 0;
+  for (let pi = 0; pi < g.particles.length; pi++) {
+    const k = 3 * g.particles[pi], o3 = 3 * pi;
+    const px = x[k], py = x[k + 1], pz = x[k + 2];
+    xp[o3] = px; xp[o3 + 1] = py; xp[o3 + 2] = pz;
+    slot[pi] = -1;
+    const b = hash(Math.floor(px * INV_CELL), Math.floor(py * INV_CELL), Math.floor(pz * INV_CELL), mask);
+    const e0 = g.start[b], e1 = g.start[b + 1], from = total;
+    for (let e = e0; e < e1; e++) {
+      const t = g.entries[e], o = 6 * t;
+      if (px < B[o] || py < B[o + 1] || pz < B[o + 2] || px > B[o + 3] || py > B[o + 4] || pz > B[o + 5]) continue;
+      closest(px, py, pz, x, 3 * T[3 * t], 3 * T[3 * t + 1], 3 * T[3 * t + 2], out);
+      const dx = px - out[0], dy = py - out[1], dz = pz - out[2];
+      if (dx * dx + dy * dy + dz * dz > keep2) continue;
+      if (total >= g.cand.length) { const grown = new Int32Array(g.cand.length * 2); grown.set(g.cand); g.cand = grown; }
+      g.cand[total++] = t;
+    }
+    if (total > from) { slot[pi] = count++; g.candStart[count] = total; }
+  }
+}
 
 /** Closest point on triangle (a, b, c), given as offsets into x, to p (Ericson); into `o`. */
 function closest(px: number, py: number, pz: number, x: Float64Array, a: number, b: number, c: number, o: number[]) {
