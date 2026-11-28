@@ -434,7 +434,7 @@ describe('sculpt bases, stroke sanitization, MCP SET_SCULPT_BASE history & singl
 
     // 1) Stroke on the 2562-vertex sphere base -> single store undo step!
     const sRes = await sculptCommands.SCULPT(
-      { targetId: id, brush: 'draw', at: [[0, 0, 0.05]], radius: 0.03, strength: 0.8, dynamicTopology: false } as any,
+      { targetId: id, brush: 'draw', at: [[0, 0, 50]], radius: 30, strength: 0.8, dynamicTopology: false } as any,
       { store: useStore.getState() } as any,
     );
     expect(sRes.ok).toBe(true);

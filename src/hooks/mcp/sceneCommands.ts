@@ -476,7 +476,7 @@ export const sceneCommands: McpCommands = {
       return { ok: false, error: `Body '${replaceId}' was deleted while importing the STL.` };
     }
     const effectiveName = (typeof name === 'string' && name) || freshReplacing?.name || 'imported_stl';
-    const nodePos: [number, number, number] = isFiniteVec3(pos) ? [...pos] : [0, 0, 0];
+    const nodePos: [number, number, number] = isFiniteVec3(pos) ? [pos[0] / 1000, pos[1] / 1000, pos[2] / 1000] : [0, 0, 0];
     const id = freshReplacing?.id ?? `stl_${Math.random().toString(36).slice(2, 7)}`;
     const isDynamic = dynamicNow !== false;
     const joints = isDynamic ? [{ name: `${id}_free`, type: 'free' as const }] : [];
@@ -555,7 +555,7 @@ export const sceneCommands: McpCommands = {
       const colour = freshReplacing.geoms?.[0]?.rgba;
       const swapped: SceneNode = {
         ...newNode,
-        pos: isFiniteVec3(pos) ? [...pos] : freshReplacing.pos,
+        pos: isFiniteVec3(pos) ? [pos[0] / 1000, pos[1] / 1000, pos[2] / 1000] : freshReplacing.pos,
         ...(freshReplacing.quat ? { quat: freshReplacing.quat } : {}),
         ...(freshReplacing.euler ? { euler: freshReplacing.euler } : {}),
         joints: dynamicBool === false
@@ -831,7 +831,7 @@ export const sceneCommands: McpCommands = {
     if (floorBounce !== undefined) env.floorBounce = floorBounce;
     if (background !== undefined) env.background = background;
     if (waterLevel !== undefined) {
-      env.waterLevel = typeof waterLevel === 'number' ? waterLevel : null;
+      env.waterLevel = typeof waterLevel === 'number' ? waterLevel / 1000 : null;
     }
     if (Object.keys(env).length > 0) store.setEnvironment(env);
     // Sound is the app's own switch (header speaker, settings): the store and

@@ -51,7 +51,7 @@ export const latticeCommands: McpCommands = {
     }
     const parsedSubdiv = initSubdiv !== undefined ? parseSubdiv(initSubdiv, 'subdiv') : 0;
     const parsedThickness = initThickness !== undefined ? parseThicknessMm(initThickness, 'thicknessMm') : 0;
-    const position: [number, number, number] = pos !== undefined ? [pos[0], pos[1], pos[2]] : [0, 0, 0.2];
+    const position: [number, number, number] = pos !== undefined ? [pos[0] / 1000, pos[1] / 1000, pos[2] / 1000] : [0, 0, 0.2];
     const firstItem = Array.isArray(ops) && ops.length > 0 ? ops[0] : null;
     const firstOp = firstItem && typeof firstItem === 'object' && !Array.isArray(firstItem)
       ? String(firstItem.op ?? firstItem.type ?? '').toLowerCase()

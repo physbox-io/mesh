@@ -717,17 +717,16 @@ export function applyPaintStrokeToBody(targetId: string, m: Record<string, any>)
     : normalizeRgba(rgba);
   if (!normColor) throw new Error('rgba must be [r, g, b] or [r, g, b, a], each a finite number in 0..1');
 
-  const rawPoints: number[][] = at !== undefined
-    ? pointList(at)
-    : atMm !== undefined
-      ? pointList(atMm).map((p) => (isFiniteVec3(p) ? [p[0] / 1000, p[1] / 1000, p[2] / 1000] : p))
-      : [];
+  const rawAt = at !== undefined ? at : atMm;
+  const rawPoints: number[][] = rawAt !== undefined
+    ? pointList(rawAt).map((p) => (isFiniteVec3(p) ? [p[0] / 1000, p[1] / 1000, p[2] / 1000] : p))
+    : [];
   const points: number[][] = rawPoints;
   if (!points.length || points.some((p: unknown) => !isFiniteVec3(p))) {
-    throw new Error("at must be [x, y, z] or a list of them, with finite numbers in the geom's own frame in metres (or pass atMm in millimetres)");
+    throw new Error("at must be [x, y, z] or a list of them, with finite numbers in the geom's own frame in millimetres");
   }
   if (radius !== undefined && (!isFiniteNumber(radius) || radius <= 0)) {
-    throw new Error('radius must be a positive finite number in metres');
+    throw new Error('radius must be a positive finite number in millimetres');
   }
   if (radiusMm !== undefined && (!isFiniteNumber(radiusMm) || radiusMm <= 0)) {
     throw new Error('radiusMm must be a positive finite number in millimetres');
@@ -742,7 +741,7 @@ export function applyPaintStrokeToBody(targetId: string, m: Record<string, any>)
     throw new Error("symmetry must be 'x', 'y' or 'z'");
   }
   const brush = typeof radius === 'number'
-    ? radius
+    ? radius / 1000
     : typeof radiusMm === 'number'
       ? radiusMm / 1000
       : 0.008;

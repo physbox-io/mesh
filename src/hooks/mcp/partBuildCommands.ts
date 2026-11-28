@@ -580,8 +580,12 @@ const buildMechanismCommand: McpHandler = async (msg, { store, toId }) => {
   if (!originChk.ok) return originChk;
   const axisChk = checkVec3(msg.axis, 'axis');
   if (!axisChk.ok) return axisChk;
+  const originM = Array.isArray(msg.origin)
+    ? ([msg.origin[0] / 1000, msg.origin[1] / 1000, msg.origin[2] / 1000] as [number, number, number])
+    : undefined;
   const resolvedMsg: MechanismRequest = {
     ...(msg as MechanismRequest),
+    ...(originM ? { origin: originM } : {}),
     ...(typeof msg.arborId === 'string' ? { arborId: String(toId ? toId(msg.arborId) : msg.arborId) } : {}),
   };
   const prevNodes = store.sceneGraph.nodes ?? [];

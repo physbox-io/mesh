@@ -31,6 +31,7 @@ import {
   isPlainObject, isFiniteNumber, isFiniteVec3,
 } from './bridgeUtils';
 import { sculptHistory } from './sculptState';
+import { mmToM, vecMmToM } from './mcpUnits';
 import {
   normalizeRgba, fillGeomDefaults, fillJointDefaults, resolveUpdatedGeoms, resolveBreakFields,
   fillBodyDefaults, parseTuneTo, applyTuneTo, applyPendingTuneTo, type PendingDeclarativeOps,
@@ -214,6 +215,21 @@ export const objectCommands: McpCommands = {
       if (updates[k] !== null) continue;
       if (k === 'id' || k === 'name' || k === 'pos') delete updates[k];
       else updates[k] = undefined;
+    }
+    if (isFiniteVec3(updates.pos)) {
+      updates.pos = vecMmToM(updates.pos) as [number, number, number];
+    }
+    if (isFiniteVec3(updates.connectAnchor)) {
+      updates.connectAnchor = vecMmToM(updates.connectAnchor) as [number, number, number];
+    }
+    if (Array.isArray(updates.curvePoints)) {
+      updates.curvePoints = updates.curvePoints.map((p: unknown) => (isFiniteVec3(p) ? vecMmToM(p) : p)) as number[][];
+    }
+    if (typeof updates.curveWidth === 'number' && Number.isFinite(updates.curveWidth)) {
+      updates.curveWidth = mmToM(updates.curveWidth);
+    }
+    if (typeof updates.curveThickness === 'number' && Number.isFinite(updates.curveThickness)) {
+      updates.curveThickness = mmToM(updates.curveThickness);
     }
     if (updates.joints !== undefined) {
       if (!Array.isArray(updates.joints) || !updates.joints.every(isPlainObject)) {

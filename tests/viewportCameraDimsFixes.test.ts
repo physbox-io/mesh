@@ -151,8 +151,8 @@ describe('Auto-framing camera when first body is added to an empty scene', () =>
       body: {
         id: 'part_120mm',
         name: 'part_120mm',
-        pos: [0, 0, 0.06],
-        geoms: [{ type: 'box', size: [0.06, 0.06, 0.06] }],
+        pos: [0, 0, 60],
+        geoms: [{ type: 'box', size: [60, 60, 60] }],
       },
     }, ctx());
     expect(added.ok).toBe(true);
@@ -175,8 +175,8 @@ describe('Auto-framing camera when first body is added to an empty scene', () =>
       body: {
         id: 'second_part',
         name: 'second_part',
-        pos: [0.2, 0, 0.02],
-        geoms: [{ type: 'box', size: [0.02, 0.02, 0.02] }],
+        pos: [200, 0, 20],
+        geoms: [{ type: 'box', size: [20, 20, 20] }],
       },
     }, ctx());
     expect(second.ok).toBe(true);
@@ -192,7 +192,7 @@ describe('Auto-framing camera when first body is added to an empty scene', () =>
 
     const created = await latticeCommands.CREATE_LATTICE({
       name: 'Bracket',
-      pos: [0, 0, 0.06],
+      pos: [0, 0, 60],
       sizeMm: 120,
     }, ctx());
     expect(created.ok).toBe(true);
@@ -213,7 +213,7 @@ describe('Auto-framing camera when first body is added to an empty scene', () =>
 
     const second = await latticeCommands.CREATE_LATTICE({
       name: 'Second',
-      pos: [0.15, 0, 0.05],
+      pos: [150, 0, 50],
       sizeMm: 40,
     }, ctx());
     expect(second.ok).toBe(true);

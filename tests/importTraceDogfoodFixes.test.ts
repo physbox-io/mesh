@@ -330,9 +330,9 @@ describe('Bug 6: SET_REFERENCE_IMAGE parses numeric-string height', () => {
     });
   });
 
-  it('accepts numeric string height like "0.25"', async () => {
+  it('accepts numeric string height like "250"', async () => {
     const res = await viewCommands.SET_REFERENCE_IMAGE(
-      { imageId: 'ref1', height: '0.25' },
+      { imageId: 'ref1', height: '250' },
       makeCtx(),
     ) as { ok: boolean; widthMm: number; heightMm: number };
     expect(res.ok).toBe(true);
@@ -343,8 +343,8 @@ describe('Bug 6: SET_REFERENCE_IMAGE parses numeric-string height', () => {
   it('rejects non-numeric, empty, or out-of-range string height', async () => {
     await expect(viewCommands.SET_REFERENCE_IMAGE({ imageId: 'ref1', height: '' }, makeCtx())).rejects.toThrow(/height/i);
     await expect(viewCommands.SET_REFERENCE_IMAGE({ imageId: 'ref1', height: 'abc' }, makeCtx())).rejects.toThrow(/height/i);
-    await expect(viewCommands.SET_REFERENCE_IMAGE({ imageId: 'ref1', height: '-0.5' }, makeCtx())).rejects.toThrow(/height/i);
-    await expect(viewCommands.SET_REFERENCE_IMAGE({ imageId: 'ref1', height: '25' }, makeCtx())).rejects.toThrow(/height/i);
+    await expect(viewCommands.SET_REFERENCE_IMAGE({ imageId: 'ref1', height: '-500' }, makeCtx())).rejects.toThrow(/height/i);
+    await expect(viewCommands.SET_REFERENCE_IMAGE({ imageId: 'ref1', height: '25000' }, makeCtx())).rejects.toThrow(/height/i);
   });
 });
 
