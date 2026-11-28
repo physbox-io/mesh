@@ -1296,7 +1296,7 @@ export class ClothSim {
       }
       // Once a substep, on the last pass: the constraints have moved the cloth
       // by then, and friction after it holds what this sets.
-      if (this.self.active && pass === STRETCH_PASSES - 1) this.self.collide(x, prev, true);
+      if (this.self.active && pass === STRETCH_PASSES - 1) this.self.collide(x, prev, true, this.settled);
       this.solveTacks();
       this.applyFriction();
     }
