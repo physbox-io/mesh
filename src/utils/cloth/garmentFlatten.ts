@@ -9,6 +9,8 @@
  * Pure: points and triangles in, flat pieces out.
  */
 
+import { envelopeCholesky } from './envelopeCholesky';
+
 export interface FlatPiece {
   name: string;
   /** Shell point index of each of the piece's points. */
@@ -353,6 +355,8 @@ function arap(n: number, tris: number[], frames: { p: V2[]; area: number }[], in
     }
   };
   const scratch = makeCgScratch(diag);
+  // The Laplacian is the same every iteration: factored once, each global step is two triangular solves (by CG, it was most of a flatten).
+  const chol = envelopeCholesky(n, diag, rowPtr, colIdx, val, -1);
   const bu = new Float64Array(n), bv = new Float64Array(n);
   const xu = new Float64Array(n), xv = new Float64Array(n);
   for (let i = 0; i < n; i++) { xu[i] = uv[i][0]; xv[i] = uv[i][1]; }
@@ -409,6 +413,7 @@ function arap(n: number, tris: number[], frames: { p: V2[]; area: number }[], in
       bu[va2] += rx2; bu[vb2] -= rx2; bv[va2] += ry2; bv[vb2] -= ry2;
     }
     bu[0] += xu[0]; bv[0] += xv[0];
+    if (chol) { chol.solve(bu, xu); chol.solve(bv, xv); continue; }
     // Warm-started from the last layout; intermediate steps only need modest CG accuracy.
     const tol = it >= iters - 2 ? 1e-13 : 1e-10;
     cg(applyL, bu, xu, diag, 300, tol, scratch);
