@@ -24,7 +24,7 @@ import { SelfContacts } from './clothSelf';
 import { BoardShapes, type Board } from './clothBoards';
 import { contourStep, findCrossings, trianglesNear, untangleMesh, type UntangleMesh } from './clothUntangle';
 import { ClothCcd } from './clothCcd';
-import { colliderContactInto, type Collider, type ContactOut } from './clothColliders';
+import { colliderContactInto, colliderLipschitz, type Collider, type ContactOut } from './clothColliders';
 import { clothBendRigidity } from './clothMesh';
 
 /** Substep, seconds. */
@@ -239,6 +239,18 @@ export class ClothSim {
   private nearest: Float64Array;
   private skip: Uint8Array;
   private activeCollideIdx: Int32Array;
+  /**
+   * Per particle and collider, the distance it read last, where the particle
+   * was, and the collider's pose then (colGen; -1 none): a point that cannot
+   * have come within the margin since (the distance changes no faster than
+   * colLip per metre) is not asked again in a pass that only pushes. Null
+   * where the table would be too large.
+   */
+  private colD: Float64Array | null = null;
+  private colP: Float64Array | null = null;
+  private colAt: Int32Array | null = null;
+  private colGen: Int32Array;
+  private colLip: Float64Array;
   private accumulator = 0;
   /** Cloth against cloth along each stretch of substeps (clothCcd): where the stretch began, and how many substeps it is. */
   private ccd: ClothCcd | null = null;
@@ -486,6 +498,13 @@ export class ClothSim {
     for (const pc of this.pieces) for (const b of pc.model.boards ?? []) boards.push({ ...b, particles: b.particles.map((q) => pc.base + q) });
     this.boards = new BoardShapes(boards, this.n);
     this.clearBudget = new Float64Array(n); this.nearest = new Float64Array(n); this.skip = new Uint8Array(n); this.activeCollideIdx = new Int32Array(n);
+    this.colGen = new Int32Array(colliders.length);
+    this.colLip = Float64Array.from(colliders, (c) => colliderLipschitz(c));
+    if (n * colliders.length <= 4_000_000) {
+      this.colD = new Float64Array(n * colliders.length);
+      this.colP = new Float64Array(3 * n * colliders.length);
+      this.colAt = new Int32Array(n * colliders.length).fill(-1);
+    }
     this.tiePrevLambda = new Float64Array(this.ties.length);
     this.tieFastLambda = new Float64Array(this.ties.length);
     this.tieAvgLambda = new Float64Array(this.ties.length);
@@ -568,6 +587,8 @@ export class ClothSim {
       }
       this.world[i].copy(nextMat);
       this.inv[i].copy(nextMat).invert();
+      // A new pose: what each point read of it before no longer holds.
+      this.colGen[i]++;
       // Its bounds in the world, grown by the cloth's thickness: most points
       // are turned away by six comparisons, not a transform and a distance.
       let lo0 = Infinity, lo1 = Infinity, lo2 = Infinity, hi0 = -Infinity, hi1 = -Infinity, hi2 = -Infinity;
@@ -1275,7 +1296,7 @@ export class ClothSim {
       }
       // Once a substep, on the last pass: the constraints have moved the cloth
       // by then, and friction after it holds what this sets.
-      if (this.self.active && pass === STRETCH_PASSES - 1) this.self.collide(x, prev, true);
+      if (this.self.active && pass === STRETCH_PASSES - 1) this.self.collide(x, prev, true, this.settled);
       this.solveTacks();
       this.applyFriction();
     }
@@ -1654,6 +1675,8 @@ export class ClothSim {
       const d12 = (we[12] - pe[12]) * ms, d13 = (we[13] - pe[13]) * ms, d14 = (we[14] - pe[14]) * ms;
       const moved = Math.abs(d12) + Math.abs(d13) + Math.abs(d14) + Math.abs(d0) + Math.abs(d5) + Math.abs(d10) > 1e-12;
       const mu = c.friction;
+      const lip = this.colLip[ci], gen = this.colGen[ci], colD = this.colD, colP = this.colP, colAt = this.colAt;
+      const cache = colD !== null && lip < Infinity;
       for (let ai = 0; ai < nActive; ai++) {
         const i = activeCollideIdx[ai];
         const k = 3 * i;
@@ -1672,11 +1695,23 @@ export class ClothSim {
           }
           continue;
         }
+        const slot = i * nCol + ci;
+        // Not near enough to it at the last read to have reached the margin
+        // since: it would read no contact. A pass that measures each point's
+        // clearance (updateBudget) still reads every one.
+        if (cache && !updateBudget && colAt![slot] === gen) {
+          const s3 = 3 * slot, mx = px - colP![s3], my = py - colP![s3 + 1], mz = pz - colP![s3 + 2];
+          if (colD![slot] - lip * Math.sqrt(mx * mx + my * my + mz * mz) - 1e-9 >= margin) continue;
+        }
         // Into the collider's frame (no allocation).
         const lx = e[0] * px + e[4] * py + e[8] * pz + e[12];
         const ly = e[1] * px + e[5] * py + e[9] * pz + e[13];
         const lz = e[2] * px + e[6] * py + e[10] * pz + e[14];
         const ok = colliderContactInto(c, lx, ly, lz, hitScratch);
+        if (cache) {
+          if (ok) { colD![slot] = hitScratch.d; const s3 = 3 * slot; colP![s3] = px; colP![s3 + 1] = py; colP![s3 + 2] = pz; colAt![slot] = gen; }
+          else colAt![slot] = -1;
+        }
         if (updateBudget) {
           // No answer near a body (just outside its exact bounds, say): look again next substep.
           const d = ok ? hitScratch.d : CLOTH_THICKNESS;
