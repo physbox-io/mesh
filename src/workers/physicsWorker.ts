@@ -95,7 +95,7 @@ import { jointTypes } from '../utils/headlessReport';
 import { ScriptLogRing, ScriptProblemLog, ScriptTiming, headlessCostWarning } from './scriptDiagnostics';
 import { bodyAngularVelocity, bodyPointVelocity, syncKinematics, worldToBodyFrame, type VelocityViews } from './bodyKinematics';
 import { actuatorsByJoint, clutchDrive, contactsOfBody, jointViews, raycast, readJoint, type JointInfo, type SensorNames } from './scriptSensors';
-import { buildClothWorld, type ClothWorld } from '../utils/cloth/clothWorld';
+import { buildClothWorld, clothBuildFailures, type ClothWorld } from '../utils/cloth/clothWorld';
 import { contactBody } from '../utils/contactBodies';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
@@ -4601,7 +4601,7 @@ const doBuild = (
   // The cloth, built after the model so it can read where the bodies are; a
   // rebuild that carried the scene over carries the cloth with it.
   buildCloth(!freshRun, !freshRun ? seedState?.clothState : undefined);
-  post({ type: 'CLOTH_STATUS', warnings: cloth?.warnings ?? [] });
+  post({ type: 'CLOTH_STATUS', warnings: cloth?.warnings ?? clothBuildFailures() });
 
   // Last, so nothing above can put a broken weld back together. A rebuild is
   // the one moment a break can be silently undone — the model is new, every

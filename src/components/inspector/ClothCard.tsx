@@ -9,6 +9,7 @@ import { cornerHold, holdCorner, pieceSize, resizePiece } from '../../utils/clot
 import { solveAeroAcousticVoice, solveClothSnapPulse } from '../../utils/aeroAcoustics';
 import { auditionClothSnap } from '../../utils/modalAudio';
 import { FABRICS } from './garmentFields';
+import { ClothWarnings } from './ClothWarnings';
 
 const hex = (rgba: number[]) => `#${rgba.slice(0, 3).map((v) => Math.round(Math.min(1, Math.max(0, v)) * 255).toString(16).padStart(2, '0')).join('')}`;
 const rgbaOf = (h: string, a: number) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255).concat(a);
@@ -68,6 +69,7 @@ export function ClothCard({ node }: { node: SceneNode }) {
   return (
     <div className="flex flex-col gap-2.5 p-3 bg-slate-50 dark:bg-slate-900/40 border border-slate-200/60 dark:border-slate-800 rounded-lg">
       <label className="text-[10px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wider">Cloth</label>
+      <ClothWarnings name={node.name || node.id} />
       <div className="grid grid-cols-2 gap-2">
         <label className="flex flex-col gap-1" title="The cloth: how it stretches, bends, drapes and shines">
           <span className={label}>Fabric</span>

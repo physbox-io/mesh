@@ -92,6 +92,8 @@ export interface FlexInfo {
   /** Triangles as indices local to this flex, three each. */
   elems: number[];
   rgba: number[];
+  /** Its colour is its garment's times this, and follows the garment's live; unset, `rgba` is its own. */
+  tint?: number;
   /** The fabric, for how it is drawn. */
   material?: ClothMaterialName;
   /** The piece as it is cut, flat, for a garment modelled on a form (utils/cloth/clothModel FlatPattern). */

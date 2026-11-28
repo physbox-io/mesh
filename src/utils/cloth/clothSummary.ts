@@ -5,12 +5,13 @@
  */
 
 import * as THREE from 'three';
-import type { BodyFormMeasurements } from '../../types/cloth';
+import type { BodyFormMeasurements, GarmentDraft } from '../../types/cloth';
 import type { SceneNode } from '../../types/scene';
 import type { ModelMirror } from '../../types/sceneLayer';
 import { bodyLandmarks } from './bodyForm';
 import { legPose, proportions } from './formProportions';
 import { clothModel } from './clothModel';
+import { pieceDetails, resolvedGarmentDraft, type PieceDetail } from './garmentReadBack';
 import { layoutPattern, patternSvg, type PatternLayout, type PatternPiece } from './patternSvg';
 
 const r1 = (v: number) => +v.toFixed(1);
@@ -95,6 +96,10 @@ export function bodyFormLandmarksSummary(m: BodyFormMeasurements): BodyFormLandm
 export interface ClothSummaryReport {
   pieceCount: number;
   pieces: string[];
+  /** Each piece as cut: fabric, colour, flat size, strain to lie flat. */
+  pieceDetails?: PieceDetail[];
+  /** A garment's draft as the builder reads it, every setting its kind fills in. */
+  draftResolved?: GarmentDraft;
   vertCount: number;
   triCount: number;
   bboxMm?: {
@@ -167,6 +172,8 @@ export function clothNodeSummary(
     return {
       pieceCount: pieces.length,
       pieces,
+      pieceDetails: pieceDetails(flexes),
+      ...(node.cloth.garment ? { draftResolved: resolvedGarmentDraft(node.cloth.garment) } : {}),
       vertCount,
       triCount,
       ...(bboxMm ? { bboxMm } : {}),
@@ -191,6 +198,8 @@ export function clothNodeSummary(
     return {
       pieceCount: pieces.length,
       pieces,
+      pieceDetails: pieceDetails(built.groups),
+      ...(node.cloth.garment ? { draftResolved: resolvedGarmentDraft(node.cloth.garment) } : {}),
       vertCount,
       triCount,
       ...(bboxMm ? { bboxMm } : {}),

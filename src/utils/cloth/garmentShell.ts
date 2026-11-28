@@ -15,6 +15,7 @@
  */
 
 import type { BodyFormMeasurements, GarmentDraft, GarmentPlane } from '../../types/cloth';
+import { clothSpecProblems } from './clothValidate';
 import { bodyFormGeoms, bodyFormSection, bodyLandmarks, formSkin } from './bodyForm';
 import { formLimbs, type FormLimb, type LimbName, type LimbSectionAt } from './formLimbs';
 import type { LimbPath } from './limbPath';
@@ -110,6 +111,9 @@ const HUG_GIVE = 0.4;
 const COARSEN_FROM_M2 = 4;
 
 export function garmentShell(draft: GarmentDraft, form: BodyFormMeasurements, layer = 0): GarmentShell {
+  // An unknown kind modelled to nothing, and an unknown fabric read its numbers off undefined.
+  const problems = clothSpecProblems({ garment: draft });
+  if (problems.length) throw new Error(problems.join(' '));
   const plan = garmentPlan(draft, form, layer);
   const L = bodyLandmarks(form);
   const rawLimbs = formLimbs(form);

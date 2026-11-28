@@ -25,6 +25,7 @@ import type { ModelMirror } from '../types/sceneLayer';
 import { CLOTH_MATERIALS } from './cloth/clothMesh';
 import { garmentSettings } from './cloth/garments';
 import { bodyFormLandmarksSummary, clothNodeSummary } from './cloth/clothSummary';
+import { formMeasurementsShown } from './cloth/formMeasurements';
 import { solveAeroAcousticVoice, solveClothSnapPulse } from './aeroAcoustics';
 
 /** A paint layer as its colours, each with the vertices it covers, most first. */
@@ -272,6 +273,10 @@ function replyNode(node: SceneNode, opts: ObjectReplyOptions): Record<string, un
   const world = opts.world?.get(node.id);
   const clothSummary = node.cloth ? clothNodeSummary(node, opts) : null;
   const formLandmarks = node.bodyForm ? bodyFormLandmarksSummary(node.bodyForm) : null;
+  // Every measurement as built, those left unset filled from the rest, as the Measurements card shows them.
+  const formAsBuilt = node.bodyForm
+    ? Object.fromEntries(Object.entries(formMeasurementsShown(node.bodyForm)).map(([k, v]) => [k, typeof v === 'number' ? +v.toFixed(4) : v]))
+    : null;
   return {
     ...stripMeshArrays({ ...rest, geoms: listed.map(withMeshChecks), children: [] } as SceneNode),
     ...(summarizeCurve ? {
@@ -288,6 +293,7 @@ function replyNode(node: SceneNode, opts: ObjectReplyOptions): Record<string, un
     ...(opts.full && csgScad !== undefined ? { csgScad } : {}),
     ...(clothSummary ? { clothSummary } : {}),
     ...(formLandmarks ? formLandmarks : {}),
+    ...(formAsBuilt ? { bodyFormAsBuilt: formAsBuilt } : {}),
     ...(() => {
       const acoustics = acousticsOf(node, opts.scene);
       return acoustics ? { acoustics } : {};

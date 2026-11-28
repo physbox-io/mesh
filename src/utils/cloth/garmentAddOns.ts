@@ -44,6 +44,8 @@ export interface AddOnTack {
 export interface AddOnPiece {
   name: string;
   rgba: number[];
+  /** Its colour is the garment's times this, and follows it (a pocket a shade darker); unset, its own. */
+  tint?: number;
   material?: ClothMaterialName;
   uv: number[][];
   tris: number[];
@@ -352,6 +354,7 @@ export function pocketPieces(pockets: GarmentPocket[], panels: HostPanel[], x: n
       const centre = [box.u0 + across * (box.u1 - box.u0), box.v0 + fv * (box.v1 - box.v0)];
       const piece = patch(`pocket_${panel.name}`, panel, centre, w, h, 0.1 * h, new Set(['left', 'bottom', 'right']), SEWN_OFF + 0.0006, x, spacing, out);
       piece.rgba = pk.rgba ?? [colour[0] * 0.86, colour[1] * 0.86, colour[2] * 0.86, colour[3] ?? 1];
+      if (!pk.rgba) piece.tint = 0.86;
       out.push(piece);
     }
   }
@@ -611,6 +614,7 @@ export function beltPieces(belt: GarmentBelt, loops: number, paths: V3[][], host
       const uv = [0, 1].map((c) => local.reduce((acc, l, i) => acc + hit.bary[i] * worn.uv[l][c], 0));
       const piece = patch(`beltLoop${suffix}_${j + 1}`, panel, uv, 0.013, width * 1.4, 0, new Set(['top', 'bottom']), LOOP_OFF, x, spacing, beltPiece ? [...below, beltPiece] : below);
       piece.rgba = [colour[0] * 0.78, colour[1] * 0.78, colour[2] * 0.78, colour[3] ?? 1];
+      piece.tint = 0.78;
       out.push(piece);
     }
   });

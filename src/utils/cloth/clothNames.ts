@@ -19,6 +19,9 @@ export const linePicks = (name: string, along: string) =>
 const piecePicks = (name: string, want: string) =>
   name === want || (name.length === want.length + 1 && name.startsWith(want) && /[LR]$/.test(name));
 
+/** A piece `want` picks, as pieceFabrics names one: a panel (and its L and R), or a piece sewn on by its name or the name it is numbered from (`pocket` takes pocket_frontL). */
+export const pieceNamePicks = (name: string, want: string) => piecePicks(name, want) || name.startsWith(`${want}_`);
+
 const listed = (names: Iterable<string>) => [...new Set(names)].sort().join(', ');
 
 /**
@@ -27,7 +30,7 @@ const listed = (names: Iterable<string>) => [...new Set(names)].sort().join(', '
  * panels, `panels` its panels and `pieces` every piece it was cut into, add-ons
  * included.
  */
-export function garmentNameWarnings(draft: Pick<GarmentDraft, 'trims' | 'rods' | 'elastics' | 'attached' | 'fullness' | 'pockets'>, spec: Pick<ClothSpec, 'arrange' | 'fasten'>, lines: string[], seams: string[], panels: string[], pieces: string[]): string[] {
+export function garmentNameWarnings(draft: Pick<GarmentDraft, 'trims' | 'rods' | 'elastics' | 'attached' | 'fullness' | 'pockets' | 'pieceFabrics'>, spec: Pick<ClothSpec, 'arrange' | 'fasten'>, lines: string[], seams: string[], panels: string[], pieces: string[]): string[] {
   const out: string[] = [];
   const line = (where: string, along: string | undefined) => {
     if (along === undefined || lines.some((l) => linePicks(l, along))) return;
@@ -50,6 +53,7 @@ export function garmentNameWarnings(draft: Pick<GarmentDraft, 'trims' | 'rods' |
     if (pieces.some((q) => q === name || (!exact && q.startsWith(`${name}_`)))) return;
     out.push(`${where} '${name}' names no piece (its pieces: ${listed(pieces)}).`);
   };
+  (draft.pieceFabrics ?? []).forEach((f, i) => { if (!pieces.some((q) => pieceNamePicks(q, f.piece))) out.push(`pieceFabrics[${i}].piece '${f.piece}' names no piece (its pieces: ${listed(pieces)}).`); });
   (spec.arrange ?? []).forEach((a, i) => piece(`arrange[${i}].piece`, a.piece, 'at' in a));
   (spec.fasten ?? []).forEach((f, i) => { piece(`fasten[${i}].a.piece`, f.a.piece, true); piece(`fasten[${i}].b.piece`, f.b.piece, true); });
   return out;
