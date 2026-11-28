@@ -779,7 +779,8 @@ export function clothModel(node: SceneNode, world: THREE.Matrix4, scene: SceneNo
           shellNormals.push(turn.set(spread.normal[l][0], spread.normal[l][1], spread.normal[l][2]).transformDirection(world).toArray());
           return x0.length - 1;
         });
-        piece = { ...flat, points: ids, uv: spread.uv, tris: spread.tris, outline: spread.outline };
+        // Its ease and darts as carried onto its own mesh: the flat piece's are by the flat piece's corners and points.
+        piece = { ...flat, points: ids, uv: spread.uv, tris: spread.tris, outline: spread.outline, edgeEase: spread.edgeEase, darts: spread.darts };
       }
       let particleOf = (local: number) => piece.points[local];
       let facing = [0, -1, 0];
