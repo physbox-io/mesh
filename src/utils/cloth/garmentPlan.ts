@@ -11,7 +11,7 @@
  */
 
 import type { BodyFormMeasurements, EdgeProfile, GarmentDraft, GarmentCurve, GarmentPlane, GarmentPlaneSeam } from '../../types/cloth';
-import { draftLines } from './garmentCurves';
+import { draftLines, mirrorSide } from './garmentCurves';
 import { bodyFormSection, bodyLandmarks } from './bodyForm';
 import { formLimbs, type LimbName } from './formLimbs';
 import { garmentSettings } from './garments';
@@ -313,10 +313,15 @@ function addDraftPlanes(draft: GarmentDraft, cuts: GarmentCut[], seams: GarmentS
     if (c.mirror) cuts.push({ kind: 'plane', ...mirrored(c) });
   }
   for (const sm of draft.seams ?? []) {
-    const side = (pl: GarmentPlane) => (pl.point[0] > 0 ? 'L' : 'R');
     if (!sm.mirror) { seams.push({ kind: 'plane', ...sm }); continue; }
-    seams.push({ kind: 'plane', ...sm, name: `${sm.name}${side(sm)}` });
-    const m = mirrored(sm);
-    seams.push({ kind: 'plane', ...m, name: `${sm.name}${side(m)}` });
+    // Which of the pair is the wearer's left: by where it passes, else where it
+    // is limited to, else the part it is on, else which way it leans. A plane
+    // through x = 0 was named by its point alone, both copies R.
+    const onSide = (on: GarmentPlane['on']) => { const l = on === undefined ? [] : Array.isArray(on) ? on : [on]; return l.length && l.every((t) => t.endsWith('L')) ? 1 : l.length && l.every((t) => t.endsWith('R')) ? -1 : 0; };
+    const side = mirrorSide([sm.point[0], sm.x ? sm.x[0] + sm.x[1] : 0, onSide(sm.on), sm.normal[0]]);
+    // Its own mirror image (a plane square across the centre): one seam.
+    if (!side) { seams.push({ kind: 'plane', ...sm }); continue; }
+    seams.push({ kind: 'plane', ...sm, name: `${sm.name}${side}` });
+    seams.push({ kind: 'plane', ...mirrored(sm), name: `${sm.name}${side === 'L' ? 'R' : 'L'}` });
   }
 }
