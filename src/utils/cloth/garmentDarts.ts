@@ -17,6 +17,7 @@
 import type { BodyFormMeasurements, BodyHeight, GarmentDart, GarmentPoint } from '../../types/cloth';
 import { bodyFormSection, bodyLandmarks } from './bodyForm';
 import { formLimbs } from './formLimbs';
+import { mirrorSide } from './garmentCurves';
 
 /** A place on the form: a point, and the way out from the body there, if it says (a ray out to the garment). */
 export interface FormPlace { point: number[]; facing?: number[] }
@@ -82,8 +83,10 @@ export function dartLines(darts: GarmentDart[], form: BodyFormMeasurements): Dar
     };
     if (!d.mirror) return [line];
     const m: DartLine = { ...line, apex: mirrorPlace(line.apex), ...(line.to ? { to: mirrorPlace(line.to) } : {}), ...(line.direction ? { direction: [-line.direction[0], line.direction[1], line.direction[2]] } : {}) };
-    const side = (l: DartLine) => (l.apex.point[0] > 0 ? 'L' : 'R');
-    return [{ ...line, name: `${d.name}${side(line)}` }, { ...m, name: `${d.name}${side(m)}` }];
+    // By its apex's side, else the way it runs (an apex on the centre line); its own mirror image, one dart.
+    const side = mirrorSide([line.apex.point[0], (line.to?.point[0] ?? 0) - line.apex.point[0], line.direction?.[0] ?? 0]);
+    if (!side) return [line];
+    return [{ ...line, name: `${d.name}${side}` }, { ...m, name: `${d.name}${side === 'L' ? 'R' : 'L'}` }];
   });
 }
 
