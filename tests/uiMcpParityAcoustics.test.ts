@@ -23,12 +23,26 @@ const body = (extra: Record<string, unknown> = {}, geomExtra: Record<string, unk
 } as SceneNode);
 
 const wire = (spec: Record<string, unknown>, extra: Record<string, unknown> = {}): RawNode => ({
-  id: 'wire', name: 'wire', pos: [0, 0, 0.1],
-  geoms: [{ name: 'wire_g', type: 'capsule', size: [0.001, 0.3], fromto: [0, -0.3, 0, 0, 0.3, 0] }],
+  id: 'wire', name: 'wire', pos: [0, 0, 100],
+  geoms: [{ name: 'wire_g', type: 'capsule', size: [1, 300], fromto: [0, -300, 0, 0, 300, 0] }],
   acousticString: spec, ...extra,
 } as unknown as RawNode);
 
-const clarinet = () => structuredClone(windInstrumentsPreset.nodes.find((n) => n.id === 'grenadilla_clarinet')!);
+const clarinet = () => {
+  const n = structuredClone(windInstrumentsPreset.nodes.find((x) => x.id === 'grenadilla_clarinet')!);
+  const scaleNodeToMm = (node: SceneNode): SceneNode => ({
+    ...node,
+    pos: node.pos.map((v) => v * 1000) as [number, number, number],
+    geoms: (node.geoms || []).map((g) => ({
+      ...g,
+      ...(g.pos ? { pos: g.pos.map((v) => v * 1000) as [number, number, number] } : {}),
+      ...(g.type !== 'mesh' && g.type !== 'plane' && g.size ? { size: g.size.map((v) => v * 1000) } : {}),
+      ...(g.fromto ? { fromto: g.fromto.map((v) => v * 1000) } : {}),
+    })),
+    children: (node.children || []).map(scaleNodeToMm),
+  });
+  return scaleNodeToMm(n);
+};
 
 const acousticsOf = (r: Record<string, unknown>) => r.acoustics as Record<string, any> | undefined; // eslint-disable-line @typescript-eslint/no-explicit-any
 const childOf = (r: Record<string, unknown>, id: string) => (r.children as Array<Record<string, unknown>>).find((c) => c.id === id)!;
@@ -133,14 +147,14 @@ describe('fillBodyDefaults with partial acoustic specs', () => {
   });
 
   it('still reads a null as unset', () => {
-    const node = fillBodyDefaults({ id: 'n', pos: null, deformMaterial: null, acousticString: null, geoms: [{ type: 'box', size: [0.1, 0.1, 0.1] }] } as unknown as RawNode);
+    const node = fillBodyDefaults({ id: 'n', pos: null, deformMaterial: null, acousticString: null, geoms: [{ type: 'box', size: [100, 100, 100] }] } as unknown as RawNode);
     expect(node.pos).toBeDefined();
     expect('deformMaterial' in node).toBe(false);
     expect('acousticString' in node).toBe(false);
   });
 
   it('fills a bow in a body and stamps its geom', () => {
-    const node = fillBodyDefaults({ id: 'bow', geoms: [{ type: 'capsule', size: [0.005, 0.3] }], acousticBow: { rosinFriction: 0.3 } } as unknown as RawNode);
+    const node = fillBodyDefaults({ id: 'bow', geoms: [{ type: 'capsule', size: [5, 300] }], acousticBow: { rosinFriction: 0.3 } } as unknown as RawNode);
     expect(node.geoms[0]).toMatchObject({ condim: 3, friction: [0.3, 0.004, 0.0004] });
   });
 });
@@ -176,7 +190,7 @@ describe('tuneTo', () => {
 
     const bar = fillBodyDefaults({
       id: 'bar', deformMaterial: 'hardwood', tuneTo: 'C5',
-      geoms: [{ type: 'box', size: [0.15, 0.025, 0.01] }],
+      geoms: [{ type: 'box', size: [150, 25, 10] }],
     } as unknown as RawNode);
     expect(bar.tunedPitchHz).toBeCloseTo(523.25, 1);
     const hz = estimateBodyModes(bar).fundamentalHz;
@@ -186,7 +200,7 @@ describe('tuneTo', () => {
   it('tunes a head by its tension', () => {
     const node = fillBodyDefaults({
       id: 'head', acousticMembrane: { material: 'mylar' }, tuneTo: 'D3',
-      geoms: [{ type: 'cylinder', size: [0.18, 0.002] }],
+      geoms: [{ type: 'cylinder', size: [180, 2] }],
     } as unknown as RawNode);
     expect(node.tunedPitchHz).toBeCloseTo(146.83, 1);
     expect(node.acousticMembrane!.tensionNPerM).toBeGreaterThan(0);

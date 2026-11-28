@@ -68,7 +68,7 @@ describe('upsertReferenceImage', () => {
 
 describe('readReferencePatch', () => {
   it('reads numbers given as strings, and booleans given as "false"', () => {
-    expect(readReferencePatch({ width: '0.075', opacity: '0.4', center: ['0', 0, '0.045'], overlay: 'false' }))
+    expect(readReferencePatch({ width: '75', opacity: '0.4', center: ['0', 0, '45'], overlay: 'false' }))
       .toEqual({ width: 0.075, opacity: 0.4, pos: [0, 0, 0.045], overlay: false });
   });
 

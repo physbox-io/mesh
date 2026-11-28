@@ -73,8 +73,8 @@ describe('build_scene with two bodies of one name and no ids', () => {
   it('gives them two ids before they are filled in, so their queued ops stay their own', () => {
     pendingDeclarativeOps.clear();
     const raw = [
-      { name: 'panel', geoms: [{ type: 'box', size: [0.05, 0.05, 0.005] }], cuts: [{ shape: 'cylinder', at: [0, 0, 0], diameterMm: 4 }] },
-      { name: 'panel', geoms: [{ type: 'box', size: [0.05, 0.05, 0.005] }], paint: [{ at: [0, 0, 0], rgba: [1, 0, 0] }] },
+      { name: 'panel', geoms: [{ type: 'box', size: [50, 50, 5] }], cuts: [{ shape: 'cylinder', at: [0, 0, 0], diameterMm: 4 }] },
+      { name: 'panel', geoms: [{ type: 'box', size: [50, 50, 5] }], paint: [{ at: [0, 0, 0], rgba: [1, 0, 0] }] },
     ];
     const { bodies, renamed } = withUniqueRawIds(raw as any[]);
     expect(renamed).toEqual([{ from: 'panel', to: 'panel_2' }]);

@@ -825,7 +825,7 @@ export const fillBodyDefaults = (
     : joinMat
       ? [{
           type: (bAny.type && bAny.type !== 'body') ? bAny.type : 'ellipsoid',
-          size: bAny.size !== undefined ? bAny.size : [0.006, 0.006, 0.006],
+          size: bAny.size !== undefined ? bAny.size : [6, 6, 6],
           rgba: bodyRgba ?? [...joinMat.rgba],
           ...(bAny.mass !== undefined ? { mass: bAny.mass } : { density: bAny.density !== undefined ? bAny.density : joinMat.density }),
           ...(bAny.friction !== undefined ? { friction: bAny.friction } : {}),
@@ -838,7 +838,7 @@ export const fillBodyDefaults = (
       : b.isComposite
         ? [{
             type: (bAny.type && bAny.type !== 'body') ? bAny.type : 'capsule',
-            size: bAny.size !== undefined ? bAny.size : [0.012],
+            size: bAny.size !== undefined ? bAny.size : [12],
             rgba: bodyRgba ?? [0.76, 0.56, 0.34, 1],
             ...(bAny.mass !== undefined ? { mass: bAny.mass } : {}),
             ...(bAny.density !== undefined ? { density: bAny.density } : {}),

@@ -16,8 +16,8 @@ let mj: any;
 beforeAll(async () => { mj = await load_mujoco(); }, 60_000);
 
 const scene = (): SceneNode[] => [
-  { id: 'load', name: 'load', pos: [0, 0, 0.5], joints: [{ name: 'load_slide', type: 'slide', axis: [0, 0, 1] }], geoms: [{ type: 'box', size: [0.02, 0.02, 0.02], mass: 1 }], coupleTargetId: 'effort', coupleRatio: -0.5 },
-  { id: 'effort', name: 'effort', pos: [0.2, 0, 0.5], geoms: [{ type: 'sphere', size: [0.02], mass: 0.1 }] },
+  { id: 'load', name: 'load', pos: [0, 0, 500], joints: [{ name: 'load_slide', type: 'slide', axis: [0, 0, 1] }], geoms: [{ type: 'box', size: [20, 20, 20], mass: 1 }], coupleTargetId: 'effort', coupleRatio: -0.5 },
+  { id: 'effort', name: 'effort', pos: [200, 0, 500], geoms: [{ type: 'sphere', size: [20], mass: 0.1 }] },
 ].map((b) => fillBodyDefaults(b as any));
 
 describe('couplings tie hinges and slides only', () => {

@@ -249,7 +249,7 @@ describe('Bug 5: fillBodyDefaults for joinMaterial (putty) and isComposite (cabl
   afterAll(() => { sims.forEach((s) => s.dispose()); });
 
   it('synthesizes default putty ellipsoid when joinMaterial is set and geoms is omitted', () => {
-    const putty = fillBodyDefaults({ id: 'blob1', joinMaterial: 'putty', pos: [0, 0, 0.1] });
+    const putty = fillBodyDefaults({ id: 'blob1', joinMaterial: 'putty', pos: [0, 0, 100] });
     const mat = joinMaterial('putty')!;
     expect(putty.geoms).toHaveLength(1);
     expect(putty.geoms[0].type).toBe('ellipsoid');
@@ -258,7 +258,7 @@ describe('Bug 5: fillBodyDefaults for joinMaterial (putty) and isComposite (cabl
     expect(putty.geoms[0].rgba).toEqual(mat.rgba);
     expect(isJoinBlob(putty)).toBe(true);
 
-    const glue = fillBodyDefaults({ id: 'glue1', joinMaterial: 'hotGlue', pos: [0, 0, 0.1] });
+    const glue = fillBodyDefaults({ id: 'glue1', joinMaterial: 'hotGlue', pos: [0, 0, 100] });
     const glueMat = joinMaterial('hotGlue')!;
     expect(glue.geoms[0].type).toBe('ellipsoid');
     expect(glue.geoms[0].density).toBe(glueMat.density);
@@ -269,7 +269,7 @@ describe('Bug 5: fillBodyDefaults for joinMaterial (putty) and isComposite (cabl
   it('synthesizes default cable capsule when isComposite is true and geoms is omitted', () => {
     const cable = fillBodyDefaults({
       id: 'cab1', isComposite: true, compositeType: 'cable',
-      compositeCount: '8 1 1', compositeSize: '0.8', pos: [0, 0, 1],
+      compositeCount: '8 1 1', compositeSize: '0.8', pos: [0, 0, 1000],
     });
     expect(cable.geoms).toHaveLength(1);
     expect(cable.geoms[0].type).toBe('capsule');
@@ -278,10 +278,10 @@ describe('Bug 5: fillBodyDefaults for joinMaterial (putty) and isComposite (cabl
   });
 
   it('simulates both default putty blob (attaching a rod) and default cable in MuJoCo WASM', async () => {
-    const puttyNode = fillBodyDefaults({ id: 'putty_node', joinMaterial: 'putty', pos: [0, 0, 0.2], fixed: true });
+    const puttyNode = fillBodyDefaults({ id: 'putty_node', joinMaterial: 'putty', pos: [0, 0, 200], fixed: true });
     const rodNode = fillBodyDefaults({
-      id: 'rod_node', pos: [0, 0, 0.2],
-      geoms: [{ type: 'capsule', fromto: [0, 0, 0, 0.1, 0, 0], size: [0.002], density: 1200 }],
+      id: 'rod_node', pos: [0, 0, 200],
+      geoms: [{ type: 'capsule', fromto: [0, 0, 0, 100, 0, 0], size: [2], density: 1200 }],
     });
     const puttySim = await simulate({ nodes: [puttyNode, rodNode] });
     sims.push(puttySim);
@@ -292,7 +292,7 @@ describe('Bug 5: fillBodyDefaults for joinMaterial (putty) and isComposite (cabl
 
     const cableNode = fillBodyDefaults({
       id: 'cable_node', isComposite: true, compositeType: 'cable',
-      compositeCount: '8 1 1', compositeSize: '0.8', pos: [0, 0, 1.0],
+      compositeCount: '8 1 1', compositeSize: '0.8', pos: [0, 0, 1000],
     });
     const cableSim = await simulate({ nodes: [cableNode] });
     sims.push(cableSim);

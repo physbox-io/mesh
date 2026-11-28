@@ -21,11 +21,11 @@ beforeAll(async () => { mj = await load_mujoco(); }, 60_000);
 const MGR = 0.1 * 9.81 * 0.05;
 const arm = (forceLimit?: number): SceneNode => fillBodyDefaults({
   name: 'stand', static: true,
-  geoms: [{ type: 'box', size: [0.01, 0.01, 0.01], pos: [0, 0, 0.01] }],
+  geoms: [{ type: 'box', size: [10, 10, 10], pos: [0, 0, 10] }],
   children: [{
-    name: 'arm', pos: [0, 0, 0.1],
+    name: 'arm', pos: [0, 0, 100],
     joints: [{ name: 'lift', type: 'hinge', axis: [0, 1, 0], actuator: { type: 'velocity', kv: 5, ctrlValue: 0, ...(forceLimit !== undefined ? { forceLimit } : {}) } }],
-    geoms: [{ type: 'sphere', size: [0.005], pos: [0.05, 0, 0], mass: 0.1, contype: 0, conaffinity: 0 }],
+    geoms: [{ type: 'sphere', size: [5], pos: [50, 0, 0], mass: 0.1, contype: 0, conaffinity: 0 }],
   }],
 } as never);
 

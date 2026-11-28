@@ -27,10 +27,10 @@ const outline = (n: number, m: number): number[][] => {
   return pts;
 };
 
-const gear = (id: string, n: number, x: number, extra: object = {}) => fillBodyDefaults({
-  id, name: id, pos: [x, 0, 0.1],
+const gear = (id: string, n: number, xMm: number, extra: object = {}) => fillBodyDefaults({
+  id, name: id, pos: [xMm, 0, 100],
   joints: [{ name: `${id}_hinge`, type: 'hinge', axis: [0, 0, 1], damping: 0.0005 }],
-  geoms: [{ name: `${id}_g`, type: 'extrude', polygon: outline(n, 0.002), height: 0.008, mass: n / 1000 }],
+  geoms: [{ name: `${id}_g`, type: 'extrude', polygon: outline(n, 2), height: 8, mass: n / 1000 }],
   ...extra,
 } as any) as SceneNode;
 
@@ -47,7 +47,7 @@ describe('toothed mesh gears', () => {
   it('couples a 10T and a 30T extruded pair at -3, the ratio of their teeth', () => {
     const nodes = [
       gear('gear_a', 10, 0, { joints: [{ name: 'gear_a_hinge', type: 'hinge', axis: [0, 0, 1], actuator: { type: 'velocity', kv: 0.05, ctrlValue: 3 } }] }),
-      gear('gear_b', 30, 0.0405, { euler: [0, 0, 6] }),
+      gear('gear_b', 30, 40.5, { euler: [0, 0, 6] }),
     ];
     const xml = compileToMJCF({ nodes }, -9.81, 1, 0, 0, 0);
     // Was coef 2.666679 (tip radii).

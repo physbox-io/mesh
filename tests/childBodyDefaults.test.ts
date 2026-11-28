@@ -11,8 +11,8 @@ describe('fillBodyDefaults pos', () => {
   it('stands a top-level body on the floor and sits a child at its parent', () => {
     const node = fillBodyDefaults({
       name: 'frame',
-      geoms: [{ type: 'box', size: [0.05, 0.05, 0.05] }],
-      children: [{ name: 'arm', pos: [0, 0, -0.08], geoms: [{ type: 'box', size: [0.01, 0.01, 0.01] }] }],
+      geoms: [{ type: 'box', size: [50, 50, 50] }],
+      children: [{ name: 'arm', pos: [0, 0, -80], geoms: [{ type: 'box', size: [10, 10, 10] }] }],
     });
     // The arm hangs lowest: 0.09 m under the body's origin.
     expect(node.pos[2]).toBeCloseTo(0.09, 6);
@@ -58,11 +58,11 @@ describe('fillBodyDefaults nested joint type defaults', () => {
     const parent = fillBodyDefaults({
       name: 'base',
       static: true,
-      geoms: [{ type: 'box', size: [0.05, 0.05, 0.05] }],
+      geoms: [{ type: 'box', size: [50, 50, 50] }],
       children: [{
         name: 'arm',
-        joints: [{ pos: [0, 0, 0.02] }],
-        geoms: [{ type: 'box', size: [0.02, 0.02, 0.05] }],
+        joints: [{ pos: [0, 0, 20] }],
+        geoms: [{ type: 'box', size: [20, 20, 50] }],
       }],
     });
     expect(parent.children[0].joints[0].type).toBe('hinge');
@@ -71,11 +71,11 @@ describe('fillBodyDefaults nested joint type defaults', () => {
   it('still rejects an explicit free joint on a nested child body', () => {
     expect(() => fillBodyDefaults({
       name: 'base',
-      geoms: [{ type: 'box', size: [0.05, 0.05, 0.05] }],
+      geoms: [{ type: 'box', size: [50, 50, 50] }],
       children: [{
         name: 'bad_child',
         joints: [{ type: 'free' }],
-        geoms: [{ type: 'box', size: [0.02, 0.02, 0.02] }],
+        geoms: [{ type: 'box', size: [20, 20, 20] }],
       }],
     })).toThrow(/free joint.*only allowed at the top level/i);
   });
@@ -84,11 +84,11 @@ describe('fillBodyDefaults nested joint type defaults', () => {
     const parent = fillBodyDefaults({
       name: 'rail',
       static: true,
-      geoms: [{ type: 'box', size: [0.1, 0.02, 0.02] }],
+      geoms: [{ type: 'box', size: [100, 20, 20] }],
       children: [{
         name: 'carriage',
         joints: [{ type: 'slide', axis: [1, 0, 0] }],
-        geoms: [{ type: 'box', size: [0.02, 0.02, 0.02] }],
+        geoms: [{ type: 'box', size: [20, 20, 20] }],
       }],
     });
     expect(parent.children[0].joints[0].type).toBe('slide');
@@ -96,7 +96,7 @@ describe('fillBodyDefaults nested joint type defaults', () => {
     const topHinge = fillBodyDefaults({
       name: 'door',
       joints: [{ axis: [0, 0, 1] }],
-      geoms: [{ type: 'box', size: [0.05, 0.01, 0.1] }],
+      geoms: [{ type: 'box', size: [50, 10, 100] }],
     });
     expect(topHinge.joints[0].type).toBe('hinge');
   });
@@ -247,8 +247,8 @@ describe('applyPaintStrokeToBody on coarse mesh geoms (Item 16)', () => {
 
     const res = applyPaintStrokeToBody(body.id, {
       rgba: [0.9, 0.1, 0.1],
-      radius: 0.008,
-      at: [0, 0, s], // exact center of top face, ~35 mm from the 8 corners
+      radius: 8,
+      at: [0, 0, s * 1000], // exact center of top face, ~35 mm from the 8 corners
     });
     expect(res.ok).toBe(true);
     expect(res.dabsLanded).toBe(1);

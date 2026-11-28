@@ -16,31 +16,31 @@ describe('bodies from an agent are checked before MuJoCo sees them', () => {
   });
 
   it('still takes the shapes that become meshes', () => {
-    expect(fill({ name: 'c', geoms: [{ type: 'cone', size: [0.02, 0.05] }] })).not.toThrow();
+    expect(fill({ name: 'c', geoms: [{ type: 'cone', size: [20, 50] }] })).not.toThrow();
   });
 
   it('names a coordinate that is not a number', () => {
-    expect(fill({ name: 'a', pos: [0, 0, 'x'], geoms: [{ type: 'box', size: [0.01, 0.01, 0.01] }] }))
+    expect(fill({ name: 'a', pos: [0, 0, 'x'], geoms: [{ type: 'box', size: [10, 10, 10] }] }))
       .toThrow(/Body 'a': pos\[2\] is "x", not a finite number/);
-    expect(fill({ name: 'a', pos: [0, 0, null], geoms: [{ type: 'box', size: [0.01, 0.01, 0.01] }] }))
+    expect(fill({ name: 'a', pos: [0, 0, null], geoms: [{ type: 'box', size: [10, 10, 10] }] }))
       .toThrow(/pos\[2\] is null/);
-    expect(fill({ name: 'a', pos: [0, 0], geoms: [{ type: 'box', size: [0.01, 0.01, 0.01] }] }))
+    expect(fill({ name: 'a', pos: [0, 0], geoms: [{ type: 'box', size: [10, 10, 10] }] }))
       .toThrow(/pos has 2 numbers, not 3/);
-    expect(fill({ name: 'a', geoms: [{ type: 'box', size: [0.01, NaN, 0.01] }] }))
+    expect(fill({ name: 'a', geoms: [{ type: 'box', size: [10, NaN, 10] }] }))
       .toThrow(/Geom "a_geom_0" on body "a": size\[1\] is NaN/);
-    expect(fill({ name: 'a', geoms: [{ type: 'box', size: [0.01, 0.01, 0.01] }], joints: [{ type: 'hinge', axis: [0, 'y', 0] }] }))
+    expect(fill({ name: 'a', geoms: [{ type: 'box', size: [10, 10, 10] }], joints: [{ type: 'hinge', axis: [0, 'y', 0] }] }))
       .toThrow(/joint 'a_joint_0': axis\[1\]/);
   });
 
   it('refuses a moving body too small to weigh, in millimetres', () => {
-    expect(fill({ name: 'grain', geoms: [{ type: 'sphere', size: [0.00005] }] }))
+    expect(fill({ name: 'grain', geoms: [{ type: 'sphere', size: [0.05] }] }))
       .toThrow(/Body 'grain' is 0\.1 mm across at most, too small/);
   });
 
   it('lets a small body that does not move, or a 2 mm one that does, through', () => {
-    expect(fill({ name: 'pin', static: true, geoms: [{ type: 'sphere', size: [0.0001] }] })).not.toThrow();
-    expect(fill({ name: 'bead', geoms: [{ type: 'sphere', size: [0.001] }] })).not.toThrow();
-    expect(fill({ name: 'fleck', geoms: [{ type: 'sphere', size: [0.0001] }] })).not.toThrow();
+    expect(fill({ name: 'pin', static: true, geoms: [{ type: 'sphere', size: [0.1] }] })).not.toThrow();
+    expect(fill({ name: 'bead', geoms: [{ type: 'sphere', size: [1] }] })).not.toThrow();
+    expect(fill({ name: 'fleck', geoms: [{ type: 'sphere', size: [0.1] }] })).not.toThrow();
   });
 
   it('compiles a 0.2 mm moving part, which lands and rests, and leaves bigger scenes alone', async () => {

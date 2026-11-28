@@ -63,13 +63,13 @@ describe('geomSizeProblem', () => {
 
 describe('the MCP boundary', () => {
   it('build_scene / add_object refuse a negative box', () => {
-    expect(() => fillBodyDefaults({ name: 'crate', geoms: [{ type: 'box', size: [-0.05, 0.05, 0.05] }] } as never))
+    expect(() => fillBodyDefaults({ name: 'crate', geoms: [{ type: 'box', size: [-50, 50, 50] }] } as never))
       .toThrow(/crate_geom_0.*on body "crate".*size\[0\] is -0\.05/);
   });
 
   it('update_object refuses a text size', () => {
-    const target = fillBodyDefaults({ name: 'crate', geoms: [{ name: 'crate_g', type: 'box', size: [0.05, 0.05, 0.05] }] } as never);
-    expect(() => resolveUpdatedGeoms(target, [{ name: 'crate_g', size: ['big', 0.05, 0.05] } as never]))
+    const target = fillBodyDefaults({ name: 'crate', geoms: [{ name: 'crate_g', type: 'box', size: [50, 50, 50] }] } as never);
+    expect(() => resolveUpdatedGeoms(target, [{ name: 'crate_g', size: ['big', 50, 50] } as never]))
       .toThrow(/size\[0\] is "big"/);
   });
 });

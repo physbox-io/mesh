@@ -119,9 +119,9 @@ describe('Dogfooding Wave 1 & Wave 2 regression tests', () => {
       {
         id: 'flex_btn',
         name: 'Flexure Button',
-        pos: [0, 0, 0.04],
-        joints: [{ name: 'flex_slide', type: 'slide', axis: [0, 0, 1], limited: true, range: [-0.01, 0.01] }],
-        geoms: [{ name: 'cap', type: 'box', size: [0.01, 0.01, 0.004] }],
+        pos: [0, 0, 40],
+        joints: [{ name: 'flex_slide', type: 'slide', axis: [0, 0, 1], limited: true, range: [-10, 10] }],
+        geoms: [{ name: 'cap', type: 'box', size: [10, 10, 4] }],
         flexure: { kind: 'serpentine', filament: 'petg', thicknessMm: 1.2, lengthMm: 20, widthMm: 8, folds: 3 },
       },
       false,

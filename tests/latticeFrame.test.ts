@@ -60,7 +60,7 @@ describe('creating a lattice body with ops', () => {
 
   it('does the same for a declarative lattice in build_scene', () => {
     const node = fillBodyDefaults({
-      name: 'arm', pos: [0.03, 0, 0], joints: [],
+      name: 'arm', pos: [30, 0, 0], joints: [],
       lattice: { sizeMm: 20, ops: ARM_OPS },
     } as unknown as Parameters<typeof fillBodyDefaults>[0]);
     expect(node.pos[0]).toBeCloseTo(0.1, 6);

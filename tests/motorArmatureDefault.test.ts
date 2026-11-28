@@ -28,11 +28,11 @@ beforeAll(async () => { mj = await load_mujoco(); }, 60_000);
 /** A 5 g bar on a hinge, driven at 1 rad/s with kv 2. */
 const motoredBar = (forceLimit?: number): SceneNode => fillBodyDefaults({
   name: 'stand', static: true,
-  geoms: [{ type: 'box', size: [0.01, 0.01, 0.01], pos: [0, 0, 0.01] }],
+  geoms: [{ type: 'box', size: [10, 10, 10], pos: [0, 0, 10] }],
   children: [{
-    name: 'bar', pos: [0, 0, 0.05],
+    name: 'bar', pos: [0, 0, 50],
     joints: [{ name: 'spin', type: 'hinge', axis: [0, 0, 1], actuator: { type: 'velocity', kv: 2, ctrlValue: 1, ...(forceLimit !== undefined ? { forceLimit } : {}) } }],
-    geoms: [{ type: 'box', size: [0.02, 0.002, 0.002], mass: 0.005, contype: 0, conaffinity: 0 }],
+    geoms: [{ type: 'box', size: [20, 2, 2], mass: 0.005, contype: 0, conaffinity: 0 }],
   }],
 } as never);
 
