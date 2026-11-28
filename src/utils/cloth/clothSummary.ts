@@ -11,6 +11,8 @@ import type { ModelMirror } from '../../types/sceneLayer';
 import { bodyLandmarks } from './bodyForm';
 import { legPose, proportions } from './formProportions';
 import { clothModel } from './clothModel';
+import { clothFrame } from './clothFrame';
+import { bodyLocalMatrix, walkBodiesWorld } from '../bodyWorld';
 import { layoutPattern, patternSvg, type PatternLayout, type PatternPiece } from './patternSvg';
 
 const r1 = (v: number) => +v.toFixed(1);
@@ -126,10 +128,16 @@ function bboxFromCoords(pts: Iterable<[number, number, number]>): ClothSummaryRe
   };
 }
 
-function nodeWorldMatrix(node: SceneNode): THREE.Matrix4 {
-  const pos = new THREE.Vector3(...(node.pos ?? [0, 0, 0]));
-  const [w, x, y, z] = node.quat ?? [1, 0, 0, 0];
-  return new THREE.Matrix4().compose(pos, new THREE.Quaternion(x, y, z, w), new THREE.Vector3(1, 1, 1));
+/**
+ * Where the cloth is modelled, as the physics worker models it (clothWorld):
+ * the node's world transform (its parents', and its euler as well as quat),
+ * and a garment worn wherever its form stands (clothFrame). Built from its
+ * own pos and quat alone, a garment's box was wherever its own pos said.
+ */
+function nodeWorldMatrix(node: SceneNode, scene: SceneNode[]): THREE.Matrix4 {
+  let found: THREE.Matrix4 | null = null;
+  walkBodiesWorld(scene, (n, w) => { if (!found && n.id === node.id) found = w; });
+  return clothFrame(scene, node, found ?? bodyLocalMatrix(node)).clone();
 }
 
 /** Computes a concise cloth/garment summary for `physics_get_object`. */
@@ -176,7 +184,7 @@ export function clothNodeSummary(
   // Fallback when physics model flexes aren't populated yet (e.g. headless/unit calls):
   // build the cloth model directly from the scene graph.
   try {
-    const built = clothModel(node, nodeWorldMatrix(node), opts?.scene ?? [node]);
+    const built = clothModel(node, nodeWorldMatrix(node, opts?.scene ?? [node]), opts?.scene ?? [node]);
     const pieces = built.groups.map((g) => {
       const sep = g.name.lastIndexOf('__');
       return sep > 0 ? g.name.slice(sep + 2) : g.name;
@@ -268,7 +276,7 @@ export function exportClothPatternUnfold(
     }
 
     try {
-      const built = clothModel(node, nodeWorldMatrix(node), allSceneNodes);
+      const built = clothModel(node, nodeWorldMatrix(node, allSceneNodes), allSceneNodes);
       if (built.warnings?.length) {
         warnings.push(...built.warnings.map((w) => `${bodyName}: ${w}`));
       }
