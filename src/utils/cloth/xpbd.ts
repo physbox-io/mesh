@@ -1696,11 +1696,11 @@ export class ClothSim {
   }
 
   /** The render groups, with where each starts in the render buffer. */
-  renderLayout(): { name: string; vertadr: number; vertnum: number; elems: number[]; rgba: number[]; material: ClothMaterialName; flat?: FlatPattern; trims?: ClothTrim[]; pattern?: ClothPatternPrint }[] {
+  renderLayout(): { name: string; vertadr: number; vertnum: number; elems: number[]; rgba: number[]; tint?: number; material: ClothMaterialName; flat?: FlatPattern; trims?: ClothTrim[]; pattern?: ClothPatternPrint }[] {
     const out: ReturnType<ClothSim['renderLayout']> = [];
     let adr = 0;
     for (const { model } of this.pieces) for (const g of model.groups) {
-      out.push({ name: g.name, vertadr: adr, vertnum: g.particles.length, elems: g.tris.slice(), rgba: g.rgba, material: g.material, flat: g.flat, trims: g.trims, pattern: g.pattern });
+      out.push({ name: g.name, vertadr: adr, vertnum: g.particles.length, elems: g.tris.slice(), rgba: g.rgba, ...(g.tint !== undefined ? { tint: g.tint } : {}), material: g.material, flat: g.flat, trims: g.trims, pattern: g.pattern });
       adr += g.particles.length;
     }
     return out;

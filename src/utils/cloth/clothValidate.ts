@@ -80,6 +80,7 @@ function checkDraft(out: Problems, g: Record<string, unknown>, at: string): void
   list(out, `${at}.edges`, g.edges, (e, w) => { oneOf(out, `${w}.along`, e.along, EDGE_ALONG); oneOf(out, `${w}.side`, e.side, ['front', 'back']); });
   list(out, `${at}.curves`, g.curves, (c, w) => oneOf(out, `${w}.kind`, c.kind, CURVE_KINDS));
   list(out, `${at}.attached`, g.attached, (a, w) => material(out, w, a.material));
+  list(out, `${at}.pieceFabrics`, g.pieceFabrics, (f, w) => { material(out, w, f.material); if (typeof f.piece !== 'string' || !f.piece) out.push(`${w}.piece must name a piece (a panel, or a piece sewn on).`); });
   list(out, `${at}.pockets`, g.pockets, () => {});
   list(out, `${at}.elastics`, g.elastics, () => {});
   list(out, `${at}.sculpt`, g.sculpt, () => {});

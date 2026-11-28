@@ -7,6 +7,7 @@
 
 import type { BodyFormMeasurements, GarmentDraft, GarmentKind } from '../../types/cloth';
 import type { SceneNode } from '../../types/scene';
+import { pieceNamePicks } from './clothNames';
 
 type OptionalGarmentFields = 'collar' | 'lapels' | 'top' | 'legs' | 'over' | 'from' | 'to' | 'cap' | 'gores' | 'opening' | 'trims' | 'waistEase' | 'elastics' | 'pockets' | 'beltLoops' | 'belt' | 'pattern' | 'cuts' | 'seams' | 'rods' | 'darts' | 'fullness' | 'edges' | 'sculpt' | 'curves' | 'attached' | 'pressed' | 'sleeveL' | 'sleeveR';
 
@@ -58,4 +59,10 @@ export function garmentForm(draft: GarmentDraft, nodes: SceneNode[]): BodyFormMe
     return undefined;
   };
   return find(nodes)?.bodyForm;
+}
+
+/** The colour a piece of a garment was given of its own (pieceFabrics, last first; an attachment's), or undefined when it takes the garment's. */
+export function garmentPieceRgba(draft: GarmentDraft, piece: string): number[] | undefined {
+  const fab = [...(draft.pieceFabrics ?? [])].reverse().find((f) => f.rgba && pieceNamePicks(piece, f.piece));
+  return fab?.rgba ?? draft.attached?.find((a) => a.name === piece)?.rgba;
 }

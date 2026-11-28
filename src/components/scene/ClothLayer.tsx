@@ -17,7 +17,7 @@ import type { ClothMaterialName } from '../../types/cloth';
 import type { DataMirror, FrameFlagWindow, ModelMirror } from '../../types/sceneLayer';
 import type { FlexInfo } from '../../workers/physicsWorkerProtocol';
 import { CLOTH_MATERIALS } from '../../utils/cloth/clothMesh';
-import { garmentSettings } from '../../utils/cloth/garments';
+import { garmentPieceRgba, garmentSettings } from '../../utils/cloth/garments';
 import { acquirePrintTexture } from './clothPrintTexture';
 import { useClothSculpt } from './useClothSculpt';
 import { useClothGrab } from './useClothGrab';
@@ -66,10 +66,12 @@ function clothNodes(
 /** Live visual rgba from `node.cloth` so colour edits never require a worker rebuild. */
 function livePieceRgba(node: SceneNode | undefined, flex: FlexInfo, pieceName: string): number[] {
   if (node?.cloth?.garment) {
-    const att = node.cloth.garment.attached?.find((a) => a.name === pieceName);
-    if (att?.rgba) return att.rgba;
-    const c = garmentSettings(node.cloth.garment).rgba;
-    return pieceName.startsWith('back') ? [c[0] * 0.85, c[1] * 0.85, c[2] * 0.85, c[3] ?? 1] : c;
+    // A piece's own colour (pieceFabrics, an attachment's, a pocket's), or the garment's shaded as it was built (a back, a pocket).
+    const own = garmentPieceRgba(node.cloth.garment, pieceName);
+    if (own) return own;
+    if (flex.tint === undefined) return flex.rgba;
+    const c = garmentSettings(node.cloth.garment).rgba, k = flex.tint;
+    return [c[0] * k, c[1] * k, c[2] * k, c[3] ?? 1];
   }
   if (node?.cloth?.pieces?.length) {
     return node.cloth.pieces.find((p) => p.name === pieceName)?.rgba ?? flex.rgba;

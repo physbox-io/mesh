@@ -25,6 +25,8 @@ type Data = any;
 
 const modelCache = new Map<string, ClothModel>();
 
+const tinted = (c: number[], k: number) => [c[0] * k, c[1] * k, c[2] * k, c[3] ?? 1];
+
 /** The cloths the last build left out, and why: reported even when none was built. */
 let lastFailures: string[] = [];
 export const clothBuildFailures = (): string[] => lastFailures;
@@ -179,7 +181,7 @@ export function buildClothWorld(
           previous.models[i].groups.map((g) => {
             const pName = g.name.slice((node.name || node.id).length + 2);
             const pc = node.cloth?.pieces?.find((q) => q.name === pName);
-            const rgba = pc ? (pc.rgba ?? [0.25, 0.5, 0.85, 1]) : (node.cloth?.garment?.rgba ?? g.rgba);
+            const rgba = pc ? (pc.rgba ?? [0.25, 0.5, 0.85, 1]) : (node.cloth?.garment && g.tint !== undefined ? tinted(garmentSettings(node.cloth.garment).rgba, g.tint) : g.rgba);
             const pat = pc ? pc.pattern : g.pattern;
             return [rgba, pat, g.trims?.map((t) => t.rgba)];
           }),
@@ -203,7 +205,8 @@ export function buildClothWorld(
         const gRgba = garmentSettings(node.cloth.garment).rgba ?? [0.28, 0.36, 0.52, 1];
         m = {
           ...previous.models[i],
-          groups: previous.models[i].groups.map((g) => ({ ...g, rgba: gRgba })),
+          // The pieces that take the garment's colour take the new one, shaded as they were; the rest keep their own.
+          groups: previous.models[i].groups.map((g) => (g.tint !== undefined ? { ...g, rgba: tinted(gRgba, g.tint) } : g)),
         };
       }
     }
