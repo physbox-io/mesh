@@ -166,6 +166,12 @@ export interface BuiltResult extends Partial<SimBuffers> {
   jnt_qposadr?: number[]; jnt_dofadr?: number[];
   idMaps?: IdMaps;
   flexes?: FlexInfo[];
+  /**
+   * Which cloth layout `flexes` is (the same number while the cloth's models
+   * are the same). Left out of a reply when the build said it holds it
+   * already (BUILD's haveClothLayout); the client fills `flexes` back in.
+   */
+  clothLayoutId?: number;
   /** Cloth stitches as pairs of flexvert_xpos indices, drawn as one point. */
   clothStitches?: number[];
   /** Initial/carried XPBD cloth state snapshot after build. */
@@ -301,6 +307,8 @@ export type MainToWorkerMessage =
       dropMeshes?: string[];
       /** Cloth models made on the main thread's pool (clothModelClient), by clothInputs' `exact` key: each sent once per worker. */
       clothModels?: [string, ClothModel][];
+      /** The cloth layout (BuiltResult.clothLayoutId) the client holds from this worker's last build: not sent again if unchanged. */
+      haveClothLayout?: number;
       /**
        * Do not step the new model until RESUME: the main thread is still
        * drawing the old one, and anything simulated before it swaps is

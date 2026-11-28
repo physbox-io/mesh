@@ -294,6 +294,8 @@ export class PhysicsWorkerClient {
   private worker: Worker;
   /** Which cloth models (by clothInputs' `exact` key) this worker has been given, oldest first. */
   private clothModelsSent = new Set<string>();
+  /** The cloth layout this worker last sent (BuiltResult.clothLayoutId), to be given back when a build leaves it out as unchanged. */
+  private clothLayout: { id: number; flexes: NonNullable<BuiltResult['flexes']> } | null = null;
   /** When the worker last said anything, or was handed work while idle. */
   private lastHeardAt = Date.now();
   private watchdog: ReturnType<typeof setInterval>;
@@ -345,6 +347,11 @@ export class PhysicsWorkerClient {
           // sim time is the new model's, not the last frame of the old one.
           if (msg.ok && typeof msg.time === 'number') noteWorkerFrame(msg.time);
           const pending = this.pendingBuilds.get(msg.id);
+          // The same cloth layout as the last: the same objects again, so nothing drawn from them is rebuilt.
+          if (msg.ok && msg.clothLayoutId !== undefined) {
+            if (msg.flexes) this.clothLayout = { id: msg.clothLayoutId, flexes: msg.flexes };
+            else if (this.clothLayout?.id === msg.clothLayoutId) msg.flexes = this.clothLayout.flexes;
+          }
           if (pending) {
             this.pendingBuilds.delete(msg.id);
             pending.resolve(msg);
@@ -515,7 +522,7 @@ export class PhysicsWorkerClient {
       this.noteRequest();
       this.pendingBuilds.set(id, { resolve, reject });
       this.worker.postMessage(
-        { type: 'BUILD', id, xml, sceneGraph: stripped, preserveState, seedState, brokenConstraints, meshFiles: add, dropMeshes: drop, holdForInstall, ...(clothModels.length ? { clothModels } : {}) },
+        { type: 'BUILD', id, xml, sceneGraph: stripped, preserveState, seedState, brokenConstraints, meshFiles: add, dropMeshes: drop, holdForInstall, ...(clothModels.length ? { clothModels } : {}), ...(this.clothLayout ? { haveClothLayout: this.clothLayout.id } : {}) },
         add.map((f) => f.bytes.buffer as ArrayBuffer),
       );
       if (this.soundEnabled) {

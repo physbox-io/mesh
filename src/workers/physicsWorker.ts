@@ -201,6 +201,20 @@ const isSharedSupported = typeof SharedArrayBuffer !== 'undefined';
  */
 let cloth: ClothWorld | null = null;
 
+/**
+ * Which cloth layout the last build made: a new number whenever the cloth's
+ * models are not the very ones of the build before (a carried build reuses
+ * them), so the client can be spared a layout it holds already.
+ */
+let clothLayoutId = 0;
+let clothLayoutModels: ClothWorld['models'] | null = null;
+const noteClothLayout = (): number => {
+  const models = cloth?.models ?? [];
+  const same = clothLayoutModels !== null && clothLayoutModels.length === models.length && models.every((m, i) => m === clothLayoutModels![i]);
+  if (!same) { clothLayoutId++; clothLayoutModels = models; }
+  return clothLayoutId;
+};
+
 /** Builds the scene's cloth (utils/cloth/clothWorld); `carry` keeps it where it is if it is the same cloth. */
 const buildCloth = (carry: boolean, seedClothState?: ClothStateSnapshot) => {
   cloth = model && data ? buildClothWorld(mujoco, model, data, sceneGraph, cloth, carry, seedClothState) : null;
@@ -4676,6 +4690,7 @@ const doBuild = (
     jnt_dofadr: Array.from(newModel.jnt_dofadr as ArrayLike<number>),
     idMaps: buildIdMaps(),
     flexes: cloth?.sim?.renderLayout() ?? [],
+    clothLayoutId: noteClothLayout(),
     clothStitches: [],
     ...(cloth ? { clothState: cloth.sim.state() } : {}),
     isShared: isSharedSupported,
@@ -5147,8 +5162,10 @@ const handleMessage = async (evt: MessageEvent) => {
             cachedHydroByNodeId = new Map(msg.hydroModels.map((h: HydroBodyModel) => [h.nodeId, h]));
           }
           const result = doBuild(msg.xml, msg.sceneGraph, msg.preserveState, msg.seedState, msg.brokenConstraints);
+          // The cloth layout, only if the client does not hold it already (a 2.4 MB clone on urban_collection every build).
+          const layoutHeld = result.clothLayoutId === msg.haveClothLayout;
           if (msg.holdForInstall) holdUntil = performance.now() + HOLD_FOR_INSTALL_MS;
-          post({ type: 'BUILT', id: msg.id, ok: true, ...result });
+          post({ type: 'BUILT', id: msg.id, ok: true, ...result, ...(layoutHeld ? { flexes: undefined } : {}) });
           // A build may have cleared problems (a fresh run, a changed script).
           postScriptStatus(true);
           if (isPlaying && isSharedSupported) {
